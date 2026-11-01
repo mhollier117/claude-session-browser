@@ -49,7 +49,7 @@ logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 # ----- Version & Update ---------------------------------------------------- #
 VERSION = "1.6.1"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
-UPDATE_URL = "https://raw.githubusercontent.com/juppeee/claude-session-browser/main/version.json"
+UPDATE_URL = "https://raw.githubusercontent.com/mhollier117/claude-session-browser/main/version.json"
 
 
 def _vtuple(v):
@@ -4787,7 +4787,7 @@ class Api:
         except Exception:
             return {"ok": False, "error": t("Kein Internet / Repo nicht erreichbar.")}
         page = data.get("url") or \
-            "https://github.com/juppeee/claude-session-browser/releases/latest"
+            "https://github.com/mhollier117/claude-session-browser/releases/latest"
         installer_url = data.get("installer_url") or ""
         exe_url = data.get("exe_url") or ""
 
@@ -7219,7 +7219,7 @@ function renderSettings(){
       <div class="row2">
         <div><div class="lbl">Claude Session Browser</div>
           <div class="desc">Diese App – Quelltext und Releases auf GitHub.</div></div>
-        <button class="btn" onclick="api.open_url('https://github.com/juppeee/claude-session-browser')">Öffnen</button>
+        <button class="btn" onclick="api.open_url('https://github.com/mhollier117/claude-session-browser')">Öffnen</button>
       </div>
       <div class="row2">
         <div><div class="lbl">Clawdmeter</div>
