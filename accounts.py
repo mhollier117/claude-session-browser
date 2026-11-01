@@ -152,6 +152,8 @@ class DpapiCodec:
 
 
 def default_codec():
+    # Elsewhere the store is plain text with 0600 files, the same protection
+    # Claude Code gives its own .credentials.json there.
     return DpapiCodec() if sys.platform == "win32" else PlainCodec()
 
 
@@ -227,9 +229,14 @@ def _read_json(path: Path):
 def _atomic_write(path: Path, data: bytes) -> None:
     """Write via temp file + rename. Retries briefly because Windows refuses
     the rename while another program has the file open."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Owner-only from the start (0700 folders, 0600 files). On Windows these
+    # modes are mostly ignored; there the user-profile ACLs plus DPAPI protect
+    # the store. On other systems they're what keeps sign-ins private.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_bytes(data)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     try:
         for attempt in range(20):
             try:
@@ -258,7 +265,7 @@ class _FileLock:
         self.timeout = timeout
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         start = time.time()
         while True:
             try:

@@ -41,3 +41,6 @@ vault/
 # Local logs and debug dumps
 *.log
 debug/
+
+# Local Python environment
+.venv/
