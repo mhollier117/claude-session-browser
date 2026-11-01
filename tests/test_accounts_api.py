@@ -69,3 +69,30 @@ def test_tray_submenu_lists_accounts_and_switches(api):
     assert switched == [UA]
     menu = pystray.Menu(lambda: iter(tray._account_items()))
     assert len(list(menu.items)) == 2
+
+
+def test_limit_card_falls_back_to_accounts_for_plans_without_5h(api, env):
+    """Ultra (formerly Max 20x) never sends 5-hour headers; the "Your limit"
+    card must use the account usage and say there's no 5-hour limit."""
+    a, _ = api
+    mgr, http, clock, paths = env
+    http.usage[UB] = {"five_hour": None,
+                      "seven_day": {"utilization": 12.0, "resets_at": "2027-01-20T08:00:00Z"}}
+    mgr._update_meta(UB, plan="Ultra")
+    mgr.poll(UB)
+    a._usage_meta = None
+    a._LIMIT_HEADER_TRUST_S = 10 ** 12          # fake clock is far in the future
+    st = a.limit_state()
+    assert st["known"] and st["no_five"] is True and st["wpct"] == 12 and st["plan"] == "Ultra"
+
+
+def test_limit_card_shows_both_for_plans_with_5h(api, env):
+    a, _ = api
+    mgr, http, clock, paths = env
+    http.usage[UB] = {"five_hour": {"utilization": 30.0, "resets_at": "2027-01-15T08:00:00Z"},
+                      "seven_day": {"utilization": 50.0, "resets_at": "2027-01-20T08:00:00Z"}}
+    mgr.poll(UB)
+    a._usage_meta = None
+    a._LIMIT_HEADER_TRUST_S = 10 ** 12
+    st = a.limit_state()
+    assert st["no_five"] is False and st["pct"] == 30 and st["wpct"] == 50

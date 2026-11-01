@@ -828,7 +828,10 @@ TRANSLATIONS = {
         "Noch keine Daten": "No data yet",
         "Wechseln": "Switch",
         "kein Fenster aktiv": "no window running",
-        "kein 5-Stunden-Limit bei diesem Konto": "no 5-hour limit on this account",
+        "{plan}-Tarif: nur Wochenlimit, kein 5-Stunden-Limit":
+            "{plan} plan: weekly limit only, no 5-hour limit",
+        "Nur Wochenlimit – dieses Konto hat kein 5-Stunden-Limit":
+            "Weekly limit only – this account has no 5-hour limit",
         "Wechsle…": "Switching…",
         "Umbenennen": "Rename",
         "Wirklich entfernen?": "Really remove?",

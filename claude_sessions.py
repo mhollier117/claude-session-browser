@@ -4234,6 +4234,8 @@ class Api:
         def _go():
             res = self._accounts_mgr().swap_to(str(uuid))
             if res.get("changed"):
+                # Die letzte Header-Messung gehoert zum alten Konto.
+                self._usage_meta = None
                 # Neue Zahlen fuer Anzeige und Clawdmeter nicht erst in einer
                 # Minute: Usage-Kick sofort, Geraet beim naechsten Takt.
                 self._usage_kick_at = 0
@@ -4418,6 +4420,26 @@ class Api:
                     "hit": pct >= 100,
                     "wpct": int(meta.get("wpct") or 0),
                     "wreset_at": wreset if wreset > now else 0,
+                    "known": True, "now": now}
+
+        # Keine Header-Messung - bei Tarifen ohne 5-Stunden-Limit (Ultra, frueher
+        # Max 20x) gibt es die nie. Dann zaehlt der Stand des aktiven Kontos
+        # aus accounts.py (/api/oauth/usage); no_five sagt der Oberflaeche,
+        # dass nur das Wochenlimit existiert.
+        try:
+            live = next((a for a in self._accounts_mgr().accounts() if a["live"]), None)
+        except Exception:
+            live = None
+        u = (live or {}).get("usage") or {}
+        if u and (live.get("usage_age_s") or 1e9) < self._LIMIT_HEADER_TRUST_S:
+            five = u.get("s")
+            reset_at = float(u.get("s_reset_at") or 0)
+            wreset = float(u.get("w_reset_at") or 0)
+            return {"pct": int(five or 0), "reset_at": reset_at if reset_at > now else 0,
+                    "hit": (five or 0) >= 100,
+                    "wpct": int(u.get("w") or 0),
+                    "wreset_at": wreset if wreset > now else 0,
+                    "no_five": five is None, "plan": live.get("plan") or "",
                     "known": True, "now": now}
 
         # Nichts Frisches da. Selbst eine holen - sonst haengt die Anzeige
@@ -5479,6 +5501,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .lcard .sub{font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums}
   .lcard.hot{border-color:rgba(255,107,107,.38)}
   .lcard.full .sub{color:#ff9a9a}
+  .limitbox .lcard.wide{grid-column:1/-1}
+  .limitbox .lnote{grid-column:1/-1; display:flex; align-items:center; gap:7px;
+    font-size:12.5px; color:var(--muted); margin-top:-2px}
+  .limitbox .lnote .ci{flex:none; color:var(--accent)}
+  .limitbox .lnote .ci svg{width:14px; height:14px; display:block}
   .limitbox .lempty{grid-column:1/-1; padding:10px 13px; border-radius:10px;
     background:var(--bg); border:1px solid var(--border); font-size:12.5px}
   .warnnote{display:flex; align-items:flex-start; gap:7px; margin-top:6px;
@@ -7436,6 +7463,19 @@ function limitCard(pct, resetAt, tag, voll, ohneReset){
     + `<div class="bar"><i style="width:${Math.max(0,Math.min(100,pct))}%"></i></div>`
     + `<div class="sub">${esc(sub)}</div></div>`;
 }
+// Kennzeichnung fuer Konten ohne 5-Stunden-Limit (z. B. Ultra, frueher
+// Max 20x). Haengt im Kachel-Raster und nimmt die ganze Breite ein.
+// Die Wochen-Kachel allein ueber die volle Breite (ohne .wide bliebe sie eine
+// Spalte schmal, weil der Hinweis darunter das Raster aufspannt).
+function nurWocheKachel(pct, resetAt){
+  return limitCard(pct, resetAt, t('Woche'), pct >= 100).replace('class="lcard', 'class="lcard wide');
+}
+function nurWocheHinweis(plan){
+  const text = plan
+    ? t('{plan}-Tarif: nur Wochenlimit, kein 5-Stunden-Limit', {plan: plan})
+    : t('Nur Wochenlimit – dieses Konto hat kein 5-Stunden-Limit');
+  return `<div class="lnote">${ic('info')}<span>${esc(text)}</span></div>`;
+}
 function paintLimit(){
   const box = document.getElementById('limitbox');
   if(!box) return;
@@ -7447,6 +7487,11 @@ function paintLimit(){
     return;
   }
   if(d.reset_at && d.reset_at*1000 <= Date.now()){ refreshLimit(); return; }
+  if(d.no_five){
+    // Tarif ohne 5-Stunden-Limit (Ultra): nur die Woche, klar gekennzeichnet.
+    box.innerHTML = nurWocheKachel(d.wpct, d.wreset_at) + nurWocheHinweis(d.plan);
+    return;
+  }
   let html = limitCard(d.hit ? 100 : d.pct, d.reset_at, t('5 Stunden'), d.hit);
   // Wochenwert nur wenn er wirklich vorliegt - ohne Clawdmeter-Abfrage
   // steht er auf 0 und eine leere Kachel waere irrefuehrend.
@@ -7645,6 +7690,9 @@ function renderClawd(){
     </div>`;
   translateDom(box);
   refreshClawd();
+  // Sofort holen statt bis zu 20 s "Noch keine Auslastungsdaten" zu zeigen:
+  // der Takt-Abruf greift nur, wenn die Kachel schon da ist.
+  refreshLimit();
   if(on) loadClawdDevices(false);
 }
 async function refreshClawd(){
@@ -7752,15 +7800,15 @@ function accountCard(a){
   const meta = [a.email, a.plan].filter(Boolean).map(esc).join(' · ');
   let tiles = '';
   if(u && !a.needs_relogin){
-    // s === null: das Konto hat gar kein 5-Stunden-Limit (manche Tarife, z. B.
-    // Max 20x, melden nur Wochenlimits). Dann eine stille Kachel statt "0 %".
-    const fuenf = (u.s === null || u.s === undefined)
-      ? '<div class="lcard"><div class="top"><span class="num">–</span>'
-        + `<span class="tag">${esc(t('5 Stunden'))}</span></div><div class="bar"><i style="width:0"></i></div>`
-        + `<div class="sub">${esc(t('kein 5-Stunden-Limit bei diesem Konto'))}</div></div>`
-      : limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
-                  u.s === 0 ? t('kein Fenster aktiv') : '');
-    tiles = fuenf + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
+    if(u.s === null || u.s === undefined){
+      // Kein 5-Stunden-Limit (Ultra, frueher Max 20x): nur die Woche zeigen,
+      // klar gekennzeichnet - eine leere 5-Stunden-Kachel waere irrefuehrend.
+      tiles = nurWocheKachel(u.w, u.w_reset_at) + nurWocheHinweis(a.plan);
+    } else {
+      tiles = limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
+                        u.s === 0 ? t('kein Fenster aktiv') : '')
+            + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
+    }
   } else if(!a.needs_relogin){
     tiles = '<div class="lempty">' + esc(t('Noch keine Auslastungsdaten – kommt mit der nächsten Abfrage.')) + '</div>';
   }
