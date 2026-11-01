@@ -3143,11 +3143,61 @@ class TrayManager:
     User auf X klickt. Rechtsklick → Menue mit Oeffnen/Beenden. Linksklick
     → App wieder zeigen."""
 
-    def __init__(self, get_window, on_quit):
+    def __init__(self, get_window, on_quit, accounts=None, on_switch=None):
+        """accounts: liefert die Kontenliste (accounts.AccountManager.accounts),
+        on_switch(uuid): wechselt das Konto. Beide optional - ohne sie gibt es
+        kein Konten-Untermenue."""
         self.get_window = get_window
         self.on_quit = on_quit
+        self.accounts = accounts
+        self.on_switch = on_switch
         self.icon = None
         self._thread = None
+
+    def refresh_menu(self):
+        """Menue neu aufbauen - unter Windows liest pystray Untermenues nur
+        beim Aufbau, nicht bei jedem Aufklappen."""
+        try:
+            if self.icon:
+                self.icon.update_menu()
+        except Exception:
+            pass
+
+    def _account_items(self):
+        import pystray
+        try:
+            liste = self.accounts() if self.accounts else []
+        except Exception:
+            liste = []
+        items = []
+        for a in liste:
+            label = a["nickname"]
+            if a.get("needs_relogin"):
+                label += " — " + t("Neu anmelden nötig")
+            elif a.get("has_room") is False:
+                label += " — " + t("Limit erreicht")
+
+            # pystray zaehlt die Parameter der Aktion (genau icon, item) -
+            # die Konto-ID deshalb per Closure, nicht als Default-Argument.
+            def _make(uuid, live):
+                def _go(icon, item):
+                    try:
+                        self.on_switch(uuid)
+                    except Exception:
+                        pass
+                    self.refresh_menu()
+
+                def _checked(item):
+                    return live
+                return _go, _checked
+
+            go, checked = _make(a["uuid"], a["live"])
+            items.append(pystray.MenuItem(
+                label, go, checked=checked,
+                radio=True, enabled=not a.get("needs_relogin")))
+        if not items:
+            items.append(pystray.MenuItem(t("Noch keine Konten"), None, enabled=False))
+        return items
 
     def start(self):
         if self.icon:
@@ -3189,10 +3239,13 @@ class TrayManager:
         # Beschriftung als Funktion, nicht als fester Text: pystray fragt sie
         # beim Aufklappen ab, damit stimmt das Menue sofort nach einem
         # Sprachwechsel - ohne das Icon neu aufbauen zu muessen.
-        menu = pystray.Menu(
-            pystray.MenuItem(lambda item: t("Öffnen"), _open, default=True),
-            pystray.MenuItem(lambda item: t("Beenden"), _quit),
-        )
+        eintraege = [pystray.MenuItem(lambda item: t("Öffnen"), _open, default=True)]
+        if self.accounts and self.on_switch:
+            eintraege.append(pystray.MenuItem(
+                lambda item: t("Konto wechseln"),
+                pystray.Menu(lambda: iter(self._account_items()))))
+        eintraege.append(pystray.MenuItem(lambda item: t("Beenden"), _quit))
+        menu = pystray.Menu(*eintraege)
         self.icon = pystray.Icon(
             "ClaudeSessionBrowser",
             icon=icon_img,
@@ -4127,6 +4180,67 @@ class Api:
             anim_provider=self._clawd_anim,
             on_battery=self.on_clawd_battery)
         return self._clawdmeter
+
+    # ---- Konten: mehrere Claude-Accounts (accounts.py) -------------------
+    # Die Arbeit macht accounts.AccountManager; hier nur die Bruecke zur
+    # Oberflaeche. Jede Methode liefert {"ok", "accounts"} oder {"ok": False,
+    # "error"}, damit die Seite nach jeder Aktion sofort neu zeichnen kann.
+
+    def _accounts_mgr(self):
+        mgr = getattr(self, "_accounts", None)
+        if mgr is None:
+            from accounts import AccountManager
+            mgr = self._accounts = AccountManager()
+        return mgr
+
+    def _accounts_result(self, **extra):
+        out = {"ok": True, "accounts": self._accounts_mgr().accounts()}
+        out.update(extra)
+        return out
+
+    def _accounts_call(self, fn, *args):
+        from accounts import AccountError
+        try:
+            extra = fn(*args) or {}
+            res = self._accounts_result(**(extra if isinstance(extra, dict) else {}))
+        except AccountError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            return {"ok": False, "error": type(e).__name__ + ": " + str(e)[:160]}
+        tray = getattr(self, "_tray", None)
+        if tray:
+            tray.refresh_menu()
+        return res
+
+    def accounts_list(self):
+        return self._accounts_call(lambda: None)
+
+    def accounts_refresh(self):
+        return self._accounts_call(lambda: self._accounts_mgr().poll_all())
+
+    def accounts_switch(self, uuid):
+        def _go():
+            res = self._accounts_mgr().swap_to(str(uuid))
+            if res.get("changed"):
+                # Neue Zahlen fuer Anzeige und Clawdmeter nicht erst in einer
+                # Minute: Usage-Kick sofort, Geraet beim naechsten Takt.
+                self._usage_kick_at = 0
+                try:
+                    self._kick_usage_poll()
+                except Exception:
+                    pass
+            return {"changed": bool(res.get("changed"))}
+        return self._accounts_call(_go)
+
+    def accounts_rename(self, uuid, name):
+        return self._accounts_call(self._accounts_mgr().rename, str(uuid), str(name))
+
+    def accounts_remove(self, uuid):
+        return self._accounts_call(self._accounts_mgr().remove, str(uuid))
+
+    def accounts_add(self):
+        return self._accounts_call(
+            lambda: {"stored": self._accounts_mgr().prepare_new_login() or ""})
 
     def on_clawd_battery(self, pct):
         """Meldet sich einmal, wenn der Clawdmeter unter die Schwelle faellt.
@@ -5362,6 +5476,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .btn.danger{border-color:rgba(255,107,107,.42); color:#ff9a9a}
   .btn.danger:hover{background:rgba(255,107,107,.14); border-color:#ff6b6b; color:#ffbdbd}
 
+  /* Konten-Seite: eine Karte pro Claude-Konto */
+  .acc-top{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:2px}
+  .acc-name{font-size:15px; font-weight:700}
+  .acc-name input{font-size:14px; padding:5px 9px; width:200px}
+  .acc-live{background:var(--accent); color:#fff}
+  .acc-state{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--muted)}
+  .acc-actions{margin-left:auto; display:flex; gap:6px}
+  .card.acc-is-live{border-color:var(--accent)}
+  .acc-meta{color:var(--muted); font-size:12.5px; margin:2px 0 10px}
+  .acc-foot{color:var(--muted); font-size:11.5px; margin-top:7px}
+  .acc-steps{margin-top:10px; padding:10px 13px; border-radius:10px; background:var(--bg);
+    border:1px solid var(--border); font-size:12.5px; line-height:1.55}
+  .acc-steps code{background:var(--surface2); border-radius:5px; padding:1px 6px}
+
   /* Toggle */
   .toggle{width:46px; height:26px; border-radius:20px; background:var(--surface2);
     position:relative; cursor:pointer; flex:none; transition:background .15s; border:1px solid var(--border)}
@@ -5741,6 +5869,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="count" id="clawd-head-status"></div>
     </div>
     <div class="settings" id="clawd-panel"></div>
+  </div>
+
+  <!-- Konten -->
+  <div class="view" id="view-accounts">
+    <div class="head">
+      <h1 class="titlewrap"><span class="hlogo kopfsymbol" id="accounts-hlogo"></span><span>Konten</span></h1>
+      <div class="count" id="accounts-count"></div>
+    </div>
+    <div class="settings" id="accounts-panel"></div>
   </div>
 
   <!-- Store -->
@@ -6219,6 +6356,9 @@ const ICONS={
        + '<path d="M9 7V5.5a3 3 0 0 1 6 0V7"/>',
   plugin: '<path d="M10 4a2 2 0 1 1 4 0v2h3a1 1 0 0 1 1 1v3h-2a2 2 0 1 0 0 4h2v3a1 1 0 0 1-1 1h-3v-2a2 2 0 1 0-4 0v2H7a1 1 0 0 1-1-1v-3H4a2 2 0 1 1 0-4h2V7a1 1 0 0 1 1-1h3V4Z"/>',
   warn:'<path d="M12 4.5L21 19H3z"/><path d="M12 10v4"/><path d="M12 16.7v.3"/>',
+  users:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/>'
+       + '<path d="M16 4.6a3.5 3.5 0 0 1 0 6.8"/><path d="M18 14.6a6.5 6.5 0 0 1 3.5 5.4"/>',
+  plus:'<path d="M12 5v14"/><path d="M5 12h14"/>',
 };
 function ic(k){
   const p=ICONS[k]; if(!p) return '';
@@ -6517,6 +6657,13 @@ registerView({
 registerView({
   id:'clawd', label:'Clawdmeter', el:'view-clawd',
   onEnter:()=>renderClawd(),
+});
+registerView({
+  id:'accounts', label:'Konten', el:'view-accounts',
+  onEnter:()=>{ renderAccounts(); refreshAccounts(false);
+    if(!ACCOUNTS_TIMER) ACCOUNTS_TIMER = setInterval(()=>refreshAccounts(false), 5000); },
+  onLeave:()=>{ if(ACCOUNTS_TIMER){ clearInterval(ACCOUNTS_TIMER); ACCOUNTS_TIMER = null; }
+    ACC_EDIT = null; ACC_CONFIRM = null; },
 });
 registerView({
   id:'store', label:'Store', el:'view-store',
@@ -7258,13 +7405,15 @@ function fmtDauer(sek){
   return sek + ' s';
 }
 // Eine Kachel: grosse Zahl, Balken, Restzeit - wie auf dem Clawdmeter.
-function limitCard(pct, resetAt, tag, voll){
+// ohneReset: Text statt "Reset-Zeit noch unbekannt", wenn bekannt ist, warum
+// es keine gibt (z. B. laeuft gerade kein 5-Stunden-Fenster).
+function limitCard(pct, resetAt, tag, voll, ohneReset){
   const rest = resetAt ? (resetAt*1000 - Date.now())/1000 : 0;
   const stufe = voll || pct >= 90 ? 'hot' : (pct >= 60 ? 'mid' : '');
   const sub = voll
     ? (resetAt ? t('voll – zurückgesetzt in {dauer}', {dauer: fmtDauer(rest)}) : t('voll'))
     : (resetAt ? t('zurückgesetzt in {dauer}', {dauer: fmtDauer(rest)})
-               : t('Reset-Zeit noch unbekannt'));
+               : (ohneReset || t('Reset-Zeit noch unbekannt')));
   return `<div class="lcard ${stufe}${voll?' full':''}">`
     + `<div class="top"><span class="num">${pct}%</span>`
     +   `<span class="tag">${esc(tag)}</span></div>`
@@ -7427,7 +7576,8 @@ function kopfSymbolHtml(name, groesse){
        + ` stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]||''}</svg>`;
 }
 function kopfSymbole(){
-  [['clawd-hlogo','bluetooth'], ['store-hlogo','store'], ['settings-hlogo','window']]
+  [['clawd-hlogo','bluetooth'], ['accounts-hlogo','users'], ['store-hlogo','store'],
+   ['settings-hlogo','window']]
     .forEach(([id, name])=>{
       const el = document.getElementById(id);
       if(el) el.innerHTML = kopfSymbolHtml(name);
@@ -7518,6 +7668,192 @@ async function toggleClawdBuddy(el){
   toast(on?t('Gerät spiegelt den Clawd-Buddy ✓'):t('Gerät wählt wieder selbst'));
 }
 setInterval(()=>{ if(document.getElementById('clawd-status')) refreshClawd(); }, 5000);
+
+// ---- Konten ----------------------------------------------------------------
+// Mehrere Claude-Konten, gewechselt ohne Ausloggen (accounts.py). Die Liste
+// kommt alle 5 s aus dem lokalen Speicher; die Netzabfragen macht der
+// Hintergrunddienst, "Jetzt aktualisieren" stoesst sie sofort an.
+let ACCOUNTS = null, ACCOUNTS_TIMER = null, ACC_EDIT = null, ACC_CONFIRM = null,
+    ACC_BUSY = false, ACC_ADDING = false;
+
+function renderAccounts(){
+  const box = document.getElementById('accounts-panel');
+  if(!box) return;
+  box.innerHTML = `
+    <div class="secthead">Deine Konten</div>
+    <div class="card">
+      <div class="sub">Wechselt das Claude-Konto, mit dem Claude Code arbeitet – ohne Ausloggen. Der Wechsel gilt sofort für alle Claude-Code-Fenster, auch für bereits offene.</div>
+      <div class="field">
+        <button class="btn mini" id="acc-refresh" onclick="refreshAccounts(true)">Jetzt aktualisieren</button>
+      </div>
+    </div>
+    <div id="acc-list"></div>
+
+    <div class="secthead">Konto hinzufügen</div>
+    <div class="card">
+      <h2>${ic('plus')}Weiteres Konto anmelden</h2>
+      <div class="sub">Legt das aktuelle Konto sicher ab und nimmt es aus Claude Code heraus, ohne es auszuloggen. Bis zur neuen Anmeldung sind offene Claude-Code-Fenster abgemeldet.</div>
+      <div class="field"><button class="btn accent" onclick="accAdd(this)">Konto hinzufügen</button></div>
+      <div id="acc-add-steps"></div>
+    </div>`;
+  translateDom(box);
+  paintAccounts();
+  paintAddSteps();
+}
+function accWarn(text){
+  return `<div class="warnnote">${ic('warn')}<span>${esc(text)}</span></div>`;
+}
+function accDatum(epoch){
+  try{ return new Date(epoch*1000).toLocaleDateString(undefined, {day:'numeric', month:'short'}); }
+  catch(e){ return ''; }
+}
+function accountCard(a){
+  const u = a.usage, id = esc(a.uuid);
+  let dot, zustand;
+  if(a.needs_relogin){ dot = 'err'; zustand = t('Neu anmelden nötig'); }
+  else if(a.has_room === null || a.has_room === undefined){ dot = 'off'; zustand = t('Noch keine Daten'); }
+  else if(a.has_room){ dot = 'ok'; zustand = t('Hat Luft'); }
+  else { dot = 'err'; zustand = t('Limit erreicht'); }
+
+  const editing = ACC_EDIT === a.uuid;
+  const name = editing
+    ? `<input type="text" id="acc-edit-input" maxlength="24" value="${esc(a.nickname)}"`
+      + ` onkeydown="accEditKey(event,'${id}')">`
+    : esc(a.nickname);
+  const badge = a.live ? `<span class="badge acc-live">${esc(t('Aktiv'))}</span>` : '';
+  let actions = '';
+  if(editing){
+    actions = `<button class="btn accent mini" onclick="accRenameSave('${id}')">${esc(t('Speichern'))}</button>`
+            + `<button class="btn mini" onclick="accRenameCancel()">${esc(t('Abbrechen'))}</button>`;
+  } else {
+    if(!a.live && !a.needs_relogin)
+      actions += `<button class="btn accent mini" onclick="accSwitch('${id}',this)">${esc(t('Wechseln'))}</button>`;
+    actions += `<button class="btn mini" onclick="accRename('${id}')">${esc(t('Umbenennen'))}</button>`;
+    if(!a.live)
+      actions += `<button class="btn mini danger" onclick="accRemove('${id}')">`
+        + esc(ACC_CONFIRM === a.uuid ? t('Wirklich entfernen?') : t('Entfernen')) + '</button>';
+  }
+  const meta = [a.email, a.plan].filter(Boolean).map(esc).join(' · ');
+  let tiles = '';
+  if(u && !a.needs_relogin){
+    // Ohne laufendes 5-Stunden-Fenster liefert die API keinen Reset - das ist
+    // kein Datenproblem, das Fenster startet erst mit der naechsten Nutzung.
+    tiles = limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
+                      u.s === 0 ? t('kein Fenster aktiv') : '')
+          + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
+  } else if(!a.needs_relogin){
+    tiles = '<div class="lempty">' + esc(t('Noch keine Auslastungsdaten – kommt mit der nächsten Abfrage.')) + '</div>';
+  }
+  let notes = '';
+  if(a.needs_relogin)
+    notes = accWarn(t('Die Anmeldung dieses Kontos ist abgelaufen. Über „Konto hinzufügen“ neu anmelden.'));
+  else if(a.relogin_soon && a.relogin_by)
+    notes = accWarn(t('Die Anmeldung läuft am {datum} ab – vorher über „Konto hinzufügen“ neu anmelden.',
+                      {datum: accDatum(a.relogin_by)}));
+  const foot = u ? t('Stand: vor {dauer}', {dauer: fmtDauer(a.usage_age_s || 0)}) : '';
+  return `<div class="card${a.live ? ' acc-is-live' : ''}">`
+    + `<div class="acc-top"><span class="acc-name">${name}</span>${badge}`
+    + `<span class="acc-state"><span class="dot ${dot}"></span>${esc(zustand)}</span>`
+    + `<span class="acc-actions">${actions}</span></div>`
+    + (meta ? `<div class="acc-meta">${meta}</div>` : '')
+    + (tiles ? `<div class="limitbox">${tiles}</div>` : '') + notes
+    + (foot ? `<div class="acc-foot">${esc(foot)}</div>` : '')
+    + '</div>';
+}
+function paintAccounts(){
+  const list = document.getElementById('acc-list');
+  if(!list) return;
+  const head = document.getElementById('accounts-count');
+  const d = ACCOUNTS;
+  if(!d){
+    list.innerHTML = '<div class="card"><div class="sub">' + esc(t('Wird geladen…')) + '</div></div>';
+    return;
+  }
+  if(!d.accounts){
+    list.innerHTML = '<div class="card">' + accWarn(d.error || t('Das hat nicht geklappt.')) + '</div>';
+    return;
+  }
+  const accs = d.accounts;
+  const live = accs.find(a=>a.live);
+  if(head) head.textContent = t('{n} Konten', {n: accs.length})
+    + (live ? ' · ' + t('aktiv: {name}', {name: live.nickname}) : '');
+  if(ACC_ADDING && live){ ACC_ADDING = false; paintAddSteps(); }
+  if(!accs.length){
+    list.innerHTML = '<div class="card"><div class="sub">'
+      + esc(t('Noch kein Konto erkannt. Sobald Claude Code angemeldet ist, erscheint es hier.'))
+      + '</div></div>';
+    return;
+  }
+  list.innerHTML = accs.map(accountCard).join('');
+  const inp = document.getElementById('acc-edit-input');
+  if(inp){ inp.focus(); inp.select(); }
+}
+function paintAddSteps(){
+  const el = document.getElementById('acc-add-steps');
+  if(!el) return;
+  el.innerHTML = ACC_ADDING
+    ? '<div class="acc-steps">' + esc(t('Jetzt in einem Terminal claude starten, /login eingeben und mit dem neuen Konto anmelden. Das Konto erscheint danach hier von selbst.')) + '</div>'
+    : '';
+}
+async function refreshAccounts(netz){
+  if(ACC_BUSY && !netz) return;
+  const btn = netz ? document.getElementById('acc-refresh') : null;
+  if(btn){ btn.disabled = true; btn.textContent = t('Aktualisiere…'); }
+  let r;
+  try{ r = netz ? await api.accounts_refresh() : await api.accounts_list(); }
+  catch(e){ r = {ok: false, error: String(e)}; }
+  if(btn){ btn.disabled = false; btn.textContent = t('Jetzt aktualisieren'); }
+  if(r && r.ok) ACCOUNTS = r;
+  else{
+    if(netz) toast((r && r.error) || t('Das hat nicht geklappt.'));
+    if(!ACCOUNTS) ACCOUNTS = r;
+  }
+  if(!ACC_EDIT) paintAccounts();
+}
+async function accDo(promise, okMsg){
+  ACC_BUSY = true;
+  let r;
+  try{ r = await promise; }catch(e){ r = {ok: false, error: String(e)}; }
+  ACC_BUSY = false;
+  if(r && r.ok){ ACCOUNTS = r; if(okMsg) toast(okMsg); }
+  else toast((r && r.error) || t('Das hat nicht geklappt.'));
+  paintAccounts();
+  return r;
+}
+async function accSwitch(uuid, btn){
+  btn.disabled = true; btn.textContent = t('Wechsle…');
+  const a = ((ACCOUNTS && ACCOUNTS.accounts) || []).find(x=>x.uuid === uuid);
+  await accDo(api.accounts_switch(uuid), t('Gewechselt zu {name} ✓', {name: a ? a.nickname : ''}));
+}
+function accRename(uuid){ ACC_EDIT = uuid; ACC_CONFIRM = null; paintAccounts(); }
+function accRenameCancel(){ ACC_EDIT = null; paintAccounts(); }
+async function accRenameSave(uuid){
+  const inp = document.getElementById('acc-edit-input');
+  const name = inp ? inp.value : '';
+  ACC_EDIT = null;
+  await accDo(api.accounts_rename(uuid, name), t('Umbenannt ✓'));
+}
+function accEditKey(ev, uuid){
+  if(ev.key === 'Enter'){ ev.preventDefault(); accRenameSave(uuid); }
+  else if(ev.key === 'Escape'){ ev.preventDefault(); ev.stopPropagation(); accRenameCancel(); }
+}
+async function accRemove(uuid){
+  // Zweimal klicken statt Rueckfrage-Dialog: der erste Klick fragt im Knopf
+  // selbst nach, nach 4 s ist die Frage wieder weg.
+  if(ACC_CONFIRM !== uuid){
+    ACC_CONFIRM = uuid; paintAccounts();
+    setTimeout(()=>{ if(ACC_CONFIRM === uuid){ ACC_CONFIRM = null; paintAccounts(); } }, 4000);
+    return;
+  }
+  ACC_CONFIRM = null;
+  await accDo(api.accounts_remove(uuid), t('Konto entfernt'));
+}
+async function accAdd(btn){
+  btn.disabled = true;
+  const r = await accDo(api.accounts_add(), t('Aktuelles Konto abgelegt ✓'));
+  btn.disabled = false;
+  if(r && r.ok){ ACC_ADDING = true; paintAddSteps(); }
+}
 
 async function toggleTray(el){
   const on=!el.classList.contains('on'); el.classList.toggle('on',on);
@@ -8410,6 +8746,22 @@ def main():
         except Exception:
             pass
 
+    # Konten: im Hintergrund das aktive Konto erkennen, abgelegte Konten
+    # frisch halten und die Auslastung aller Konten lesen (accounts.py).
+    try:
+        from accounts import AccountsService
+
+        def _accounts_changed(_liste):
+            tray_obj = getattr(api, "_tray", None)
+            if tray_obj:
+                tray_obj.refresh_menu()
+
+        api._accounts_service = AccountsService(api._accounts_mgr(),
+                                                on_change=_accounts_changed)
+        api._accounts_service.start()
+    except Exception:
+        pass
+
     # System-Tray – aktiv wenn "close_to_tray" gesetzt ist (Default).
     _quit_wanted = {"v": False}
 
@@ -8422,7 +8774,10 @@ def main():
             pass
 
     tray = TrayManager(lambda: (webview.windows[0] if webview.windows else None),
-                       real_quit)
+                       real_quit,
+                       accounts=lambda: api._accounts_mgr().accounts(),
+                       on_switch=api.accounts_switch)
+    api._tray = tray
     if s.get("close_to_tray", True):
         tray.start()
 

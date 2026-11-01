@@ -813,5 +813,61 @@ TRANSLATIONS = {
         "deutschen Systemen, sonst Englisch.":
             "\"Automatic\" follows Windows: German on German systems, "
             "English everywhere else.",
+
+        # ---- Konten (mehrere Claude-Accounts) ------------------------------
+        "Konten": "Accounts",
+        "Deine Konten": "Your accounts",
+        "Konto wechseln": "Switch account",
+        "Noch keine Konten": "No accounts yet",
+        "{n} Konten": "{n} accounts",
+        "aktiv: {name}": "active: {name}",
+        "Aktiv": "Active",
+        "Hat Luft": "Has room",
+        "Limit erreicht": "Limit reached",
+        "Neu anmelden nötig": "Sign in again",
+        "Noch keine Daten": "No data yet",
+        "Wechseln": "Switch",
+        "kein Fenster aktiv": "no window running",
+        "Wechsle…": "Switching…",
+        "Umbenennen": "Rename",
+        "Wirklich entfernen?": "Really remove?",
+        "Jetzt aktualisieren": "Refresh now",
+        "Aktualisiere…": "Refreshing…",
+        "Stand: vor {dauer}": "Updated {dauer} ago",
+        "Gewechselt zu {name} ✓": "Switched to {name} ✓",
+        "Umbenannt ✓": "Renamed ✓",
+        "Konto entfernt": "Account removed",
+        "Aktuelles Konto abgelegt ✓": "Current account stored ✓",
+        "Das hat nicht geklappt.": "That didn't work.",
+        "Konto hinzufügen": "Add account",
+        "Weiteres Konto anmelden": "Sign in to another account",
+        "Wechselt das Claude-Konto, mit dem Claude Code arbeitet – ohne "
+        "Ausloggen. Der Wechsel gilt sofort für alle Claude-Code-Fenster, auch "
+        "für bereits offene.":
+            "Switches the Claude account Claude Code works with, without "
+            "logging out. The switch applies to every Claude Code window right "
+            "away, including ones that are already open.",
+        "Legt das aktuelle Konto sicher ab und nimmt es aus Claude Code heraus, "
+        "ohne es auszuloggen. Bis zur neuen Anmeldung sind offene "
+        "Claude-Code-Fenster abgemeldet.":
+            "Stores the current account safely and takes it out of Claude Code "
+            "without logging it out. Until you sign in again, open Claude Code "
+            "windows are signed out.",
+        "Jetzt in einem Terminal claude starten, /login eingeben und mit dem "
+        "neuen Konto anmelden. Das Konto erscheint danach hier von selbst.":
+            "Now start claude in a terminal, type /login and sign in with the "
+            "new account. It will show up here on its own.",
+        "Noch kein Konto erkannt. Sobald Claude Code angemeldet ist, erscheint "
+        "es hier.":
+            "No account detected yet. As soon as Claude Code is signed in, it "
+            "shows up here.",
+        "Die Anmeldung dieses Kontos ist abgelaufen. Über „Konto hinzufügen“ "
+        "neu anmelden.":
+            "This account's sign-in has expired. Sign in again via \"Add "
+            "account\".",
+        "Die Anmeldung läuft am {datum} ab – vorher über „Konto hinzufügen“ "
+        "neu anmelden.":
+            "The sign-in expires on {datum}. Sign in again via \"Add account\" "
+            "before then.",
     },
 }

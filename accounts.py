@@ -623,6 +623,13 @@ class AccountManager:
             self._update_meta(uuid, usage=usage, usage_error=None)
             return usage
 
+    def poll_all(self) -> None:
+        """Re-read the live account and fetch usage for every account now."""
+        self.sync_live()
+        for uuid in self._uuids():
+            if not self._meta(uuid).get("needs_relogin"):
+                self.poll(uuid)
+
     def poll_due(self) -> None:
         live = self._state().get("live_uuid")
         now = self.clock()
