@@ -582,15 +582,19 @@ class AccountManager:
 
     @staticmethod
     def parse_usage(data: dict, now: float) -> dict:
-        five = data.get("five_hour") or {}
+        """`s` is None when the account has no 5-hour limit. Some plans (seen on
+        Max 20x, 2026-11) report only weekly limits: five_hour is null even
+        while in use, and `limits` lists only weekly kinds."""
+        five = data.get("five_hour")
         seven = data.get("seven_day") or {}
-        s = float(five.get("utilization") or 0)
+        s = float(five.get("utilization") or 0) if isinstance(five, dict) else None
         w = float(seven.get("utilization") or 0)
-        limited = s >= 100 or w >= 100
+        limited = (s or 0) >= 100 or w >= 100
         for lim in data.get("limits") or []:
             if isinstance(lim, dict) and lim.get("is_active") and (lim.get("percent") or 0) >= 100:
                 limited = True
-        return {"s": round(s), "s_reset_at": _iso_to_epoch(five.get("resets_at")),
+        return {"s": None if s is None else round(s),
+                "s_reset_at": _iso_to_epoch((five or {}).get("resets_at")),
                 "w": round(w), "w_reset_at": _iso_to_epoch(seven.get("resets_at")),
                 "limited": limited, "at": now}
 
@@ -788,8 +792,10 @@ def _cli(argv) -> int:
                 room = {True: "room", False: "LIMITED", None: "?"}[a["has_room"]]
                 flags = (" *re-login soon*" if a["relogin_soon"] else "") + \
                         (" *SIGN IN AGAIN*" if a["needs_relogin"] else "")
+                s = "  -" if u.get("s") is None else f"{u['s']:>3}"
+                w = "  -" if u.get("w") is None else f"{u['w']:>3}"
                 print(f"{'>' if a['live'] else ' '} {a['nickname']:<16} {a['email']:<28} "
-                      f"5h {u.get('s', '-'):>3}%  wk {u.get('w', '-'):>3}%  {room:<7} "
+                      f"5h {s}%  wk {w}%  {room:<7} "
                       f"re-login by {_fmt_when(a['relogin_by'])}{flags}")
         return 0
     except AccountError as e:

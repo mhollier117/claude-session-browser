@@ -259,7 +259,7 @@ DEFAULT_SETTINGS = {
     "projects_dir": "",          # leer = automatisch suchen
     "accent": "#ec7456",         # Akzentfarbe der Oberflaeche (Koralle, passend zum Logo)
     "bg_base": "#4a3a30",        # Grundton -> daraus wird die Hintergrund-Palette abgeleitet (warm)
-    "language": "auto",          # auto (= Windows-Sprache) | de | en
+    "language": "en",            # en (Standard dieser Fassung) | auto (= Windows-Sprache) | de
     "terminal": "auto",          # auto | wt | cmd
     "claude_cmd": "claude",      # Befehl/Pfad zur Claude-CLI
     "columns": [                 # sichtbare Spalten + Reihenfolge
@@ -4181,6 +4181,18 @@ class Api:
             on_battery=self.on_clawd_battery)
         return self._clawdmeter
 
+    def js_error(self, text):
+        """JavaScript-Fehler aus der Oberflaeche mitschreiben, in
+        csb_js_errors.log im Temp-Ordner."""
+        try:
+            path = os.path.join(tempfile.gettempdir(), "csb_js_errors.log")
+            line = " ".join(str(text).split())[:800]
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+        except Exception:
+            pass
+        return True
+
     # ---- Konten: mehrere Claude-Accounts (accounts.py) -------------------
     # Die Arbeit macht accounts.AccountManager; hier nur die Bruecke zur
     # Oberflaeche. Jede Methode liefert {"ok", "accounts"} oder {"ok": False,
@@ -6398,6 +6410,13 @@ function applyAccent(c){document.documentElement.style.setProperty('--accent',c)
 let BOOTED=false;
 async function boot(){
   if(BOOTED) return; BOOTED=true;
+  // Feste Texte sofort uebersetzen: sie brauchen keine Daten. Frueher geschah
+  // das erst nach get_state() - stolperte der Start davor, blieben Knoepfe
+  // und Beschreibungen deutsch, waehrend die Tabs schon englisch waren.
+  // Nur einmal einsammeln: ein zweiter Startversuch wuerde sonst die schon
+  // uebersetzten Texte als "Original" merken.
+  if(!STATIC_T.length) collectStaticT();
+  applyStaticT();
   try{
     STATE = await api.get_state();
     sortCol = STATE.settings.sort_col || "when";
@@ -6405,10 +6424,6 @@ async function boot(){
     applyAccent(STATE.settings.accent || "#ec7456");
     applyBg(STATE.settings.bg_base || "#4a3a30");
     ingest(STATE);
-    // Erst einsammeln, dann uebersetzen - beides vor dem ersten Zeichnen,
-    // solange Tabelle und Panels noch leer sind.
-    collectStaticT();
-    applyStaticT();
     buildSwatches();
     renderHead();
     render();
@@ -6427,6 +6442,7 @@ async function boot(){
     }
     checkUpdate();   // im Hintergrund, blockiert nichts
   }catch(e){
+    meldeFehler('boot: ' + ((e && e.stack) || e));
     BOOTED=false; bootTries=(bootTries||0)+1;
     const c=document.getElementById('count');
     if(bootTries<5){ if(c)c.textContent=t('Lädt erneut…'); setTimeout(()=>{ if(!BOOTED) boot(); }, 700); }
@@ -7736,11 +7752,15 @@ function accountCard(a){
   const meta = [a.email, a.plan].filter(Boolean).map(esc).join(' · ');
   let tiles = '';
   if(u && !a.needs_relogin){
-    // Ohne laufendes 5-Stunden-Fenster liefert die API keinen Reset - das ist
-    // kein Datenproblem, das Fenster startet erst mit der naechsten Nutzung.
-    tiles = limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
-                      u.s === 0 ? t('kein Fenster aktiv') : '')
-          + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
+    // s === null: das Konto hat gar kein 5-Stunden-Limit (manche Tarife, z. B.
+    // Max 20x, melden nur Wochenlimits). Dann eine stille Kachel statt "0 %".
+    const fuenf = (u.s === null || u.s === undefined)
+      ? '<div class="lcard"><div class="top"><span class="num">–</span>'
+        + `<span class="tag">${esc(t('5 Stunden'))}</span></div><div class="bar"><i style="width:0"></i></div>`
+        + `<div class="sub">${esc(t('kein 5-Stunden-Limit bei diesem Konto'))}</div></div>`
+      : limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
+                  u.s === 0 ? t('kein Fenster aktiv') : '');
+    tiles = fuenf + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
   } else if(!a.needs_relogin){
     tiles = '<div class="lempty">' + esc(t('Noch keine Auslastungsdaten – kommt mit der nächsten Abfrage.')) + '</div>';
   }
@@ -8093,6 +8113,15 @@ document.addEventListener('pointermove',e=>{ if(CPdrag) cpPick(e); });
 document.addEventListener('pointerup',()=>{ CPdrag=false; });
 document.addEventListener('pointercancel',()=>{ CPdrag=false; });
 window.addEventListener('blur',()=>{ CPdrag=false; });
+
+// JavaScript-Fehler landen in einer Logdatei (Api.js_error), damit man sie
+// ohne Entwicklerwerkzeuge im Fenster findet.
+function meldeFehler(text){
+  try{ if(api && api.js_error) api.js_error(String(text).slice(0, 800)); }catch(_){}
+}
+window.addEventListener('error', e=>meldeFehler((e.message || '') + ' @ line ' + (e.lineno || '?')));
+window.addEventListener('unhandledrejection', e=>meldeFehler('unhandled: '
+  + ((e.reason && (e.reason.stack || e.reason)) || '')));
 
 function whenReady(){
   if(window.pywebview && window.pywebview.api && typeof window.pywebview.api.get_state === 'function'){

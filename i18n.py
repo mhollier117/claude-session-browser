@@ -21,7 +21,7 @@ import re
 # Sprachen, die es gibt. Alles andere faellt auf Englisch zurueck.
 LANGS = ("de", "en")
 
-_lang = "de"
+_lang = "en"
 
 # Platzhalter der Form {name} - fuer die Pruefung in tools/check_i18n.py
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -828,6 +828,7 @@ TRANSLATIONS = {
         "Noch keine Daten": "No data yet",
         "Wechseln": "Switch",
         "kein Fenster aktiv": "no window running",
+        "kein 5-Stunden-Limit bei diesem Konto": "no 5-hour limit on this account",
         "Wechsle…": "Switching…",
         "Umbenennen": "Rename",
         "Wirklich entfernen?": "Really remove?",

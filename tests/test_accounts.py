@@ -261,6 +261,14 @@ def test_poll_reads_usage_and_room(env):
     assert by[UA]["usage"]["s_reset_at"] > 0
 
 
+def test_account_without_a_five_hour_limit():
+    """Max 20x (seen 2026-11): five_hour is null even while in use."""
+    u = A.AccountManager.parse_usage(
+        {"five_hour": None, "seven_day": {"utilization": 12.0, "resets_at": "2026-11-04T22:59:59Z"},
+         "limits": [{"kind": "weekly_all", "is_active": True, "percent": 12}]}, NOW)
+    assert u["s"] is None and u["w"] == 12 and u["limited"] is False
+
+
 def test_limits_list_can_mark_an_account_limited():
     u = A.AccountManager.parse_usage(
         {"five_hour": {"utilization": 3}, "seven_day": {"utilization": 20},
