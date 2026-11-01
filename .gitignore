@@ -19,3 +19,25 @@ clawd_sprites.py.bak
 docs/makerworld-listing.md
 docs/hermann-issue.md
 docs/pr22-comment.md
+
+# Private data — never commit (added for the multi-account work)
+# Claude sign-ins and the account store
+.credentials.json
+*.credentials.json
+credentials.json
+.claude-accounts/
+accounts/
+vault/
+# Keys, tokens, environment files
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*token*.json
+*secret*
+*secrets*
+# Local logs and debug dumps
+*.log
+debug/
