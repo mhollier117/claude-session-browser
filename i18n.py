@@ -816,6 +816,7 @@ TRANSLATIONS = {
 
         # ---- Konten (mehrere Claude-Accounts) ------------------------------
         "Konten": "Accounts",
+        "Sessions werden geladen…": "Loading sessions…",
         "Deine Konten": "Your accounts",
         "Konto wechseln": "Switch account",
         "Noch keine Konten": "No accounts yet",

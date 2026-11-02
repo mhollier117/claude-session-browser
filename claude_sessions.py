@@ -960,62 +960,116 @@ def clean_user_text(t):
     return re.sub(r"\s+", " ", t).strip()
 
 
-def parse_session(path):
-    session_id = os.path.splitext(os.path.basename(path))[0]
-    ai_title = first_user = cwd = last_ts = None
-    user_msgs = assistant_msgs = 0
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(d, dict):
-                    continue   # valides JSON, aber kein Objekt -> ueberspringen
-                t = d.get("type")
-                if d.get("cwd") and cwd is None:
-                    cwd = d["cwd"]   # ERSTES cwd = Start-Verzeichnis (passt zum
-                    #                  Projektordner; 'claude --resume' findet die
-                    #                  Session nur dort, nicht in spaeteren Unterordnern)
-                if d.get("timestamp"):
-                    last_ts = d["timestamp"]
-                if t == "ai-title":
-                    ai_title = d.get("aiTitle") or ai_title
-                elif t == "user":
-                    user_msgs += 1
-                    if first_user is None:
-                        txt = clean_user_text(_first_text(d.get("message", {}).get("content")))
-                        if txt:
-                            first_user = txt
-                elif t == "assistant":
-                    assistant_msgs += 1
-        mtime = os.path.getmtime(path)
-    except OSError:
+# Wie viel von der ersten Frage mitgeht. Die Detailansicht zeigt 600 Zeichen;
+# ungekuerzt waren es bei 800 Sessions ueber 10 MB, die bei jedem Laden durch
+# die Bruecke zur Oberflaeche mussten.
+_FIRST_USER_MAX = 1000
+
+
+def _scan_session(path, scan=None):
+    """Liest ein Transkript ab `scan["offset"]` weiter (oder von vorn) und gibt
+    den neuen Zwischenstand zurueck. Laufende Sessions wachsen staendig; so
+    wird nur der neue Teil gelesen statt jedes Mal die ganze Datei."""
+    st = dict(scan) if scan else {
+        "offset": 0, "ai_title": None, "first_user": None, "cwd": None,
+        "last_ts": None, "user_msgs": 0, "assistant_msgs": 0}
+    with open(path, "rb") as fh:
+        fh.seek(st["offset"])
+        data = fh.read()
+    end = data.rfind(b"\n")
+    if end < 0:
+        return st                     # noch keine vollstaendige neue Zeile
+    st["offset"] += end + 1
+    for raw in data[:end].split(b"\n"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            d = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(d, dict):
+            continue   # valides JSON, aber kein Objekt -> ueberspringen
+        t = d.get("type")
+        if d.get("cwd") and st["cwd"] is None:
+            st["cwd"] = d["cwd"]   # ERSTES cwd = Start-Verzeichnis (passt zum
+            #                        Projektordner; 'claude --resume' findet die
+            #                        Session nur dort, nicht in spaeteren Unterordnern)
+        if d.get("timestamp"):
+            st["last_ts"] = d["timestamp"]
+        if t == "ai-title":
+            st["ai_title"] = d.get("aiTitle") or st["ai_title"]
+        elif t == "user":
+            st["user_msgs"] += 1
+            if st["first_user"] is None:
+                txt = clean_user_text(_first_text(d.get("message", {}).get("content")))
+                if txt:
+                    st["first_user"] = txt[:_FIRST_USER_MAX]
+        elif t == "assistant":
+            st["assistant_msgs"] += 1
+    return st
+
+
+def _session_info(path, st, mtime):
+    if st["user_msgs"] == 0 and st["assistant_msgs"] == 0 and not st["ai_title"]:
         return None
-    if user_msgs == 0 and assistant_msgs == 0 and not ai_title:
-        return None
-    auto_title = ai_title or (first_user[:90] if first_user else "(ohne Titel)")
+    first_user = st["first_user"]
     return {
-        "id": session_id,
-        "auto_title": auto_title,
+        "id": os.path.splitext(os.path.basename(path))[0],
+        "auto_title": st["ai_title"] or (first_user[:90] if first_user else "(ohne Titel)"),
         "first_user": first_user or "",
-        "cwd": cwd or "",
+        "cwd": st["cwd"] or "",
         "mtime": mtime,
-        "user_msgs": user_msgs,
-        "assistant_msgs": assistant_msgs,
-        "total_msgs": user_msgs + assistant_msgs,
+        "user_msgs": st["user_msgs"],
+        "assistant_msgs": st["assistant_msgs"],
+        "total_msgs": st["user_msgs"] + st["assistant_msgs"],
     }
 
 
-# Geparste Sessions je Datei, gueltig solange Groesse und Aenderungszeit
-# gleich bleiben. Ohne das liest jedes Aktualisieren alle JSONL komplett -
-# bei ein paar hundert MB Verlauf mehrere Sekunden, und das Fenster laedt
-# die Liste inzwischen bei jedem Zurueckholen nach.
+def parse_session(path):
+    """Ein Transkript komplett lesen (siehe _scan_session)."""
+    try:
+        st = _scan_session(path)
+        return _session_info(path, st, os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+# Gelesene Sessions je Datei: (mtime_ns, size, info, scan). Unveraendert ->
+# wiederverwenden; nur gewachsen -> ab der letzten Stelle weiterlesen; sonst
+# neu lesen. Liegt zusaetzlich auf der Platte (_SESSION_INDEX_FILE), damit
+# schon der erste Start nach einem Neustart nicht 1 GB Verlauf neu lesen muss
+# (bei 810 Sessions waren das 12-14 s mit leerem Fenster).
 _SESSION_PARSE_CACHE = {}
+_SESSION_INDEX_VERSION = 2
+_SESSION_INDEX_FILE = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local"),
+    "ClaudeSessionBrowser", "session_index.json")
+_COLLECT_LOCK = threading.Lock()
+
+
+def _load_session_index():
+    try:
+        with open(_SESSION_INDEX_FILE, encoding="utf-8") as fh:
+            d = json.load(fh)
+        if d.get("version") != _SESSION_INDEX_VERSION:
+            return {}
+        return {p: tuple(v) for p, v in (d.get("entries") or {}).items()
+                if isinstance(v, list) and len(v) == 4}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _save_session_index(entries):
+    try:
+        os.makedirs(os.path.dirname(_SESSION_INDEX_FILE), exist_ok=True)
+        tmp = _SESSION_INDEX_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": _SESSION_INDEX_VERSION,
+                       "entries": {p: list(v) for p, v in entries.items()}}, fh)
+        os.replace(tmp, _SESSION_INDEX_FILE)
+    except OSError:
+        pass
 
 
 def _dblclick_ms():
@@ -1029,10 +1083,20 @@ def _dblclick_ms():
 
 
 def collect_sessions(projects_dir):
+    """Alle Sessions unter projects_dir. Thread-sicher: der Start waermt den
+    Index im Hintergrund vor, waehrend die Oberflaeche schon danach fragt."""
+    with _COLLECT_LOCK:
+        return _collect_sessions_locked(projects_dir)
+
+
+def _collect_sessions_locked(projects_dir):
     out = []
     if not projects_dir or not os.path.isdir(projects_dir):
         return out
+    if not _SESSION_PARSE_CACHE:
+        _SESSION_PARSE_CACHE.update(_load_session_index())
     seen = {}
+    changed = False
     for project in os.listdir(projects_dir):
         pdir = os.path.join(projects_dir, project)
         if not os.path.isdir(pdir):
@@ -1048,16 +1112,30 @@ def collect_sessions(projects_dir):
                 st = os.stat(path)
             except OSError:
                 continue
-            key = (st.st_mtime_ns, st.st_size)
             hit = _SESSION_PARSE_CACHE.get(path)
-            info = hit[1] if hit and hit[0] == key else parse_session(path)
-            seen[path] = (key, info)
+            if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+                entry = hit
+            else:
+                changed = True
+                prev_scan = hit[3] if hit and st.st_size >= hit[1] and hit[3] else None
+                try:
+                    scan = _scan_session(path, prev_scan)
+                    info = _session_info(path, scan, st.st_mtime)
+                except OSError:
+                    continue
+                entry = (st.st_mtime_ns, st.st_size, info, scan)
+            seen[path] = entry
+            info = entry[2]
             if info:
+                info = dict(info)
                 info["project"] = project
                 out.append(info)
-    # Geloeschte Dateien fallen dabei mit heraus.
+    if len(seen) != len(_SESSION_PARSE_CACHE):
+        changed = True                # Dateien geloescht
     _SESSION_PARSE_CACHE.clear()
     _SESSION_PARSE_CACHE.update(seen)
+    if changed:
+        _save_session_index(seen)
     return out
 
 
@@ -6506,6 +6584,10 @@ async function boot(){
   if(!STATIC_T.length) collectStaticT();
   applyStaticT();
   try{
+    // Beim allerersten Start kann das Einlesen ein paar Sekunden dauern -
+    // dann nicht leer dastehen, sondern sagen, was passiert.
+    const ladeHinweis = document.getElementById('count');
+    if(ladeHinweis && !ladeHinweis.textContent) ladeHinweis.textContent = t('Sessions werden geladen…');
     STATE = await api.get_state();
     sortCol = STATE.settings.sort_col || "when";
     sortRev = STATE.settings.sort_rev !== false;
@@ -8815,6 +8897,11 @@ def main():
     # Handle in Modul-Scope halten bis Prozess-Ende (Mutex faellt sonst weg)
     globals()["_SINGLE_INSTANCE_HANDLE"] = mutex_handle
     api = Api()
+    # Sessions schon einlesen, waehrend das Fenster aufgeht. Beim allerersten
+    # Start (noch kein Index auf der Platte) dauert das bei vielen Sessions
+    # einige Sekunden; die Oberflaeche zeigt solange "Sessions werden geladen".
+    threading.Thread(target=lambda: api._sessions(), daemon=True,
+                     name="session-index").start()
     s = api.settings
     kw = dict(
         html=build_html(), js_api=api, min_size=(820, 520),
