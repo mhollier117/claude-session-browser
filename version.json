@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.3",
-  "notes": "Installs and updates on PCs where Attack Surface Reduction blocks programs started from %TEMP%: use the install-here zip (Install.cmd) in an exempt folder. Updates now download and unpack inside the app's own folder (_update) instead of %TEMP%.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.3",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.3/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "86e1ee95d86607bb1dd9232eac0609450a0e9e0e6426d35742a37d28b320e12b"
+  "version": "1.6.1.4",
+  "notes": "First start no longer looks frozen: 'Loading sessions' now counts the transcripts it reads (e.g. 312 / 1204), and if the window misses the result it asks again by itself instead of needing a restart.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.4",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.4/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "01e2d6a8e2fb43bfc5b7d9dd76cdd6a92fafe29959283cdc96727edb4fa7928f"
 }
