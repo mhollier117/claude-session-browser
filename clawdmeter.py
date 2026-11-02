@@ -36,11 +36,14 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 # Erstes Byte einer Meldung auf REQ: 0x02 = Konto wechseln (Byte 1 = Index wie
 # in den "ac"-Meldungen, ab Byte 2 der Spitzname, so wie er geschickt wurde).
 # 0x03 = das Geraet zeigt jetzt diesen PC, 0x04 = es zeigt einen anderen PC
-# (bis zu drei gekoppelte PCs sind gleichzeitig verbunden). Alles andere
-# (0x01, leer) heisst "bitte alles neu schicken".
+# (bis zu drei gekoppelte PCs sind gleichzeitig verbunden). 0x05 = Fenster
+# dieser Session nach vorn holen (langer Druck auf den Clawd-Bildschirm; Byte 1
+# = Index in der letzten "se"-Liste, ab Byte 2 ihr Name, so wie er geschickt
+# wurde). Alles andere (0x01, leer) heisst "bitte alles neu schicken".
 REQ_SWITCH = 0x02
 REQ_ACTIVE = 0x03
 REQ_INACTIVE = 0x04
+REQ_FOCUS = 0x05
 # Name dieses PCs in der "hi"-Meldung: so viele Zeichen zeigt die Auswahl
 # auf dem Geraet (Windows-Computernamen sind ohnehin hoechstens 15 lang).
 PC_NAME_MAX = 15
@@ -190,12 +193,18 @@ def parse_request(data) -> tuple | None:
     ("switch", index, spitzname) fuer 0x02 mit Index; None fuer ein 0x02
     ohne Index - das wird verworfen, statt irgendein Konto zu raten.
     ("active",) fuer 0x03 (Geraet zeigt diesen PC), ("inactive",) fuer 0x04
-    (Geraet zeigt einen anderen PC)."""
+    (Geraet zeigt einen anderen PC). ("focus", index, name) fuer 0x05 mit
+    Index; ein 0x05 ohne Index wird zu ("focus", None, "") und verworfen."""
     raw = bytes(data or b"")
     if raw and raw[0] == REQ_ACTIVE:
         return ("active",)
     if raw and raw[0] == REQ_INACTIVE:
         return ("inactive",)
+    if raw and raw[0] == REQ_FOCUS:
+        if len(raw) < 2:
+            return ("focus", None, "")
+        name = raw[2:].split(b"\0", 1)[0].decode("ascii", "ignore").strip()
+        return ("focus", raw[1], name)
     if not raw or raw[0] != REQ_SWITCH:
         return ("refresh",)
     if len(raw) < 2:
@@ -510,7 +519,8 @@ class ClawdmeterLink:
     def __init__(self, log=None, address_provider=None, on_usage=None,
                  anim_provider=None, on_battery=None, session_provider=None,
                  usage_provider=None, extras_provider=None,
-                 on_switch_request=None, system_provider=None):
+                 on_switch_request=None, system_provider=None,
+                 on_focus_request=None):
         """address_provider: Funktion die die gewuenschte Geraeteadresse liefert
         (leer/None = automatisch suchen). Wird bei jedem Versuch neu gefragt,
         damit eine Aenderung in den Einstellungen sofort greift.
@@ -544,6 +554,11 @@ class ClawdmeterLink:
         # ein langsamer Wechsel (Token erneuern, Dateien schreiben) die
         # BLE-Loop nicht aufhaelt; danach gehen frische Daten raus.
         self._on_switch_request = on_switch_request
+        # on_focus_request(index, name): das Geraet bittet, das Fenster dieser
+        # Session nach vorn zu holen (REQ 0x05). Eigener kurzer Thread, damit
+        # Fenstersuche und UI Automation die BLE-Loop nicht aufhalten; danach
+        # wird nichts neu geschickt (am Geraet aendert sich nichts).
+        self._on_focus_request = on_focus_request
         # system_provider: PC-Systemwerte (sysstats.SystemStats.sample(), ohne
         # "k") fuer den System-Bildschirm, ab Protokoll 2 alle SY_INTERVAL s.
         # Fehler darin duerfen die Verbindung nie stoeren.
@@ -878,6 +893,9 @@ class ClawdmeterLink:
             self._resend_all = True      # 0x01: "hi" und alles neu
             wake()
             return
+        if req[0] == "focus":
+            self._focus(req[1], req[2])
+            return
         if not self._on_switch_request:
             wake()
             return
@@ -894,6 +912,24 @@ class ClawdmeterLink:
 
         threading.Thread(target=_go, daemon=True,
                          name="clawdmeter-switch").start()
+
+    def _focus(self, index, name) -> None:
+        """REQ 0x05: Rueckruf in einem eigenen kurzen Thread, ohne Durchlauf
+        danach."""
+        if index is None:
+            self._log("Clawdmeter: focus request without an index dropped")
+            return
+        cb = self._on_focus_request
+        if not cb:
+            return
+
+        def _go():
+            try:
+                cb(index, name)
+            except Exception as e:
+                self._log(f"Clawdmeter: focus request failed: {e}")
+
+        threading.Thread(target=_go, daemon=True, name="clawdmeter-focus").start()
 
     async def _read_battery(self, client) -> None:
         """Ladestand lesen. Fehlt der Dienst, bleibt der Wert None - das ist

@@ -63,8 +63,8 @@ Step "3/5 App (PyInstaller, onedir)"
     --icon claude_sessions.ico `
     --add-data "claude_sessions.ico;." `
     --add-data "hooks\csb-name-gate.ps1;hooks" `
-    --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live --hidden-import sysstats `
-    --hidden-import psutil --hidden-import pynvml `
+    --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live --hidden-import sysstats --hidden-import termfocus `
+    --hidden-import psutil --hidden-import pynvml --hidden-import clr `
     claude_sessions.py
 Check "PyInstaller (app)"
 

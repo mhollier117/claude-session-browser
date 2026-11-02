@@ -246,6 +246,66 @@ def test_failing_switch_callback_still_refreshes():
     assert woke == 1
 
 
+def test_parse_focus_request():
+    assert cm.parse_request(b"\x05\x02better orca") == ("focus", 2, "better orca")
+    assert cm.parse_request(bytearray(b"\x05\x00Clawd\x00\x00junk")) == ("focus", 0, "Clawd")
+    assert cm.parse_request(b"\x05\x07") == ("focus", 7, "")
+    assert cm.parse_request(b"\x05\x01 caf\xc3\xa9 ") == ("focus", 1, "caf")   # ASCII only
+    assert cm.parse_request(b"\x05") == ("focus", None, "")         # no index
+
+
+def focus(data, cb=None):
+    """Run _handle_request for a focus message: (calls, wake count)."""
+    import threading
+    calls, woke, done = [], [], threading.Event()
+
+    def default(i, n):
+        calls.append((i, n, threading.current_thread().name))
+        done.set()
+
+    logs = []
+    lk = cm.ClawdmeterLink(log=logs.append, on_focus_request=cb or default)
+    lk._handle_request(data, lambda: woke.append(1))
+    done.wait(2)
+    return calls, len(woke), logs
+
+
+def test_focus_request_runs_callback_off_the_loop_without_refresh():
+    calls, woke, _ = focus(b"\x05\x03Names for Casper")
+    assert [(i, n) for i, n, _ in calls] == [(3, "Names for Casper")]
+    assert calls[0][2] == "clawdmeter-focus"
+    assert woke == 0                                     # nothing to resend
+
+
+def test_malformed_focus_request_is_dropped():
+    calls, woke, logs = focus(b"\x05")
+    assert calls == [] and woke == 0 and "dropped" in logs[-1]
+
+
+def test_focus_request_without_callback_does_nothing():
+    lk = cm.ClawdmeterLink()
+    woke = []
+    lk._handle_request(b"\x05\x00a", lambda: woke.append(1))
+    assert woke == []
+
+
+def test_failing_focus_callback_is_logged():
+    import threading
+    done = threading.Event()
+    logs = []
+
+    def boom(_i, _n):
+        raise RuntimeError("nope")
+
+    def log(msg):
+        logs.append(msg)
+        done.set()
+    lk = cm.ClawdmeterLink(log=log, on_focus_request=boom)
+    lk._handle_request(b"\x05\x00a", lambda: None)
+    done.wait(2)
+    assert "focus request failed: nope" in logs[-1]
+
+
 def test_switch_request_without_callback_is_a_refresh():
     lk = cm.ClawdmeterLink()
     woke = []

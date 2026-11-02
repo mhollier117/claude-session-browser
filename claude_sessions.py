@@ -4584,7 +4584,8 @@ class Api:
             extras_provider=self._clawd_extras,
             on_battery=self.on_clawd_battery,
             on_switch_request=self._clawd_switch_request,
-            system_provider=self._clawd_system)
+            system_provider=self._clawd_system,
+            on_focus_request=self._clawd_focus_request)
         return self._clawdmeter
 
     def _clawd_system(self):
@@ -4683,6 +4684,71 @@ class Api:
         else:
             self._clawd_log(f"Account switch from the gadget to {name!r} failed: "
                             f"{res.get('error')}")
+
+    def _clawd_resolve_session(self, index, name):
+        """Welche offene Session das Geraet meint: (Session, None) oder
+        (None, Grund).
+
+        Index und Reihenfolge wie in _clawd_extras ("se", hoechstens SE_MAX).
+        Der Name kommt so zurueck, wie er geschickt wurde - ASCII, hoechstens
+        SE_NAME_MAX Zeichen, bei knapper MTU weiter gekuerzt - deshalb zaehlt
+        auch ein Anfang. Passt der Eintrag am Index nicht (die Liste hat sich
+        inzwischen umsortiert), wird der Name unter allen offenen Sessions
+        gesucht; nur ein eindeutiger Treffer gilt."""
+        from clawdmeter import SE_MAX, SE_NAME_MAX, _ascii
+        want = str(name or "").rstrip()
+        if not want:
+            return None, "no name"
+        liste = list(self._live_sessions() or [])
+
+        def form(s):
+            return _ascii(s.get("name"), SE_NAME_MAX).rstrip()
+
+        def passt(s):
+            return form(s).startswith(want)
+
+        if isinstance(index, int) and 0 <= index < min(len(liste), SE_MAX) \
+                and passt(liste[index]):
+            return liste[index], None
+        exakt = [s for s in liste if form(s) == want]
+        if len(exakt) == 1:
+            return exakt[0], None
+        if exakt:
+            return None, "ambiguous"
+        anfang = [s for s in liste if passt(s)]
+        if len(anfang) == 1:
+            return anfang[0], None
+        return None, "ambiguous" if anfang else "not found"
+
+    def _clawd_focus_request(self, index, name):
+        """Das Clawdmeter bittet, das Terminalfenster einer Session nach vorn
+        zu holen (REQ 0x05, langer Druck auf den Clawd-Bildschirm). Kommt aus
+        einem eigenen kurzen Thread des Links; termfocus.py erledigt Fenster
+        und Tab mit festem Zeitbudget. Eine Zeile ins Protokoll je Anfrage."""
+        try:
+            sess, grund = self._clawd_resolve_session(index, name)
+        except Exception as e:
+            self._clawd_log(f"Focus from the gadget ({index}, {name!r}): "
+                            f"{type(e).__name__}: {e}")
+            return
+        if sess is None:
+            self._clawd_log(f"Focus from the gadget ({index}, {name!r}) ignored: {grund}")
+            return
+        pid = sess.get("pid")
+        if not isinstance(pid, int):
+            self._clawd_log(f"Focus from the gadget: {sess.get('name')!r} has no pid")
+            return
+        try:
+            import termfocus
+            res = termfocus.focus_session(pid, cwd=sess.get("cwd"))
+        except Exception as e:
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}", "ms": 0}
+        extra = "; ".join(x for x in (res.get("error"), res.get("note")) if x)
+        self._clawd_log(
+            f"Focus from the gadget: {sess.get('name')!r} (pid {pid}) -> "
+            f"{'ok' if res.get('ok') else 'failed'}, window={res.get('window')}, "
+            f"tab={res.get('tab')}, via={res.get('via') or '-'}, {res.get('ms')} ms"
+            + (f" ({extra})" if extra else ""))
 
     def js_error(self, text):
         """JavaScript-Fehler aus der Oberflaeche mitschreiben, in
