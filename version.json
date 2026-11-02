@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.2",
-  "notes": "Switch the PC's Claude account from the Clawdmeter: on the gadget's usage screen, hold about 1 second on an account. The gadget now receives every open session (up to 8, one message each) with its state and context use. Debug and log output is in English.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.2",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.2/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "3167caf439cda9dec9e6975e6379b87db415440d75d3f621dcf0dd9353991eb4"
+  "version": "1.6.1.3",
+  "notes": "Installs and updates on PCs where Attack Surface Reduction blocks programs started from %TEMP%: use the install-here zip (Install.cmd) in an exempt folder. Updates now download and unpack inside the app's own folder (_update) instead of %TEMP%.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.3",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.3/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "86e1ee95d86607bb1dd9232eac0609450a0e9e0e6426d35742a37d28b320e12b"
 }
