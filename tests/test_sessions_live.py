@@ -329,10 +329,13 @@ def test_app_bridge_sends_context_and_state():
     api._sessions_service = FakeService()
     api._accounts_mgr = lambda: type("M", (), {"accounts": lambda self: []})()
     assert api._clawd_session() == {"n": "Fix login bug", "h": "+1 working", "cx": 33, "cw": "1M"}
-    ss = api._clawd_extras()["ss"]
+    ss = api._clawd_extras()["se"]
     assert [(x["s"], x.get("c"), x.get("w")) for x in ss] == [
         ("n", 33, "1M"), ("w", 7, "200K"), ("d", None, None), ("z", None, None)]
     assert "c" not in ss[2] and "w" not in ss[2]
     api._sessions_service = type("S", (), {"latest": lambda self: [
         {"state": "working", "name": "Fresh", "ctx_pct": None, "ctx_window": None}]})()
     assert api._clawd_session() == {"n": "Fresh", "h": ""}
+    api._sessions_service = type("S", (), {"latest": lambda self: [
+        {"state": "working", "name": f"S{i}"} for i in range(11)]})()
+    assert [x["n"] for x in api._clawd_extras()["se"]] == [f"S{i}" for i in range(8)]

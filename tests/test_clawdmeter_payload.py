@@ -35,21 +35,37 @@ def link(extras, mtu=185, proto=2):
 
 def test_extras_fit_one_packet_and_trim():
     long = "A session name that is far too long for the little screen"
-    ex = {"ss": [{"n": long, "a": "work coding"} for _ in range(6)],
+    ex = {"se": [{"n": long, "a": "work coding", "s": "w", "c": 100, "w": "200K"}
+                 for _ in range(10)],
           "ac": [{"n": "an-extremely-long-nickname", "l": 1, "r": 1, "s": 9, "sr": 180,
                   "w": 32, "wr": 4320, "f": 4, "fr": 5000}]}
+    msgs = link(ex, mtu=90)._extras_messages()
+    for key, text in msgs.items():
+        if key.startswith("se"):
+            assert len(text.encode()) <= 87
+    assert "ss" not in msgs
+    assert [k for k in msgs if k.startswith("se")] == [f"se{i}" for i in range(cm.SE_MAX)]
+    for i in range(cm.SE_MAX):
+        se = json.loads(msgs[f"se{i}"])
+        assert se["k"] == "se" and se["i"] == i and se["t"] == cm.SE_MAX
+        assert cm.SE_NAME_MIN <= len(se["n"]) < cm.SE_NAME_MAX and long.startswith(se["n"])
+        assert se["s"] == "w" and se["c"] == 100 and se["w"] == "200K"
     msgs = link(ex, mtu=120)._extras_messages()
     for text in msgs.values():
         assert len(text.encode()) <= 117
-    ss = json.loads(msgs["ss"])
-    assert ss["k"] == "ss" and 1 <= len(ss["l"]) <= 4 and len(ss["l"][0]["n"]) <= 20
     ac = json.loads(msgs["ac0"])
     assert ac["k"] == "ac" and ac["i"] == 0 and ac["c"] == 1 and len(ac["n"]) <= 14
 
 
 def test_extras_are_ascii_only():
-    msgs = link({"ss": [{"n": "Café ✳ naïve", "a": "done"}], "ac": []})._extras_messages()
-    assert json.loads(msgs["ss"])["l"][0]["n"] == "Caf nave"
+    msgs = link({"se": [{"n": "Café ✳ naïve", "a": "done", "s": "d"}], "ac": []})._extras_messages()
+    assert json.loads(msgs["se0"])["n"] == "Caf nave"
+
+
+def test_no_open_sessions_sends_one_empty_message():
+    for ex in ({"se": [], "ac": []}, {}, {"se": None}):
+        msgs = link(ex)._extras_messages()
+        assert msgs == {"se": '{"k":"se","t":0}'}
 
 
 class FakeClient:
@@ -95,35 +111,78 @@ def test_context_change_triggers_resend_only_on_whole_percent():
 
 
 def test_session_entries_carry_state_and_context():
-    ex = {"ss": [{"n": "Fix login", "a": "allow", "s": "n", "c": 33, "w": "1M"},
+    ex = {"se": [{"n": "Fix login", "a": "allow", "s": "n", "c": 33, "w": "1M"},
                  {"n": "Fresh", "a": "work coding", "s": "w"}], "ac": []}
-    ss = json.loads(link(ex, mtu=247)._extras_messages()["ss"])["l"]
-    assert ss == ex["ss"]
+    msgs = link(ex, mtu=247)._extras_messages()
+    assert set(msgs) == {"se0", "se1"}
+    for i, want in enumerate(ex["se"]):
+        se = json.loads(msgs[f"se{i}"])
+        assert se == {"k": "se", "i": i, "t": 2, **want}
+    assert "c" not in json.loads(msgs["se1"]) and "w" not in json.loads(msgs["se1"])
 
 
-def test_long_session_list_shortens_names_before_dropping_sessions():
-    names = ["Refactor the payment service", "Fix flaky login test suite",
-             "Write release notes draft", "Investigate memory leak now"]
-    ex = {"ss": [{"n": n, "a": "work coding", "s": "w", "c": 100, "w": "200K"} for n in names],
-          "ac": []}
+def test_long_names_are_shortened_per_message_but_not_below_minimum():
+    names = ["Refactor the payment service", "Fix flaky login test suite", "Short"]
+    ex = {"se": [{"n": n, "a": "work coding", "s": "w", "c": 100, "w": "200K"} for n in names]}
 
-    def ss_for(mtu):
-        text = link(ex, mtu=mtu)._extras_messages()["ss"]
-        assert len(text.encode()) <= mtu - 3
-        return json.loads(text)["l"]
+    def se_for(mtu):
+        msgs = link(ex, mtu=mtu)._extras_messages()
+        out = []
+        for i in range(len(names)):
+            text = msgs[f"se{i}"]
+            n = json.loads(text)["n"]
+            assert len(text.encode()) <= mtu - 3 or len(n[:-1].rstrip()) < cm.SE_NAME_MIN
+            out.append(json.loads(text))
+        return out
 
-    roomy = ss_for(400)
-    assert [x["n"] for x in roomy] == [cm._ascii(n, cm.SS_NAME_MAX).rstrip() for n in names]
-    # Tight: all four still fit once names are cut, none shorter than 12.
-    full = len(json.dumps({"k": "ss", "l": roomy}, separators=(",", ":")))
-    tight = ss_for(full - 20 + 3)
-    assert len(tight) == 4
-    assert all(cm.SS_NAME_MIN <= len(x["n"]) < cm.SS_NAME_MAX for x in tight)
-    assert all(x["s"] == "w" and x["c"] == 100 and x["w"] == "200K" for x in tight)
-    # Tighter than four 12-char names allow: only then sessions go, from the end,
-    # and the ones that stay get their longer names back where room allows.
-    small = ss_for(244 - 60)
-    assert 1 <= len(small) < 4
-    assert all(n.startswith(x["n"]) for n, x in zip(names, small))
-    assert all(len(x["n"]) >= cm.SS_NAME_MIN for x in small)
-    assert len(small[0]["n"]) > cm.SS_NAME_MIN       # room left after dropping: longer again
+    roomy = se_for(247)
+    assert [x["n"] for x in roomy] == [cm._ascii(n, cm.SE_NAME_MAX).rstrip() for n in names]
+    # Tight: only the names that do not fit get cut, each message on its own.
+    full = len(json.dumps(roomy[0], separators=(",", ":")))
+    tight = se_for(full - 5 + 3)
+    assert all(len(json.dumps(x, separators=(",", ":"))) <= full - 5 for x in tight)
+    assert len(tight[0]["n"]) < len(roomy[0]["n"]) and tight[2]["n"] == "Short"
+    assert all(n.startswith(x["n"]) for n, x in zip(names, tight))
+    # Far too small: names stop at the minimum, nothing is dropped.
+    # A cut that would end on a space and leave fewer than four is skipped.
+    tiny = se_for(23)
+    assert [x["n"] for x in tiny] == ["Refa", "Fix f", "Shor"]
+    assert [x["i"] for x in tiny] == [0, 1, 2] and all(x["t"] == 3 for x in tiny)
+
+
+def sent_extras(lk):
+    import asyncio
+    client = FakeClient()
+    asyncio.run(lk._send_extras(client))
+    return client.writes
+
+
+def test_only_changed_session_messages_are_resent_and_t_trims():
+    rows = [{"n": f"Session {i}", "a": "work coding", "s": "w"} for i in range(5)]
+    ex = {"se": rows, "ac": []}
+    lk = link(ex)
+    lk._last_payload = {"s": 1, "w": 2}
+    first = sent_extras(lk)
+    assert [(m["i"], m["t"]) for m in first] == [(i, 5) for i in range(5)]
+    assert sent_extras(lk) == [] and not lk._anim_changed()       # nothing new
+    rows[3]["s"] = "n"                                          # one session changes
+    assert lk._anim_changed()
+    assert [(m["i"], m["s"]) for m in sent_extras(lk)] == [(3, "n")]
+    # Fewer sessions: every remaining message carries the new t, so all go out
+    # and the device trims its list; the dropped keys are forgotten.
+    del rows[2:]
+    assert lk._anim_changed()
+    assert [(m["i"], m["t"]) for m in sent_extras(lk)] == [(0, 2), (1, 2)]
+    assert set(lk._last_extras) == {"se0", "se1"}
+    # Grows again: the old keys se2..se4 must not suppress anything.
+    rows.extend({"n": f"Session {i}", "a": "work coding", "s": "w"} for i in range(2, 5))
+    assert [(m["i"], m["t"]) for m in sent_extras(lk)] == [(i, 5) for i in range(5)]
+    # None left: one empty message, then silence; and back from empty.
+    del rows[:]
+    assert sent_extras(lk) == [{"k": "se", "t": 0}]
+    assert sent_extras(lk) == [] and not lk._anim_changed()
+    rows.append({"n": "Back", "a": "done", "s": "d"})
+    assert lk._anim_changed()
+    assert sent_extras(lk) == [{"k": "se", "i": 0, "t": 1, "n": "Back", "a": "done", "s": "d"}]
+    rows.clear()
+    assert sent_extras(lk) == [{"k": "se", "t": 0}]

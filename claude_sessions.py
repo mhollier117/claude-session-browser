@@ -461,7 +461,7 @@ _LIVE_ACT = {
 }
 
 # Zustand einer Session -> ein Buchstabe fuer das Clawdmeter ("s" in der
-# "ss"-Liste): Farbe der Session-Markierung, und reihum durch die aktiven.
+# "se"-Meldung): Farbe der Session-Markierung, und reihum durch die aktiven.
 _CLAWD_STATE = {
     "needs_you": "n",   # Registry "waiting": Rueckfrage, Erlaubnis
     "limit": "l",
@@ -4469,7 +4469,8 @@ class Api:
             return int(round((at - now) / 60.0)) if at > now else 0
 
         sessions = []
-        for sess in (self._live_sessions() or [])[:4]:
+        # Hoechstens 8 (clawdmeter.SE_MAX): je Session eine eigene Meldung.
+        for sess in (self._live_sessions() or [])[:8]:
             item = {"n": sess["name"],
                     "a": BUDDY_STATE_MAP.get(_LIVE_ACT.get(sess["state"], "idle"), ""),
                     "s": _CLAWD_STATE.get(sess["state"], "i")}
@@ -4492,7 +4493,7 @@ class Api:
             elif a.get("relogin_soon") and a.get("relogin_by"):
                 item["x"] = max(0, int((a["relogin_by"] - now) // 86400))
             accounts.append(item)
-        return {"ss": sessions, "ac": accounts}
+        return {"se": sessions, "ac": accounts}
 
     def _clawd_session(self):
         """Name + Hinweis fuer das Clawdmeter: welche Session die Animation

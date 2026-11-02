@@ -64,11 +64,12 @@ RETRY_INTERVAL = 15     # Obergrenze der Wartezeit nach einem Fehlschlag
 CONNECT_TIMEOUT_FIRST = 8
 CONNECT_TIMEOUT = 20    # Abbruch wenn das Geraet nicht antwortet
 RETRY_BACKOFF = (2, 4, 8, 15)   # Wartezeit nach dem 1., 2., 3., n-ten Fehlschlag
-# Sessionnamen in der "ss"-Liste: hoechstens so lang; passt die Liste nicht in
-# ein BLE-Paket, werden sie bis auf SS_NAME_MIN gekuerzt, bevor Sessions
-# wegfallen.
-SS_NAME_MAX = 20
-SS_NAME_MIN = 12
+# Offene Sessions gehen als eigene "se"-Meldung je Session raus, hoechstens
+# SE_MAX Stueck. Sessionnamen: hoechstens SE_NAME_MAX Zeichen; passt eine
+# Meldung nicht in ein BLE-Paket, wird ihr Name bis auf SE_NAME_MIN gekuerzt.
+SE_MAX = 8
+SE_NAME_MAX = 20
+SE_NAME_MIN = 4
 
 
 # --------------------------------------------------------------------------
@@ -475,7 +476,7 @@ class ClawdmeterLink:
         # - bevorzugt vor der Header-Abfrage: kostet kein Kontingent und
         # funktioniert auch fuer Tarife ohne 5-Stunden-Limit.
         self._usage_provider = usage_provider or (lambda: None)
-        # extras_provider: {"ss": [...Sessions...], "ac": [...Konten...]} fuer
+        # extras_provider: {"se": [...Sessions...], "ac": [...Konten...]} fuer
         # Firmware ab Protokoll 2 (CAPS_CHAR_UUID).
         self._extras_provider = extras_provider or (lambda: {})
         self._proto = 1
@@ -710,11 +711,14 @@ class ClawdmeterLink:
 
     def _extras_messages(self) -> dict:
         """Zusatzmeldungen fuer Protokoll 2, je Schluessel ein fertiger
-        JSON-Text: "ss" = offene Sessions (Name, Animation, Zustand,
-        Kontext, dringendste zuerst), "ac<i>" = Konto i. Jede passt in ein
-        BLE-Paket (MTU - 3): bei "ss" werden erst alle Namen Schritt fuer
-        Schritt bis auf SS_NAME_MIN Zeichen gekuerzt (der laengste zuerst),
-        erst dann Sessions von hinten weggelassen."""
+        JSON-Text: "se<i>" = offene Session i (Name, Animation, Zustand,
+        Kontext, dringendste zuerst, hoechstens SE_MAX), "t" = Anzahl der
+        geschickten Sessions; ohne offene Session eine einzige Meldung "se"
+        mit t=0. "ac<i>" = Konto i. Jede passt in ein BLE-Paket (MTU - 3),
+        sonst wird ihr Name gekuerzt (Sessions bis SE_NAME_MIN, Konten bis 4).
+        Weil jede "se"-Meldung "t" traegt, aendert eine neue Anzahl alle
+        Session-Texte: sie gehen dann alle neu raus, und das Geraet kuerzt
+        seine Liste schon an der ersten."""
         try:
             ex = self._extras_provider() or {}
         except Exception:
@@ -725,26 +729,20 @@ class ClawdmeterLink:
         def enc(obj):
             return json.dumps(obj, separators=(",", ":"))
 
-        alle = [dict(x) for x in (ex.get("ss") or [])][:4]
-        for x in alle:
-            x["n"] = _ascii(x.get("n"), SS_NAME_MAX)
-        sessions = []
-        # So viele Sessions wie moeglich; fuer jede Anzahl erst die Namen
-        # kuerzen. Wer nach dem Weglassen noch Platz hat, behaelt die
-        # laengeren Namen.
-        for anzahl in range(len(alle), 0, -1):
-            probe = [dict(x) for x in alle[:anzahl]]
-            while len(enc({"k": "ss", "l": probe})) > limit:
-                laengster = max(probe, key=lambda x: len(x["n"]))
-                if len(laengster["n"]) <= SS_NAME_MIN:
-                    break
-                laengster["n"] = laengster["n"][:-1]
-            else:
-                sessions = probe
-                break
-        for x in sessions:
-            x["n"] = x["n"].rstrip()      # gekuerzt endet es sonst auf " "
-        out["ss"] = enc({"k": "ss", "l": sessions})
+        sessions = (ex.get("se") or [])[:SE_MAX]
+        if not sessions:
+            out["se"] = enc({"k": "se", "t": 0})
+        for i, x in enumerate(sessions):
+            msg = {"k": "se", "i": i, "t": len(sessions), **x}
+            msg["n"] = _ascii(msg.get("n"), SE_NAME_MAX).rstrip()
+            # Gekuerzt endet der Name sonst auf " "; ein Schnitt, der danach
+            # unter SE_NAME_MIN laege, wird uebersprungen.
+            name = msg["n"]
+            while len(enc(msg)) > limit and len(name) > SE_NAME_MIN:
+                name = name[:-1]
+                if len(name.rstrip()) >= SE_NAME_MIN:
+                    msg["n"] = name.rstrip()
+            out[f"se{i}"] = enc(msg)
 
         accounts = (ex.get("ac") or [])[:6]
         for i, a in enumerate(accounts):
