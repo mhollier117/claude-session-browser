@@ -94,3 +94,26 @@ def test_deleted_transcript_disappears(env):
     assert len(cs.collect_sessions(str(env))) == 2
     os.remove(b)
     assert [s["id"] for s in cs.collect_sessions(str(env))] == ["a"]
+
+
+def test_scan_progress_counts_files_and_runs(env):
+    for i in range(3):
+        write(env / "C--work-p" / ("s%d.jsonl" % i), user("q%d" % i), assistant(), mode="w")
+    (env / "C--work-p" / "notes.txt").write_text("not a session")
+    runs_before = cs._SCAN_PROGRESS["runs"]
+    out = cs.collect_sessions(str(env))
+    assert len(out) == 3
+    p = cs.Api.__new__(cs.Api).scan_progress()
+    assert p["total"] == 3 and p["done"] == 3
+    assert p["running"] is False
+    assert p["runs"] == runs_before + 1
+    p["done"] = -1                                   # a copy, not the live dict
+    assert cs._SCAN_PROGRESS["done"] == 3
+
+
+def test_scan_progress_resets_when_projects_dir_missing(env):
+    runs_before = cs._SCAN_PROGRESS["runs"]
+    assert cs.collect_sessions(str(env / "nope")) == []
+    assert cs._SCAN_PROGRESS["running"] is False
+    assert cs._SCAN_PROGRESS["total"] == 0
+    assert cs._SCAN_PROGRESS["runs"] == runs_before + 1

@@ -1179,6 +1179,11 @@ _SESSION_INDEX_FILE = os.path.join(
     os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local"),
     "ClaudeSessionBrowser", "session_index.json")
 _COLLECT_LOCK = threading.Lock()
+# Fortschritt des laufenden Einlesens, fuer die Anzeige beim ersten Start
+# ("312 / 1204"). Ohne Sperre gelesen - nur Zahlen, ein Zwischenstand reicht.
+# runs zaehlt abgeschlossene Durchlaeufe: wartet die Oberflaeche noch, obwohl
+# einer fertig ist, fragt sie neu (siehe boot()).
+_SCAN_PROGRESS = {"done": 0, "total": 0, "running": False, "runs": 0}
 
 
 def _load_session_index():
@@ -1223,6 +1228,15 @@ def collect_sessions(projects_dir):
 
 
 def _collect_sessions_locked(projects_dir):
+    _SCAN_PROGRESS.update(done=0, total=0, running=True)
+    try:
+        return _collect_sessions_scan(projects_dir)
+    finally:
+        _SCAN_PROGRESS["running"] = False
+        _SCAN_PROGRESS["runs"] += 1
+
+
+def _collect_sessions_scan(projects_dir):
     out = []
     if not projects_dir or not os.path.isdir(projects_dir):
         return out
@@ -1230,39 +1244,47 @@ def _collect_sessions_locked(projects_dir):
         _SESSION_PARSE_CACHE.update(_load_session_index())
     seen = {}
     changed = False
+    # Erst alle Dateien sammeln, damit der Fortschritt eine Gesamtzahl hat.
+    files = []
     for project in os.listdir(projects_dir):
         pdir = os.path.join(projects_dir, project)
         if not os.path.isdir(pdir):
             continue
-        for name in os.listdir(pdir):
-            if not name.endswith(".jsonl"):
-                continue
-            path = os.path.join(pdir, name)
-            # Vor dem Lesen messen: waechst die Datei waehrenddessen, passt
-            # der Schluessel beim naechsten Mal nicht mehr und sie wird neu
-            # gelesen.
+        try:
+            names = os.listdir(pdir)
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith(".jsonl"):
+                files.append((project, os.path.join(pdir, name)))
+    _SCAN_PROGRESS["total"] = len(files)
+    for project, path in files:
+        _SCAN_PROGRESS["done"] += 1
+        # Vor dem Lesen messen: waechst die Datei waehrenddessen, passt
+        # der Schluessel beim naechsten Mal nicht mehr und sie wird neu
+        # gelesen.
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        hit = _SESSION_PARSE_CACHE.get(path)
+        if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            entry = hit
+        else:
+            changed = True
+            prev_scan = hit[3] if hit and st.st_size >= hit[1] and hit[3] else None
             try:
-                st = os.stat(path)
+                scan = _scan_session(path, prev_scan)
+                info = _session_info(path, scan, st.st_mtime)
             except OSError:
                 continue
-            hit = _SESSION_PARSE_CACHE.get(path)
-            if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
-                entry = hit
-            else:
-                changed = True
-                prev_scan = hit[3] if hit and st.st_size >= hit[1] and hit[3] else None
-                try:
-                    scan = _scan_session(path, prev_scan)
-                    info = _session_info(path, scan, st.st_mtime)
-                except OSError:
-                    continue
-                entry = (st.st_mtime_ns, st.st_size, info, scan)
-            seen[path] = entry
-            info = entry[2]
-            if info:
-                info = dict(info)
-                info["project"] = project
-                out.append(info)
+            entry = (st.st_mtime_ns, st.st_size, info, scan)
+        seen[path] = entry
+        info = entry[2]
+        if info:
+            info = dict(info)
+            info["project"] = project
+            out.append(info)
     if len(seen) != len(_SESSION_PARSE_CACHE):
         changed = True                # Dateien geloescht
     _SESSION_PARSE_CACHE.clear()
@@ -4258,6 +4280,10 @@ class Api:
     def get_state(self):
         return self._state()
 
+    def scan_progress(self):
+        """Stand des Einlesens fuer die Startanzeige. Billig, ohne Sperre."""
+        return dict(_SCAN_PROGRESS)
+
     def refresh(self):
         return self._state(force=True)
 
@@ -6945,6 +6971,33 @@ function applyAccent(c){document.documentElement.style.setProperty('--accent',c)
   r=Math.min(255,r+25);g=Math.min(255,g+25);b=Math.min(255,b+25);
   document.documentElement.style.setProperty('--accent2',`rgb(${r},${g},${b})`);}
 
+// Erster Start: Fortschritt zeigen ("312 / 1204") und, falls die erste
+// Anfrage haengen bleibt, nach einem abgeschlossenen Einlesen neu fragen.
+// Vorher half da nur, das Fenster zu schliessen und neu zu oeffnen.
+function ladeZustand(hinweis){
+  return new Promise((resolve, reject)=>{
+    let fertig=false, retried=false, finishedAt=0, timer=null;
+    const done=v=>{ if(fertig) return; fertig=true; clearInterval(timer); resolve(v); };
+    const fail=e=>{ if(fertig) return; fertig=true; clearInterval(timer); reject(e); };
+    api.get_state().then(done, fail);
+    timer=setInterval(async()=>{
+      if(fertig) return;
+      let p=null;
+      try{ p=await api.scan_progress(); }catch(e){ return; }
+      if(!p || fertig) return;
+      if(p.running && p.total && hinweis)
+        hinweis.textContent = t('Sessions werden geladen…')+' '+p.done+' / '+p.total;
+      if(!p.running && p.runs>0){
+        if(!finishedAt) finishedAt=Date.now();
+        if(!retried && Date.now()-finishedAt>3000){
+          retried=true;
+          api.get_state().then(done, ()=>{});
+        }
+      }
+    }, 500);
+  });
+}
+
 let BOOTED=false;
 async function boot(){
   if(BOOTED) return; BOOTED=true;
@@ -6960,7 +7013,7 @@ async function boot(){
     // dann nicht leer dastehen, sondern sagen, was passiert.
     const ladeHinweis = document.getElementById('count');
     if(ladeHinweis && !ladeHinweis.textContent) ladeHinweis.textContent = t('Sessions werden geladen…');
-    STATE = await api.get_state();
+    STATE = await ladeZustand(ladeHinweis);
     sortCol = STATE.settings.sort_col || "when";
     sortRev = STATE.settings.sort_rev !== false;
     applyAccent(STATE.settings.accent || "#ec7456");
