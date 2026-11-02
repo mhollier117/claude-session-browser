@@ -499,7 +499,15 @@ def _parse_reset_epoch(text):
     return 0.0
 
 
-def _latest_jsonl_status(projects_dir, max_files=200, tail_kb=8):
+# Wie viele Transkripte die Aktivitaets-Erkennung hoechstens ansieht. Frueher
+# 200 - in Verzeichnis-Reihenfolge, nicht nach Alter. Ab ~200 Sessions lag die
+# gerade aktive dann oft ausserhalb, der Buddy las eine alte, laengst fertige
+# Session und zeigte "fertig"/Leerlauf statt Denken/Schreiben. Unter Windows
+# liefert scandir die Aenderungszeit gleich mit, auch tausende kosten kaum Zeit.
+_MAX_SCAN_FILES = 100_000
+
+
+def _latest_jsonl_status(projects_dir, max_files=_MAX_SCAN_FILES, tail_kb=8):
     """Liest die neuesten Zeilen der zuletzt geaenderten .jsonl-Datei und
     liefert einen detaillierten Status-Dict zurueck.
 
@@ -825,7 +833,7 @@ def _latest_jsonl_status(projects_dir, max_files=200, tail_kb=8):
     return result
 
 
-def _latest_jsonl_hits_limit(projects_dir, max_files=200, tail_kb=6):
+def _latest_jsonl_hits_limit(projects_dir, max_files=_MAX_SCAN_FILES, tail_kb=6):
     """Rueckwaerts-kompatibler Wrapper: nur is_limit als bool."""
     st = _latest_jsonl_status(projects_dir, max_files, tail_kb)
     return bool(st.get("is_limit"))
@@ -1599,9 +1607,9 @@ def _win_list_windows():
     return sorted(seen, key=str.lower)
 
 
-def _latest_session_mtime(projects_dir, max_files=200):
+def _latest_session_mtime(projects_dir, max_files=_MAX_SCAN_FILES):
     """Neueste mtime aller .jsonl-Dateien unter projects_dir. 0 wenn nichts
-    gefunden. Bricht nach `max_files` ab um die Latenz klein zu halten."""
+    gefunden. Siehe _MAX_SCAN_FILES zur Obergrenze."""
     if not projects_dir or not os.path.isdir(projects_dir):
         return 0.0
     latest = 0.0
