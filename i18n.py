@@ -816,6 +816,17 @@ TRANSLATIONS = {
 
         # ---- Konten (mehrere Claude-Accounts) ------------------------------
         "Konten": "Accounts",
+        "Fable · Woche": "Fable · week",
+        "Fable-Limit melden": "Report the Fable limit",
+        "Eine kurze, rein informative Meldung, wenn das Fable-Wochenlimit eines "
+        "Kontos voll ist – die anderen Modelle gehen weiter. Einmal pro Zeitraum.":
+            "A short, purely informational notice when an account's weekly Fable "
+            "limit is used up – other models keep working. Once per period.",
+        "voll – andere Modelle gehen weiter": "full – other models keep working",
+        "Fable-Meldung an ✓": "Fable notice on ✓",
+        "Fable-Meldung aus": "Fable notice off",
+        "Fable-Limit erreicht bei {name}. Andere Modelle gehen weiter. Wieder frei: {when}.":
+            "Fable limit reached on {name}. Other models keep working. Available again: {when}.",
         "Sessions werden geladen…": "Loading sessions…",
         "Deine Konten": "Your accounts",
         "Konto wechseln": "Switch account",

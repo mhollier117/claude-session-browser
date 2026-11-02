@@ -310,3 +310,19 @@ def test_dpapi_round_trip():
     c = A.DpapiCodec()
     blob = c.encode(b"secret sign-in")
     assert blob != b"secret sign-in" and c.decode(blob) == b"secret sign-in"
+
+
+def test_fable_weekly_limit_is_parsed_but_never_marks_the_account_limited():
+    data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 30},
+            "limits": [{"kind": "weekly_all", "is_active": True, "percent": 30},
+                       {"kind": "weekly_scoped", "is_active": True, "percent": 100,
+                        "resets_at": "2027-01-20T08:00:00Z",
+                        "scope": {"model": {"id": None, "display_name": "Fable"}}}]}
+    u = A.AccountManager.parse_usage(data, NOW)
+    assert u["f"] == 100 and u["f_reset_at"] > 0
+    assert u["limited"] is False          # other models keep working
+
+
+def test_no_fable_entry_means_none():
+    u = A.AccountManager.parse_usage({"five_hour": None, "seven_day": {"utilization": 5}}, NOW)
+    assert u["f"] is None

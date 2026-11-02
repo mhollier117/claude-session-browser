@@ -279,6 +279,8 @@ DEFAULT_SETTINGS = {
     "limit_reset_notified_for": 0,  # Fuer welche limit_reset_at wurde schon benachrichtigt (verhindert Doppel-Feuer)
     "notify_limit_near": True,   # Warnen bevor das 5h-Limit voll ist
     "limit_warn_pct": 90,        # ab wieviel Prozent gewarnt wird
+    "notify_fable_limit": True,  # Melden wenn das Fable-Wochenlimit eines Kontos voll ist / wieder frei
+    "fable_notified": {},        # Konto-ID -> Reset-Zeitpunkt, fuer den schon "voll" gemeldet wurde
     "notify_clawd_battery": True,  # Warnen wenn der Clawdmeter leer wird
     "clawd_battery_pct": 15,       # ab wieviel Prozent Restladung
     "clawd_battery_warned": False,  # Sperre, damit es nicht dauernd meldet
@@ -4490,6 +4492,46 @@ class Api:
             except Exception:
                 pass
 
+    def _check_fable_limits(self, accounts):
+        """Eigene, rein informative Meldung je Konto, wenn das Fable-Wochenlimit
+        voll ist (die anderen Modelle laufen weiter). Pro Reset-Zeitraum nur
+        einmal, auch ueber einen Neustart der App hinweg (fable_notified)."""
+        if not self.settings.get("notify_fable_limit", True):
+            return
+        done = dict(self.settings.get("fable_notified") or {})
+        changed = False
+        now = time.time()
+        for a in accounts or []:
+            u = a.get("usage") or {}
+            f = u.get("f")
+            if f is None:
+                continue
+            uuid, reset_at = a["uuid"], float(u.get("f_reset_at") or 0)
+            if f >= 100 and done.get(uuid) != reset_at:
+                when = (time.strftime("%a %H:%M", time.localtime(reset_at))
+                        if reset_at > now else "?")
+                self._tray_notify(t("Fable-Limit erreicht bei {name}. Andere Modelle "
+                                    "gehen weiter. Wieder frei: {when}.",
+                                    name=a.get("nickname", ""), when=when))
+                done[uuid] = reset_at
+                changed = True
+            elif f < 100 and uuid in done:
+                # Wieder frei: still vermerken, keine Meldung - die Fable-Meldung
+                # soll informieren, nicht stoeren (die anderen Modelle liefen ja).
+                del done[uuid]
+                changed = True
+        if changed:
+            self.settings["fable_notified"] = done
+            save_json(SETTINGS_FILE, self.settings)
+
+    def _tray_notify(self, text):
+        tray = getattr(self, "_tray", None)
+        if tray and tray.icon:
+            try:
+                tray.icon.notify(text, "Clawd")
+            except Exception:
+                pass
+
     def _notify_limit_near(self, pct, reset_at):
         """Tray-Meldung dass das 5h-Limit gleich voll ist."""
         mins = max(0, int((reset_at - time.time()) / 60))
@@ -4555,11 +4597,13 @@ class Api:
             # Fenster gewechselt: die Prozentzahl gilt weiter, die naechste
             # Abfrage bringt den neuen Zeitpunkt.
             wreset = float(meta.get("wreset_at") or 0)
-            return {"pct": pct, "reset_at": reset_at if reset_at > now else 0,
-                    "hit": pct >= 100,
-                    "wpct": int(meta.get("wpct") or 0),
-                    "wreset_at": wreset if wreset > now else 0,
-                    "known": True, "now": now}
+            out = {"pct": pct, "reset_at": reset_at if reset_at > now else 0,
+                   "hit": pct >= 100,
+                   "wpct": int(meta.get("wpct") or 0),
+                   "wreset_at": wreset if wreset > now else 0,
+                   "known": True, "now": now}
+            out.update(self._live_fable(now))
+            return out
 
         # Keine Header-Messung - bei Tarifen ohne 5-Stunden-Limit (Ultra, frueher
         # Max 20x) gibt es die nie. Dann zaehlt der Stand des aktiven Kontos
@@ -4574,12 +4618,14 @@ class Api:
             five = u.get("s")
             reset_at = float(u.get("s_reset_at") or 0)
             wreset = float(u.get("w_reset_at") or 0)
-            return {"pct": int(five or 0), "reset_at": reset_at if reset_at > now else 0,
-                    "hit": (five or 0) >= 100,
-                    "wpct": int(u.get("w") or 0),
-                    "wreset_at": wreset if wreset > now else 0,
-                    "no_five": five is None, "plan": live.get("plan") or "",
-                    "known": True, "now": now}
+            out = {"pct": int(five or 0), "reset_at": reset_at if reset_at > now else 0,
+                   "hit": (five or 0) >= 100,
+                   "wpct": int(u.get("w") or 0),
+                   "wreset_at": wreset if wreset > now else 0,
+                   "no_five": five is None, "plan": live.get("plan") or "",
+                   "known": True, "now": now}
+            out.update(self._live_fable(now))
+            return out
 
         # Nichts Frisches da. Selbst eine holen - sonst haengt die Anzeige
         # davon ab, ob der Nutzer die Limit-Meldungen eingeschaltet hat, und
@@ -4612,6 +4658,20 @@ class Api:
         return {"pct": 100 if hit else 0, "reset_at": reset_at, "hit": hit,
                 "wpct": 0, "wreset_at": 0,
                 "known": bool(hit), "now": now}
+
+    def _live_fable(self, now):
+        """Fable-Wochenlimit des aktiven Kontos (accounts.py), fuer die
+        Limit-Kachel. fpct None = nicht gemeldet."""
+        try:
+            live = next((a for a in self._accounts_mgr().accounts() if a["live"]), None)
+        except Exception:
+            live = None
+        u = (live or {}).get("usage") or {}
+        if u.get("f") is None:
+            return {"fpct": None, "freset_at": 0}
+        fr = float(u.get("f_reset_at") or 0)
+        return {"fpct": int(u["f"]), "freset_at": fr if fr > now else 0,
+                "plan": (live or {}).get("plan") or ""}
 
     def clawdmeter_state(self):
         """Status fuer die Einstellungs-Seite."""
@@ -5622,8 +5682,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
      lesen muessen. */
   /* Zwei Kacheln nach dem Vorbild des Clawdmeter: grosse Zahl, Balken,
      Restzeit. Eine Zeile ueber die volle Breite war fast nur Leerraum. */
-  .limitbox{display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));
-    gap:10px; margin:0}
+  /* Flex statt Raster: eine volle Breite ueberspannende Zeile (Hinweis) liess
+     im Raster alle Spalten stehen, und zwei Kacheln fuellten nur die Haelfte. */
+  .limitbox{display:flex; flex-wrap:wrap; gap:10px; margin:0}
+  .limitbox .lcard{flex:1 1 210px; min-width:0}
+  .limitbox .lnote, .limitbox .lempty{flex:1 1 100%}
   .lcard{background:var(--bg); border:1px solid var(--border); border-radius:9px;
     padding:8px 11px 9px}
   .lcard .top{display:flex; align-items:baseline; gap:8px}
@@ -7482,6 +7545,11 @@ function renderSettings(){
         <div class="toggle ${st.notify_limit_near!==false?'on':''}" onclick="toggleLimitNear(this)"></div>
       </div>
       <div class="row2">
+        <div><div class="lbl">Fable-Limit melden</div>
+          <div class="desc">Eine kurze, rein informative Meldung, wenn das Fable-Wochenlimit eines Kontos voll ist – die anderen Modelle gehen weiter. Einmal pro Zeitraum.</div></div>
+        <div class="toggle ${st.notify_fable_limit!==false?'on':''}" onclick="toggleFableNotif(this)"></div>
+      </div>
+      <div class="row2">
         <div><div class="lbl">Schwelle für die Vorwarnung</div>
           <div class="desc">Ab wie viel Prozent des 5-Stunden-Limits gewarnt wird.</div></div>
         <div><input type="number" min="10" max="100" step="5"
@@ -7613,6 +7681,30 @@ function limitCard(pct, resetAt, tag, voll, ohneReset){
 function nurWocheKachel(pct, resetAt){
   return limitCard(pct, resetAt, t('Woche'), pct >= 100).replace('class="lcard', 'class="lcard wide');
 }
+// Alle Limit-Kacheln eines Kontos: 5 Stunden (falls es das Limit gibt), Woche,
+// Fable-Woche (falls gemeldet). Steht nur eine Kachel da, nimmt sie die ganze
+// Breite ein; ohne 5-Stunden-Limit folgt der klare Hinweis darunter.
+function limitKacheln(s, sReset, w, wReset, f, fReset, plan){
+  const ohneFuenf = (s === null || s === undefined);
+  const hatFable = !(f === null || f === undefined);
+  let html = '';
+  if(!ohneFuenf)
+    html += limitCard(s, sReset, t('5 Stunden'), s >= 100, s === 0 ? t('kein Fenster aktiv') : '');
+  html += (ohneFuenf && !hatFable) ? nurWocheKachel(w, wReset)
+                                   : limitCard(w, wReset, t('Woche'), w >= 100);
+  if(hatFable){
+    // Nur zur Info: ist Fable voll, gehen die anderen Modelle weiter. Deshalb
+    // ruhiges Gelb statt Alarm-Rot, und "Limit erreicht" am Konto bleibt aus.
+    let k = limitCard(f, fReset, t('Fable · Woche'), false);
+    if(f >= 100)
+      k = k.replace('class="lcard hot', 'class="lcard mid')
+           .replace(/<div class="sub">[^<]*<\/div>/,
+                    `<div class="sub">${esc(t('voll – andere Modelle gehen weiter'))}</div>`);
+    html += k;
+  }
+  if(ohneFuenf) html += nurWocheHinweis(plan);
+  return html;
+}
 function nurWocheHinweis(plan){
   const text = plan
     ? t('{plan}-Tarif: nur Wochenlimit, kein 5-Stunden-Limit', {plan: plan})
@@ -7630,9 +7722,10 @@ function paintLimit(){
     return;
   }
   if(d.reset_at && d.reset_at*1000 <= Date.now()){ refreshLimit(); return; }
-  if(d.no_five){
-    // Tarif ohne 5-Stunden-Limit (Ultra): nur die Woche, klar gekennzeichnet.
-    box.innerHTML = nurWocheKachel(d.wpct, d.wreset_at) + nurWocheHinweis(d.plan);
+  if(d.no_five || (d.fpct !== null && d.fpct !== undefined)){
+    // Tarif ohne 5-Stunden-Limit (Ultra) und/oder mit eigenem Fable-Wochenlimit.
+    box.innerHTML = limitKacheln(d.no_five ? null : (d.hit ? 100 : d.pct), d.reset_at,
+                                 d.wpct, d.wreset_at, d.fpct, d.freset_at, d.plan);
     return;
   }
   let html = limitCard(d.hit ? 100 : d.pct, d.reset_at, t('5 Stunden'), d.hit);
@@ -7943,15 +8036,7 @@ function accountCard(a){
   const meta = [a.email, a.plan].filter(Boolean).map(esc).join(' · ');
   let tiles = '';
   if(u && !a.needs_relogin){
-    if(u.s === null || u.s === undefined){
-      // Kein 5-Stunden-Limit (Ultra, frueher Max 20x): nur die Woche zeigen,
-      // klar gekennzeichnet - eine leere 5-Stunden-Kachel waere irrefuehrend.
-      tiles = nurWocheKachel(u.w, u.w_reset_at) + nurWocheHinweis(a.plan);
-    } else {
-      tiles = limitCard(u.s, u.s_reset_at, t('5 Stunden'), u.s >= 100,
-                        u.s === 0 ? t('kein Fenster aktiv') : '')
-            + limitCard(u.w, u.w_reset_at, t('Woche'), u.w >= 100);
-    }
+    tiles = limitKacheln(u.s, u.s_reset_at, u.w, u.w_reset_at, u.f, u.f_reset_at, a.plan);
   } else if(!a.needs_relogin){
     tiles = '<div class="lempty">' + esc(t('Noch keine Auslastungsdaten – kommt mit der nächsten Abfrage.')) + '</div>';
   }
@@ -8076,6 +8161,11 @@ async function toggleLimitNotif(el){
   const on=!el.classList.contains('on'); el.classList.toggle('on',on);
   ingest(await api.update_setting('notify_limit_reset', on));
   toast(on?t('Limit-Benachrichtigung an ✓'):t('Limit-Benachrichtigung aus'));
+}
+async function toggleFableNotif(el){
+  const on=!el.classList.contains('on'); el.classList.toggle('on',on);
+  ingest(await api.update_setting('notify_fable_limit', on));
+  toast(on?t('Fable-Meldung an ✓'):t('Fable-Meldung aus'));
 }
 async function toggleLimitNear(el){
   const on=!el.classList.contains('on'); el.classList.toggle('on',on);
@@ -8986,10 +9076,11 @@ def main():
     try:
         from accounts import AccountsService
 
-        def _accounts_changed(_liste):
+        def _accounts_changed(liste):
             tray_obj = getattr(api, "_tray", None)
             if tray_obj:
                 tray_obj.refresh_menu()
+            api._check_fable_limits(liste)
 
         api._accounts_service = AccountsService(api._accounts_mgr(),
                                                 on_change=_accounts_changed)

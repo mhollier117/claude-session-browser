@@ -590,13 +590,27 @@ class AccountManager:
         s = float(five.get("utilization") or 0) if isinstance(five, dict) else None
         w = float(seven.get("utilization") or 0)
         limited = (s or 0) >= 100 or w >= 100
+        fable = None
         for lim in data.get("limits") or []:
-            if isinstance(lim, dict) and lim.get("is_active") and (lim.get("percent") or 0) >= 100:
+            if not isinstance(lim, dict):
+                continue
+            model = (((lim.get("scope") or {}).get("model") or {}).get("display_name") or "")
+            if lim.get("kind") == "weekly_scoped" and "fable" in str(model).lower():
+                # The Fable model's own weekly allowance (seen on Max/Ultra plans).
+                # Full only blocks Fable, not the account: not part of "limited".
+                fable = lim
+                continue
+            if lim.get("is_active") and (lim.get("percent") or 0) >= 100:
                 limited = True
-        return {"s": None if s is None else round(s),
-                "s_reset_at": _iso_to_epoch((five or {}).get("resets_at")),
-                "w": round(w), "w_reset_at": _iso_to_epoch(seven.get("resets_at")),
-                "limited": limited, "at": now}
+        out = {"s": None if s is None else round(s),
+               "s_reset_at": _iso_to_epoch((five or {}).get("resets_at")),
+               "w": round(w), "w_reset_at": _iso_to_epoch(seven.get("resets_at")),
+               "limited": limited, "at": now,
+               "f": None, "f_reset_at": 0.0}
+        if fable is not None:
+            out["f"] = round(float(fable.get("percent") or 0))
+            out["f_reset_at"] = _iso_to_epoch(fable.get("resets_at"))
+        return out
 
     def poll(self, uuid: str) -> dict | None:
         """Read one account's usage (free endpoint, no quota used)."""
@@ -794,8 +808,9 @@ def _cli(argv) -> int:
                         (" *SIGN IN AGAIN*" if a["needs_relogin"] else "")
                 s = "  -" if u.get("s") is None else f"{u['s']:>3}"
                 w = "  -" if u.get("w") is None else f"{u['w']:>3}"
+                fb = "  -" if u.get("f") is None else f"{u['f']:>3}"
                 print(f"{'>' if a['live'] else ' '} {a['nickname']:<16} {a['email']:<28} "
-                      f"5h {s}%  wk {w}%  {room:<7} "
+                      f"5h {s}%  wk {w}%  fable {fb}%  {room:<7} "
                       f"re-login by {_fmt_when(a['relogin_by'])}{flags}")
         return 0
     except AccountError as e:

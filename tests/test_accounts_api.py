@@ -96,3 +96,24 @@ def test_limit_card_shows_both_for_plans_with_5h(api, env):
     a._LIMIT_HEADER_TRUST_S = 10 ** 12
     st = a.limit_state()
     assert st["no_five"] is False and st["pct"] == 30 and st["wpct"] == 50
+
+
+def test_fable_notice_once_per_period_and_quiet_when_free(monkeypatch):
+    sent = []
+    a = cs.Api.__new__(cs.Api)
+    a.settings = {}
+    a._tray_notify = sent.append
+    monkeypatch.setattr(cs, "save_json", lambda *args, **kw: None)
+    acct = lambda f, reset: [{"uuid": UA, "nickname": "Main",
+                              "usage": {"f": f, "f_reset_at": reset}}]
+    a._check_fable_limits(acct(100, 2e9))
+    a._check_fable_limits(acct(100, 2e9))            # same period: no repeat
+    assert len(sent) == 1 and "Main" in sent[0]
+    a._check_fable_limits(acct(3, 2.6e9))            # reset: silent, re-armed
+    assert len(sent) == 1
+    a._check_fable_limits(acct(100, 2.6e9))          # next period: notify again
+    assert len(sent) == 2
+    a.settings["notify_fable_limit"] = False
+    a.settings["fable_notified"] = {}
+    a._check_fable_limits(acct(100, 3e9))            # switched off
+    assert len(sent) == 2
