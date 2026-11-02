@@ -33,6 +33,9 @@ DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+# Lesbar ab Firmware-Protokoll 2: "2". Fehlt sie, versteht das Geraet nur die
+# einfache Nutzungsmeldung - Sessions- und Kontenlisten gehen dann nicht raus.
+CAPS_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
 # Standard-Batteriedienst. Die Firmware haengt ihn ueber NimBLEs HID-Geraet
 # mit an (ble_set_battery_level -> hid_dev->setBatteryLevel), also nichts
 # Eigenes - jedes Werkzeug kann den Ladestand lesen.
@@ -141,6 +144,49 @@ def _reset_minutes(reset_ts: str, now: float) -> int:
     ts = _reset_epoch(reset_ts)
     mins = (ts - now) / 60.0
     return int(round(mins)) if mins > 0 else 0
+
+
+def _ascii(v, limit: int) -> str:
+    """Fuer das Display: nur ASCII (die Schriften des Geraets haben keine
+    Umlaute oder Emoji), Leerraum zusammengezogen, gekuerzt."""
+    text = str(v or "").encode("ascii", "ignore").decode()
+    return " ".join(text.split())[:limit]
+
+
+def payload_from_usage(u: dict, now: float | None = None) -> tuple[dict, dict]:
+    """Nutzung aus accounts.py (kostenlose /api/oauth/usage-Abfrage) als
+    BLE-Payload + Meta, im selben Format wie poll_usage_meta. Zusaetzlich:
+    "x5": 1 = dieses Konto hat kein 5-Stunden-Limit (Ultra); "f"/"fr" =
+    Fable-Wochenlimit in Prozent / Minuten bis zum Reset. Aeltere Firmware
+    ignoriert die neuen Felder."""
+    now = time.time() if now is None else now
+
+    def mins(at) -> int:
+        at = float(at or 0)
+        return int(round((at - now) / 60.0)) if at > now else 0
+
+    s = u.get("s")
+    payload = {
+        "s": int(s) if s is not None else 0,
+        "sr": mins(u.get("s_reset_at")),
+        "w": int(u.get("w") or 0),
+        "wr": mins(u.get("w_reset_at")),
+        "st": "rejected" if u.get("limited") else "allowed",
+        "acct": "pro",
+        "ok": True,
+    }
+    if s is None:
+        payload["x5"] = 1
+    if u.get("f") is not None:
+        payload["f"] = int(u["f"])
+        payload["fr"] = mins(u.get("f_reset_at"))
+    payload["t"] = int(now) + time.localtime(now).tm_gmtoff
+    payload["tf"] = 24
+    meta = {"session_reset_at": float(u.get("s_reset_at") or 0),
+            "weekly_reset_at": float(u.get("w_reset_at") or 0),
+            "session_pct": payload["s"], "weekly_pct": payload["w"],
+            "status": payload["st"], "at": float(u.get("at") or now)}
+    return payload, meta
 
 
 def poll_usage(token: str) -> dict | None:
@@ -397,7 +443,8 @@ class ClawdmeterLink:
     pywebview-GUI davon nichts mitbekommt."""
 
     def __init__(self, log=None, address_provider=None, on_usage=None,
-                 anim_provider=None, on_battery=None, session_provider=None):
+                 anim_provider=None, on_battery=None, session_provider=None,
+                 usage_provider=None, extras_provider=None):
         """address_provider: Funktion die die gewuenschte Geraeteadresse liefert
         (leer/None = automatisch suchen). Wird bei jedem Versuch neu gefragt,
         damit eine Aenderung in den Einstellungen sofort greift.
@@ -417,6 +464,16 @@ class ClawdmeterLink:
         # mit; aeltere Firmware ignoriert unbekannte Felder.
         self._session_provider = session_provider or (lambda: {"n": "", "h": ""})
         self._last_session = ("", "")
+        # usage_provider: Nutzung des aktiven Kontos aus accounts.py (oder None)
+        # - bevorzugt vor der Header-Abfrage: kostet kein Kontingent und
+        # funktioniert auch fuer Tarife ohne 5-Stunden-Limit.
+        self._usage_provider = usage_provider or (lambda: None)
+        # extras_provider: {"ss": [...Sessions...], "ac": [...Konten...]} fuer
+        # Firmware ab Protokoll 2 (CAPS_CHAR_UUID).
+        self._extras_provider = extras_provider or (lambda: {})
+        self._proto = 1
+        self._mtu = 23
+        self._last_extras = {}
         # Wird nur bei einer Aenderung gerufen, nicht bei jedem Nachlesen -
         # sonst haengt an jedem Poll eine Auswertung.
         self._on_battery = on_battery
@@ -556,6 +613,14 @@ class ClawdmeterLink:
             self._set(connected=True, last_error=None)
             self._log(f"Clawdmeter verbunden ({address})")
             try:
+                caps = await client.read_gatt_char(CAPS_CHAR_UUID)
+                self._proto = int(bytes(caps).decode().strip() or "1")
+            except Exception:
+                self._proto = 1          # aeltere Firmware
+            self._mtu = int(getattr(client, "mtu_size", 23) or 23)
+            self._last_extras = {}       # neue Sitzung: alles neu schicken
+            self._log(f"Clawdmeter: Protokoll {self._proto}, MTU {self._mtu}")
+            try:
                 await client.start_notify(REQ_CHAR_UUID, on_refresh)
             except Exception:
                 pass  # Refresh-Kanal ist optional, der Poll-Loop reicht
@@ -631,9 +696,49 @@ class ClawdmeterLink:
             return False            # noch keine Zahlen -> nichts zu ergaenzen
         try:
             return (self._current_anim() != self._last_anim
-                    or self._current_session() != self._last_session)
+                    or self._current_session() != self._last_session
+                    or (self._proto >= 2 and self._extras_messages() != self._last_extras))
         except Exception:
             return False
+
+    def _extras_messages(self) -> dict:
+        """Zusatzmeldungen fuer Protokoll 2, je Schluessel ein fertiger
+        JSON-Text: "ss" = offene Sessions (Name + Animation, dringendste
+        zuerst), "ac<i>" = Konto i. Jede passt in ein BLE-Paket (MTU - 3):
+        Namen werden gekuerzt, notfalls Sessions weggelassen."""
+        try:
+            ex = self._extras_provider() or {}
+        except Exception:
+            ex = {}
+        limit = max(20, self._mtu - 3)
+        out = {}
+
+        def enc(obj):
+            return json.dumps(obj, separators=(",", ":"))
+
+        sessions = [dict(x) for x in (ex.get("ss") or [])][:4]
+        for x in sessions:
+            x["n"] = _ascii(x.get("n"), 20)
+        while sessions and len(enc({"k": "ss", "l": sessions})) > limit:
+            sessions.pop()
+        out["ss"] = enc({"k": "ss", "l": sessions})
+
+        accounts = (ex.get("ac") or [])[:6]
+        for i, a in enumerate(accounts):
+            msg = dict(a, k="ac", i=i, c=len(accounts))
+            msg["n"] = _ascii(msg.get("n"), 14)
+            while len(enc(msg)) > limit and len(msg["n"]) > 4:
+                msg["n"] = msg["n"][:-1]
+            out[f"ac{i}"] = enc(msg)
+        return out
+
+    async def _send_extras(self, client) -> None:
+        msgs = self._extras_messages()
+        for key, text in msgs.items():
+            if self._last_extras.get(key) == text:
+                continue
+            await client.write_gatt_char(RX_CHAR_UUID, text.encode(), response=False)
+        self._last_extras = msgs
 
     def _current_session(self) -> tuple:
         """(Name, Hinweis), fuer das Display auf ASCII gebracht und gekuerzt:
@@ -642,10 +747,7 @@ class ClawdmeterLink:
             d = self._session_provider() or {}
         except Exception:
             d = {}
-        def ascii24(v):
-            text = str(v or "").encode("ascii", "ignore").decode()
-            return " ".join(text.split())[:24]
-        return ascii24(d.get("n")), ascii24(d.get("h"))
+        return _ascii(d.get("n"), 24), _ascii(d.get("h"), 24)
 
     def _current_anim(self) -> str:
         try:
@@ -656,11 +758,19 @@ class ClawdmeterLink:
     async def _send_once(self, client, poll: bool = True) -> None:
         import asyncio
         if poll or self._last_payload is None:
-            token = read_token()
-            if not token:
-                self._set(last_error=t("Kein Claude-Token gefunden"))
-                return
-            payload, meta = await asyncio.to_thread(poll_usage_meta, token)
+            payload = meta = None
+            try:
+                u = self._usage_provider()
+            except Exception:
+                u = None
+            if u:
+                payload, meta = payload_from_usage(u)
+            else:
+                token = read_token()
+                if not token:
+                    self._set(last_error=t("Kein Claude-Token gefunden"))
+                    return
+                payload, meta = await asyncio.to_thread(poll_usage_meta, token)
             if not payload:
                 self._set(last_error=t("API-Abfrage fehlgeschlagen"))
                 return
@@ -684,6 +794,8 @@ class ClawdmeterLink:
 
         data = json.dumps(payload, separators=(",", ":")).encode()
         await client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+        if self._proto >= 2:
+            await self._send_extras(client)
         self._set(last_send=time.time(), last_error=None)
         if poll:
             self._log(f"Clawdmeter: {payload['s']}% / {payload['w']}%"

@@ -56,8 +56,8 @@ USER_AGENT = "ClaudeSessionBrowser-accounts"
 
 RENEW_BEFORE_S = 3600        # renew a stored account when < 1 h is left
 SWAP_MIN_VALID_S = 300       # a swapped-in token must be good for 5 more min
-LIVE_POLL_S = 300            # usage of the live account (the Bluetooth link
-                             # already polls it every minute on its own)
+LIVE_POLL_S = 60             # usage of the live account: the free endpoint also
+                             # feeds the Clawdmeter, which shows it within a minute
 PARKED_POLL_S = 600          # usage of stored accounts
 RELOGIN_WARN_DAYS = 5
 LOCK_STALE_S = 30

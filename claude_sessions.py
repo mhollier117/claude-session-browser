@@ -4296,6 +4296,53 @@ class Api:
         svc = getattr(self, "_sessions_service", None)
         return svc.latest() if svc else None
 
+    def _clawd_usage(self):
+        """Nutzung des aktiven Kontos aus accounts.py, solange sie frisch ist
+        (sonst None -> der Link fragt wie frueher die Header ab). Funktioniert
+        auch fuer Tarife ohne 5-Stunden-Limit und kostet kein Kontingent."""
+        try:
+            live = next((a for a in self._accounts_mgr().accounts() if a["live"]), None)
+        except Exception:
+            return None
+        if not live or not live.get("usage"):
+            return None
+        if (live.get("usage_age_s") or 1e9) > self._LIMIT_HEADER_TRUST_S:
+            return None
+        return live["usage"]
+
+    def _clawd_extras(self):
+        """Fuer das Clawdmeter (ab Protokoll 2): offene Sessions zum
+        Durchwischen auf dem Clawd-Bildschirm und alle Konten fuer die
+        Nutzungsansicht. Prozente -1 = gibt es bei diesem Konto nicht."""
+        now = time.time()
+
+        def mins(at):
+            at = float(at or 0)
+            return int(round((at - now) / 60.0)) if at > now else 0
+
+        sessions = []
+        for sess in (self._live_sessions() or [])[:4]:
+            sessions.append({"n": sess["name"],
+                             "a": BUDDY_STATE_MAP.get(_LIVE_ACT.get(sess["state"], "idle"), "")})
+        accounts = []
+        try:
+            liste = self._accounts_mgr().accounts()
+        except Exception:
+            liste = []
+        for a in liste:
+            u = a.get("usage") or {}
+            item = {"n": a.get("nickname", ""), "l": 1 if a.get("live") else 0,
+                    "r": -1 if a.get("has_room") is None else (1 if a["has_room"] else 0),
+                    "s": u["s"] if u.get("s") is not None else -1, "sr": mins(u.get("s_reset_at")),
+                    "w": u["w"] if u.get("w") is not None else -1, "wr": mins(u.get("w_reset_at")),
+                    "f": u["f"] if u.get("f") is not None else -1, "fr": mins(u.get("f_reset_at"))}
+            if a.get("needs_relogin"):
+                item["x"] = 0
+            elif a.get("relogin_soon") and a.get("relogin_by"):
+                item["x"] = max(0, int((a["relogin_by"] - now) // 86400))
+            accounts.append(item)
+        return {"ss": sessions, "ac": accounts}
+
     def _clawd_session(self):
         """Name + Hinweis fuer das Clawdmeter: welche Session die Animation
         meint, und was die anderen tun ("+2 working")."""
@@ -4319,6 +4366,8 @@ class Api:
             on_usage=self.on_usage_meta,
             anim_provider=self._clawd_anim,
             session_provider=self._clawd_session,
+            usage_provider=self._clawd_usage,
+            extras_provider=self._clawd_extras,
             on_battery=self.on_clawd_battery)
         return self._clawdmeter
 
