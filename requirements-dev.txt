@@ -1,0 +1,4 @@
+# Development: run, test and build the installer.
+-r requirements.txt
+pytest>=8
+pyinstaller>=6.10

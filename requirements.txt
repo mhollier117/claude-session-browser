@@ -1,0 +1,7 @@
+# Runtime libraries of the Claude Session Browser (bundled into the build;
+# end users need none of this: they install the released installer).
+pywebview>=6.2
+pystray>=0.19.5
+Pillow>=11
+bleak>=1.0
+truststore>=0.10

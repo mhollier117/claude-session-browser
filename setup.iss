@@ -13,7 +13,10 @@
 ; ==========================================================================
 
 #define MyAppName "Claude Session Browser"
-#define MyAppVersion "1.6.1"
+; build.ps1 passes the version from claude_sessions.py: ISCC /DMyAppVersion=...
+#ifndef MyAppVersion
+  #define MyAppVersion "1.6.1"
+#endif
 #define MyAppPublisher "juppeee"
 #define MyAppURL "https://github.com/mhollier117/claude-session-browser"
 #define MyAppExeName "ClaudeSessionBrowser.exe"
