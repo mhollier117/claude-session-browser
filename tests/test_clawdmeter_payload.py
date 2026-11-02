@@ -343,3 +343,225 @@ def test_system_message_shrinks_only_cc_to_fit_mtu():
 def test_halve_averages_neighbours():
     assert cm._halve([0, 100, 50, 51, 7]) == [50, 51, 7]
     assert cm._halve([]) == []
+
+
+# -- several PCs on one gadget: "hi" / "use", REQ 0x03 / 0x04 ----------------
+
+USAGE = {"s": 10, "s_reset_at": 0, "w": 20, "w_reset_at": 0, "limited": False}
+
+
+def multi_extras():
+    return {"se": [{"n": "Fix login", "a": "work coding", "s": "w"}],
+            "ac": [{"n": "Main", "l": 1}]}
+
+
+def multi_link(on_usage=None, proto=2, mtu=247, extras=None):
+    ex = extras if extras is not None else multi_extras()
+    lk = cm.ClawdmeterLink(session_provider=lambda: {"n": "", "h": ""},
+                           usage_provider=lambda: USAGE,
+                           extras_provider=lambda: ex,
+                           system_provider=lambda: SY, on_usage=on_usage)
+    lk._proto, lk._mtu = proto, mtu
+    return lk
+
+
+def kinds(writes):
+    return [m.get("k", "usage") for m in writes]
+
+
+def cycle(lk):
+    import asyncio
+    client = FakeClient()
+    asyncio.run(lk._cycle(client))
+    return client.writes
+
+
+def req(lk, data):
+    """Feed one REQ notification; return how often it woke the loop."""
+    woke = []
+    lk._handle_request(data, lambda: woke.append(1))
+    return len(woke)
+
+
+def test_parse_request_shown_states():
+    assert cm.parse_request(b"\x03") == ("active",)
+    assert cm.parse_request(b"\x04") == ("inactive",)
+    assert cm.parse_request(bytearray(b"\x03\x00")) == ("active",)
+    assert cm.parse_request(b"\x01") == ("refresh",)            # unchanged
+
+
+def test_status_shown_is_unknown_until_the_gadget_says():
+    lk = multi_link()
+    assert lk.status()["shown"] is None and lk._active()      # older firmware: active
+    assert req(lk, b"\x04") == 0 and lk.status()["shown"] is False and not lk._active()
+    assert req(lk, b"\x03") == 1 and lk.status()["shown"] is True and lk._active()
+    assert req(lk, b"\x03") == 0                               # already shown: no resend
+
+
+def test_without_shown_messages_everything_goes_out_as_before():
+    assert kinds(cycle(multi_link())) == ["usage", "se", "ac", "sy"]
+
+
+def test_inactive_sends_nothing_but_hi(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "DESK-PC")
+    metas, ex = [], multi_extras()
+    lk = multi_link(on_usage=metas.append, extras=ex)
+    assert kinds(cycle(lk)) == ["usage", "se", "ac", "sy"]
+    assert req(lk, b"\x04") == 0
+    assert cycle(lk) == []                                     # no usage, se/ac, sy
+    assert len(metas) == 2                                     # still polled, for the limits
+    ex["se"][0]["s"] = "n"                                     # a change: still silent
+    assert not lk._anim_changed()
+    assert sent_system(lk) == []
+    assert req(lk, b"\x01") == 1                               # refresh while inactive
+    assert cycle(lk) == [{"k": "hi", "n": "DESK-PC"}]          # only hi
+
+
+def test_refresh_resends_everything_hi_first(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "DESK-PC")
+    lk = multi_link()
+    assert kinds(cycle(lk)) == ["usage", "se", "ac", "sy"]
+    assert kinds(cycle(lk)) == ["usage"]                       # extras unchanged, sy not due
+    assert req(lk, b"\x01") == 1
+    writes = cycle(lk)
+    assert kinds(writes) == ["hi", "usage", "se", "ac", "sy"]  # nothing skipped
+    assert writes[0] == {"k": "hi", "n": "DESK-PC"}
+    assert kinds(cycle(lk)) == ["usage"]                       # back to change-only
+
+
+def test_becoming_active_again_resends_everything(monkeypatch):
+    monkeypatch.setenv("COMPUTERNAME", "DESK-PC")
+    lk = multi_link()
+    cycle(lk)
+    req(lk, b"\x04")
+    assert cycle(lk) == []
+    assert req(lk, b"\x03") == 1                               # wakes the loop
+    assert kinds(cycle(lk)) == ["hi", "usage", "se", "ac", "sy"]
+
+
+def test_hi_carries_the_ascii_computer_name(monkeypatch):
+    import socket
+    monkeypatch.setenv("COMPUTERNAME", "BÜRO-RECHNER-NUMMER-ZWEI")
+    assert cm.pc_name() == "BRO-RECHNER-NUM" and len(cm.pc_name()) <= cm.PC_NAME_MAX
+    monkeypatch.setenv("COMPUTERNAME", "ÄÖÜ")                  # nothing left: hostname
+    monkeypatch.setattr(socket, "gethostname", lambda: "lab-box")
+    assert cm.pc_name() == "lab-box"
+    monkeypatch.setattr(socket, "gethostname", lambda: "")
+    assert cm.pc_name() == "PC"
+    monkeypatch.delenv("COMPUTERNAME")
+    assert cm.pc_name() == "PC"
+    # Small packets: the name is cut until the message fits, never emptied.
+    monkeypatch.setenv("COMPUTERNAME", "WORKSTATION-001")
+    msg = multi_link(mtu=23)._hi_message()
+    assert len(json.dumps(msg, separators=(",", ":"))) <= 20 and msg["n"]
+    assert "WORKSTATION-001".startswith(msg["n"])
+    assert multi_link()._hi_message() == {"k": "hi", "n": "WORKSTATION-001"}
+
+
+def test_hi_needs_protocol_2():
+    import asyncio
+    client = FakeClient()
+    asyncio.run(multi_link(proto=1)._send_hi(client))
+    assert client.writes == []
+
+
+def run_loop():
+    import asyncio
+    import threading
+    loop = asyncio.new_event_loop()
+    th = threading.Thread(target=loop.run_forever, daemon=True)
+    th.start()
+    return loop, th
+
+
+def stop_loop(loop, th):
+    loop.call_soon_threadsafe(loop.stop)
+    th.join(2)
+    loop.close()
+
+
+def test_request_show_sends_use_on_the_live_connection():
+    lk = multi_link()
+    assert lk.request_show() is False                          # not connected
+    loop, th = run_loop()
+    try:
+        client = FakeClient()
+        lk._live = (loop, client)
+        assert lk.request_show() is True
+        assert client.writes == [{"k": "use"}]
+        lk._proto = 1                                          # old firmware: no "use"
+        assert lk.request_show() is False and client.writes == [{"k": "use"}]
+    finally:
+        stop_loop(loop, th)
+    lk._proto = 2
+    assert lk.request_show() is False                          # loop gone
+
+
+def test_request_show_reports_a_failed_write():
+    class Broken:
+        async def write_gatt_char(self, *_a, **_k):
+            raise OSError("gone")
+    logs = []
+    lk = cm.ClawdmeterLink(log=logs.append)
+    lk._proto = 2
+    loop, th = run_loop()
+    try:
+        lk._live = (loop, Broken())
+        assert lk.request_show() is False
+        assert any("show request failed" in m for m in logs)
+    finally:
+        stop_loop(loop, th)
+
+
+def test_session_says_hi_on_connect_and_forgets_shown_after(monkeypatch):
+    """A whole connection with a fake BleakClient: hi right after subscribing
+    to REQ, then the normal pass; afterwards shown and the live handle reset."""
+    import asyncio
+    import pytest
+    bleak = pytest.importorskip("bleak")
+    monkeypatch.setenv("COMPUTERNAME", "DESK-PC")
+    order = []
+
+    class Svc:
+        uuid = cm.SERVICE_UUID
+
+    class FakeBleak:
+        def __init__(self, *_a, **_k):
+            self.services = [Svc()]
+            self.mtu_size = 247
+            self.is_connected = True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def read_gatt_char(self, uuid):
+            if uuid == cm.CAPS_CHAR_UUID:
+                return b"2"
+            raise OSError("no battery service")
+
+        async def start_notify(self, uuid, cb):
+            order.append(("notify", uuid))
+
+        async def write_gatt_char(self, _uuid, data, response=False):
+            order.append(("write", json.loads(bytes(data))))
+
+    monkeypatch.setattr(bleak, "BleakClient", FakeBleak)
+
+    def system():
+        lk._stop.set()                 # end the session after the first pass
+        return SY
+
+    ex = multi_extras()
+    lk = cm.ClawdmeterLink(session_provider=lambda: {"n": "", "h": ""},
+                           usage_provider=lambda: USAGE,
+                           extras_provider=lambda: ex, system_provider=system)
+    lk._set(shown=False)               # left over from an earlier connection
+    asyncio.run(lk._session("AA:BB:CC:DD:EE:FF"))
+    writes = [x[1] for x in order if x[0] == "write"]
+    assert order[0] == ("notify", cm.REQ_CHAR_UUID)
+    assert writes[0] == {"k": "hi", "n": "DESK-PC"}
+    assert kinds(writes) == ["hi", "usage", "se", "ac", "sy"]
+    assert lk.status()["shown"] is None and lk._live is None

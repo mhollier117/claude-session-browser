@@ -35,8 +35,15 @@ RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 # Erstes Byte einer Meldung auf REQ: 0x02 = Konto wechseln (Byte 1 = Index wie
 # in den "ac"-Meldungen, ab Byte 2 der Spitzname, so wie er geschickt wurde).
-# Alles andere (0x01, leer) heisst wie bisher "bitte neue Daten".
+# 0x03 = das Geraet zeigt jetzt diesen PC, 0x04 = es zeigt einen anderen PC
+# (bis zu drei gekoppelte PCs sind gleichzeitig verbunden). Alles andere
+# (0x01, leer) heisst "bitte alles neu schicken".
 REQ_SWITCH = 0x02
+REQ_ACTIVE = 0x03
+REQ_INACTIVE = 0x04
+# Name dieses PCs in der "hi"-Meldung: so viele Zeichen zeigt die Auswahl
+# auf dem Geraet (Windows-Computernamen sind ohnehin hoechstens 15 lang).
+PC_NAME_MAX = 15
 # Lesbar ab Firmware-Protokoll 2: "2". Fehlt sie, versteht das Geraet nur die
 # einfache Nutzungsmeldung - Sessions- und Kontenlisten gehen dann nicht raus.
 CAPS_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
@@ -181,14 +188,34 @@ def parse_request(data) -> tuple | None:
 
     ("refresh",) fuer 0x01, leer oder unbekannt (alte Bedeutung);
     ("switch", index, spitzname) fuer 0x02 mit Index; None fuer ein 0x02
-    ohne Index - das wird verworfen, statt irgendein Konto zu raten."""
+    ohne Index - das wird verworfen, statt irgendein Konto zu raten.
+    ("active",) fuer 0x03 (Geraet zeigt diesen PC), ("inactive",) fuer 0x04
+    (Geraet zeigt einen anderen PC)."""
     raw = bytes(data or b"")
+    if raw and raw[0] == REQ_ACTIVE:
+        return ("active",)
+    if raw and raw[0] == REQ_INACTIVE:
+        return ("inactive",)
     if not raw or raw[0] != REQ_SWITCH:
         return ("refresh",)
     if len(raw) < 2:
         return None
     nick = raw[2:].split(b"\0", 1)[0].decode("ascii", "ignore").strip()
     return ("switch", raw[1], nick)
+
+
+def pc_name() -> str:
+    """Name dieses PCs fuer die "hi"-Meldung: der Windows-Computername, nur
+    ASCII (die Schriften des Geraets haben keine Umlaute), hoechstens
+    PC_NAME_MAX Zeichen. Bleibt davon nichts uebrig, der Hostname, sonst "PC"."""
+    name = _ascii(os.environ.get("COMPUTERNAME"), PC_NAME_MAX).strip()
+    if not name:
+        try:
+            import socket
+            name = _ascii(socket.gethostname(), PC_NAME_MAX).strip()
+        except Exception:
+            name = ""
+    return name or "PC"
 
 
 def payload_from_usage(u: dict, now: float | None = None) -> tuple[dict, dict]:
@@ -536,7 +563,18 @@ class ClawdmeterLink:
         self._status = {"connected": False, "last_send": None,
                         "last_error": None, "address": None,
                         "battery": None,   # Ladestand in %, None = unbekannt
-                        "attempt": 0}      # laufender Verbindungsversuch
+                        "attempt": 0,      # laufender Verbindungsversuch
+                        # Zeigt das Geraet diesen PC? True/False nach REQ
+                        # 0x03/0x04, None = unbekannt (keine Verbindung oder
+                        # aeltere Firmware, die nur einen PC kennt).
+                        "shown": None}
+        # Beim naechsten Durchlauf alles neu schicken: "hi", Nutzung, alle
+        # "se"/"ac" (auch unveraenderte) und sofort "sy". Gesetzt von REQ
+        # 0x01 und wenn das Geraet wieder diesen PC zeigt.
+        self._resend_all = False
+        # (Loop, Client) der laufenden Verbindung, fuer request_show() aus
+        # anderen Threads. None ohne Verbindung.
+        self._live = None
         self._lock = threading.Lock()
         # Bricht eine laufende Wartezeit ab ("Jetzt verbinden").
         self._wake = threading.Event()
@@ -579,11 +617,64 @@ class ClawdmeterLink:
         with self._lock:
             return dict(self._status)
 
+    def request_show(self, timeout: float = 3.0) -> bool:
+        """Das Geraet bitten, diesen PC zu zeigen ({"k":"use"}). Darf aus
+        jedem Thread kommen (Oberflaeche, Tray), nur nicht aus der BLE-Loop
+        selbst: die Meldung geht ueber die asyncio-Loop der Verbindung raus.
+        False ohne Verbindung, bei Firmware unter Protokoll 2 oder wenn das
+        Schreiben scheitert."""
+        import asyncio
+        live = self._live
+        if not live or self._proto < 2:
+            return False
+        loop, client = live
+        coro = self._write_json(client, {"k": "use"})
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            coro.close()             # Loop schon beendet
+            return False
+        try:
+            fut.result(timeout=timeout)
+        except Exception as e:
+            fut.cancel()
+            self._log(f"Clawdmeter: show request failed: {e}")
+            return False
+        self._log("Clawdmeter: asked the gadget to show this PC")
+        return True
+
     # -- intern ------------------------------------------------------------
 
     def _set(self, **kw) -> None:
         with self._lock:
             self._status.update(kw)
+
+    def _active(self) -> bool:
+        """Zeigt das Geraet diesen PC? Solange es nichts dazu gesagt hat
+        (aeltere Firmware), ja - dann laeuft alles wie bisher."""
+        with self._lock:
+            return self._status.get("shown") is not False
+
+    async def _write_json(self, client, obj) -> None:
+        data = json.dumps(obj, separators=(",", ":")).encode()
+        await client.write_gatt_char(RX_CHAR_UUID, data, response=False)
+
+    def _hi_message(self) -> dict:
+        """{"k":"hi","n":Name dieses PCs}; der Name wird gekuerzt, bis die
+        Meldung in ein BLE-Paket passt (hoechstens bis auf 1 Zeichen)."""
+        limit = max(20, self._mtu - 3)
+        msg = {"k": "hi", "n": pc_name()}
+        while (len(json.dumps(msg, separators=(",", ":"))) > limit
+               and len(msg["n"]) > 1):
+            msg["n"] = msg["n"][:-1].rstrip() or msg["n"][:1]
+        return msg
+
+    async def _send_hi(self, client) -> None:
+        """Diesen PC beim Geraet vorstellen. Nur ab Protokoll 2 - aeltere
+        Firmware liest jede Meldung ohne bekanntes "k" als Nutzung."""
+        if self._proto < 2:
+            return
+        await self._write_json(client, self._hi_message())
 
     async def _sleep(self, seconds: float) -> None:
         """Wartet, bricht aber sofort ab wenn stop() oder reconnect() kam."""
@@ -680,10 +771,15 @@ class ClawdmeterLink:
             self._mtu = int(getattr(client, "mtu_size", 23) or 23)
             self._last_extras = {}       # neue Sitzung: alles neu schicken
             self._log(f"Clawdmeter: protocol {self._proto}, MTU {self._mtu}")
+            # Neue Verbindung: bis das Geraet etwas anderes sagt, gilt dieser
+            # PC als angezeigt (so verhaelt sich auch aeltere Firmware).
+            self._set(shown=None)
+            self._resend_all = False
             try:
                 await client.start_notify(REQ_CHAR_UUID, on_refresh)
             except Exception:
                 pass  # Refresh-Kanal ist optional, der Poll-Loop reicht
+            await self._send_hi(client)
 
             def on_battery(_char, data) -> None:
                 if data:
@@ -703,32 +799,54 @@ class ClawdmeterLink:
             self._last_anim = ""
             self._last_sy = None
             self._sy_failed = False
-            while not self._stop.is_set() and client.is_connected:
-                await self._send_once(client)
-                await self._read_battery(client)
-                await self._maybe_send_system(client)
-                # Auf den naechsten Poll warten -- oder frueher, wenn das
-                # Geraet selbst um Daten bittet.
-                # In kleinen Scheiben warten, damit stop() sofort greift und
-                # damit ein Buddy-Wechsel schnell durchkommt.
-                refresh.clear()
-                waited = 0.0
-                while (waited < POLL_INTERVAL and not self._stop.is_set()
-                       and not refresh.is_set()):
-                    try:
-                        await asyncio.wait_for(refresh.wait(), 1.0)
-                    except asyncio.TimeoutError:
-                        waited += 1.0
-                        # Der Buddy wechselt viel haeufiger als die Nutzungs-
-                        # zahlen. Solche Wechsel gehen ohne neue API-Abfrage
-                        # raus -- sonst wuerde jedes Blinzeln einen echten
-                        # Request kosten.
-                        if self._anim_changed():
-                            await self._send_once(client, poll=False)
-                        await self._maybe_send_system(client)
+            self._live = (loop, client)
+            try:
+                while not self._stop.is_set() and client.is_connected:
+                    # Vor dem Senden zuruecksetzen: eine Bitte, die waehrend
+                    # des Sendens kommt, loest so gleich den naechsten
+                    # Durchlauf aus, statt bis zum naechsten Poll zu warten.
+                    refresh.clear()
+                    await self._cycle(client)
+                    # Auf den naechsten Poll warten -- oder frueher, wenn das
+                    # Geraet selbst um Daten bittet.
+                    # In kleinen Scheiben warten, damit stop() sofort greift
+                    # und damit ein Buddy-Wechsel schnell durchkommt.
+                    waited = 0.0
+                    while (waited < POLL_INTERVAL and not self._stop.is_set()
+                           and not refresh.is_set()):
+                        try:
+                            await asyncio.wait_for(refresh.wait(), 1.0)
+                        except asyncio.TimeoutError:
+                            waited += 1.0
+                            # Der Buddy wechselt viel haeufiger als die
+                            # Nutzungszahlen. Solche Wechsel gehen ohne neue
+                            # API-Abfrage raus -- sonst wuerde jedes Blinzeln
+                            # einen echten Request kosten.
+                            if self._anim_changed():
+                                await self._send_once(client, poll=False)
+                            await self._maybe_send_system(client)
+            finally:
+                self._live = None
         # Ohne Verbindung ist der Ladestand unbekannt, nicht "wie zuletzt" -
-        # ein stehengebliebener Wert waere schlimmer als gar keiner.
-        self._set(connected=False, battery=None)
+        # ein stehengebliebener Wert waere schlimmer als gar keiner. Welchen
+        # PC das Geraet zeigt, ebenso.
+        self._set(connected=False, battery=None, shown=None)
+
+    async def _cycle(self, client) -> None:
+        """Ein Durchlauf: Nutzung abfragen und schicken, Ladestand lesen,
+        Systemwerte schicken. Steht ein Neuschicken an (REQ 0x01 oder das
+        Geraet zeigt wieder diesen PC), zuerst "hi" und alles ohne
+        Aenderungserkennung. Zeigt das Geraet einen anderen PC, geht ausser
+        "hi" nichts raus; abgefragt wird trotzdem, damit die Limit-Meldungen
+        weiter Zahlen bekommen."""
+        if self._resend_all:
+            self._resend_all = False
+            await self._send_hi(client)
+            self._last_extras = {}       # nichts als "schon da" ueberspringen
+            self._last_sy = None         # "sy" sofort, nicht erst nach 2 s
+        await self._send_once(client)
+        await self._read_battery(client)
+        await self._maybe_send_system(client)
 
     def _handle_request(self, data, wake) -> None:
         """Eine Meldung auf REQ. wake() stoesst einen sofortigen Durchlauf an
@@ -741,7 +859,26 @@ class ClawdmeterLink:
         if req is None:
             self._log("Clawdmeter: account switch without an index dropped")
             return
-        if req[0] != "switch" or not self._on_switch_request:
+        if req[0] == "inactive":
+            # Das Geraet zeigt einen anderen PC: ab jetzt still bis auf "hi".
+            self._set(shown=False)
+            self._log("Clawdmeter: the gadget shows another PC")
+            return
+        if req[0] == "active":
+            with self._lock:
+                war = self._status.get("shown")
+                self._status["shown"] = True
+            if war is not True:
+                # Wieder angezeigt: alles neu, das Geraet hat nichts von uns.
+                self._log("Clawdmeter: the gadget shows this PC")
+                self._resend_all = True
+                wake()
+            return
+        if req[0] == "refresh":
+            self._resend_all = True      # 0x01: "hi" und alles neu
+            wake()
+            return
+        if not self._on_switch_request:
             wake()
             return
         _, index, nick = req
@@ -786,6 +923,8 @@ class ClawdmeterLink:
         nachschicken."""
         if self._last_payload is None:
             return False            # noch keine Zahlen -> nichts zu ergaenzen
+        if not self._active():
+            return False            # Geraet zeigt einen anderen PC
         try:
             return (self._current_anim() != self._last_anim
                     or self._current_session() != self._last_session
@@ -880,6 +1019,8 @@ class ClawdmeterLink:
     async def _maybe_send_system(self, client) -> None:
         """Systemwerte schicken, wenn SY_INTERVAL seit dem letzten Mal um ist.
         Etwas Spielraum, weil der Loop in 1-s-Scheiben aufwacht."""
+        if not self._active():
+            return                   # Geraet zeigt einen anderen PC
         now = time.monotonic()
         if self._last_sy is not None and now - self._last_sy < SY_INTERVAL - 0.2:
             return
@@ -939,6 +1080,12 @@ class ClawdmeterLink:
                     self._on_usage(meta)
                 except Exception:
                     pass
+
+        if not self._active():
+            # Das Geraet zeigt einen anderen PC: abgefragt ist (fuer die
+            # Limit-Meldungen), geschickt wird nichts. Wird dieser PC wieder
+            # angezeigt, geht ohnehin alles neu raus.
+            return
 
         payload = dict(self._last_payload)
         anim = self._current_anim()

@@ -417,6 +417,9 @@ DEFAULT_SETTINGS = {
     # Zeigt das Geraet dieselbe Animation wie der Buddy? Aus = es waehlt selbst
     # nach Auslastung aus (Originalverhalten der Firmware).
     "clawdmeter_buddy": True,
+    # GPU auf dem System-Bildschirm: "any" (jede GPU), "nvidia" (nur NVIDIA)
+    # oder "off" (keine GPU-Werte, dann wird auch nichts abgefragt).
+    "clawdmeter_gpu": "any",
 }
 
 # Wenn diese Konstante sich aendert, sehen bestehende Nutzer das Onboarding erneut
@@ -3411,16 +3414,44 @@ class TrayManager:
     User auf X klickt. Rechtsklick → Menue mit Oeffnen/Beenden. Linksklick
     → App wieder zeigen."""
 
-    def __init__(self, get_window, on_quit, accounts=None, on_switch=None):
+    def __init__(self, get_window, on_quit, accounts=None, on_switch=None,
+                 clawd_enabled=None, clawd_show=None):
         """accounts: liefert die Kontenliste (accounts.AccountManager.accounts),
         on_switch(uuid): wechselt das Konto. Beide optional - ohne sie gibt es
-        kein Konten-Untermenue."""
+        kein Konten-Untermenue.
+
+        clawd_enabled(): ist die Clawdmeter-Anbindung an? clawd_show(): bittet
+        das Geraet, diesen PC zu zeigen. Ohne beide fehlt der Menuepunkt."""
         self.get_window = get_window
         self.on_quit = on_quit
         self.accounts = accounts
         self.on_switch = on_switch
+        self.clawd_enabled = clawd_enabled
+        self.clawd_show = clawd_show
         self.icon = None
         self._thread = None
+
+    def _clawd_item(self, pystray):
+        """Menuepunkt "Auf dem Clawdmeter zeigen", nur sichtbar solange die
+        Anbindung an ist. Das Senden laeuft in einem eigenen Thread: es
+        wartet kurz auf die BLE-Loop, das Tray-Menue soll nicht haengen."""
+        def _visible(item):
+            try:
+                return bool(self.clawd_enabled())
+            except Exception:
+                return False
+
+        def _go(icon, item):
+            def _send():
+                try:
+                    self.clawd_show()
+                except Exception:
+                    pass
+            threading.Thread(target=_send, daemon=True,
+                             name="clawdmeter-show").start()
+
+        return pystray.MenuItem(lambda item: t("Auf dem Clawdmeter zeigen"),
+                                _go, visible=_visible)
 
     def refresh_menu(self):
         """Menue neu aufbauen - unter Windows liest pystray Untermenues nur
@@ -3512,6 +3543,8 @@ class TrayManager:
             eintraege.append(pystray.MenuItem(
                 lambda item: t("Konto wechseln"),
                 pystray.Menu(lambda: iter(self._account_items()))))
+        if self.clawd_enabled and self.clawd_show:
+            eintraege.append(self._clawd_item(pystray))
         eintraege.append(pystray.MenuItem(lambda item: t("Beenden"), _quit))
         menu = pystray.Menu(*eintraege)
         self.icon = pystray.Icon(
@@ -4564,7 +4597,10 @@ class Api:
                 return None
             try:
                 from sysstats import SystemStats
-                stats = self._sysstats = SystemStats()
+                # Als Funktion: eine geaenderte Einstellung wirkt beim
+                # naechsten Takt, ohne Neustart.
+                stats = self._sysstats = SystemStats(
+                    gpu_mode=lambda: self.settings.get("clawdmeter_gpu") or "any")
             except Exception:
                 self._sysstats_failed = True
                 return None
@@ -5055,7 +5091,23 @@ class Api:
         link = self._clawd_link()
         if link is not None:
             link.start() if on else link.stop()
+        # Der Tray-Punkt "Auf dem Clawdmeter zeigen" haengt am Schalter.
+        tray = getattr(self, "_tray", None)
+        if tray:
+            tray.refresh_menu()
         return self.clawdmeter_state()
+
+    def clawdmeter_show_here(self):
+        """Das Geraet bitten, diesen PC zu zeigen (bis zu drei PCs sind
+        gleichzeitig verbunden). "sent" sagt, ob die Bitte rausging."""
+        sent = False
+        link = self._clawd_link() if self.settings.get("clawdmeter") else None
+        if link is not None:
+            try:
+                sent = bool(link.request_show())
+            except Exception:
+                sent = False
+        return dict(self.clawdmeter_state(), sent=sent)
 
     def set_autostart(self, on):
         """Autostart im Windows-Registry setzen und Setting speichern."""
@@ -8287,10 +8339,20 @@ function renderClawd(){
         <div><div class="lbl">Clawd-Buddy spiegeln</div><div class="desc">Das Gerät zeigt dieselbe Animation wie dein Clawd-Buddy auf dem Desktop — statt selbst eine nach Auslastung zu wählen. Braucht einen eingeschalteten Buddy.</div></div>
         <div class="toggle ${st.clawdmeter_buddy!==false?'on':''}" onclick="toggleClawdBuddy(this)"></div>
       </div>
+      <div class="row2">
+        <div><div class="lbl">GPU auf dem Gerät</div><div class="desc">Welche Grafikkarte der System-Bildschirm zeigt: die mit dem meisten eigenen Speicher, nur eine NVIDIA-Karte oder gar keine.</div></div>
+        <select class="sel-input" onchange="api.update_setting('clawdmeter_gpu',this.value).then(ingest)">
+          <option value="any" ${(st.clawdmeter_gpu||'any')==='any'?'selected':''}>Jede GPU</option>
+          <option value="nvidia" ${st.clawdmeter_gpu==='nvidia'?'selected':''}>Nur NVIDIA</option>
+          <option value="off" ${st.clawdmeter_gpu==='off'?'selected':''}>Ausblenden</option>
+        </select>
+      </div>
       <div class="field">
         <button class="btn accent" onclick="clawdReconnect(this)">Jetzt verbinden</button>
         <button class="btn" onclick="loadClawdDevices(true)">Geräte neu suchen</button>
+        <button class="btn" onclick="clawdShowHere(this)">Auf dem Gerät zeigen</button>
       </div>
+      <div class="desc" id="clawd-shown"></div>
 ` : '';
   // Die Auslastung steht hier statt in den Einstellungen: sie ist eine
   // Anzeige, keine Einstellung - und sie gehoert zu dem, was das Geraet zeigt.
@@ -8327,7 +8389,33 @@ async function refreshClawd(){
     const r = await api.clawdmeter_state();
     setClawdStatus(el, r);
     setClawdStatus(document.getElementById('clawd-head-status'), r);
+    setClawdShown(r);
   }catch(e){}
+}
+// Bis zu drei PCs haengen gleichzeitig am Geraet; es zeigt einen davon.
+// shown: true/false meldet das Geraet, null = unbekannt (keine Verbindung
+// oder aeltere Firmware) - dann steht dort nichts.
+function setClawdShown(r){
+  const el = document.getElementById('clawd-shown');
+  if(!el) return;
+  const s = (r && r.status) || {};
+  el.textContent = s.shown === true ? t('Wird auf dem Gerät angezeigt')
+                 : s.shown === false ? t('Das Gerät zeigt gerade einen anderen PC')
+                 : '';
+}
+async function clawdShowHere(btn){
+  btn.disabled = true;
+  let r = null;
+  try{ r = await api.clawdmeter_show_here(); }catch(e){}
+  btn.disabled = false;
+  if(r){
+    setClawdStatus(document.getElementById('clawd-status'), r);
+    setClawdShown(r);
+  }
+  if(!r || !r.sent){ toast(t('Das hat nicht geklappt.')); return; }
+  // Das Geraet bestaetigt mit 0x03 - kurz danach nachsehen.
+  setTimeout(refreshClawd, 800);
+  setTimeout(refreshClawd, 2500);
 }
 async function toggleClawd(el){
   const on=!el.classList.contains('on'); el.classList.toggle('on',on);
@@ -9525,7 +9613,9 @@ def main():
     tray = TrayManager(lambda: (webview.windows[0] if webview.windows else None),
                        real_quit,
                        accounts=lambda: api._accounts_mgr().accounts(),
-                       on_switch=api.accounts_switch)
+                       on_switch=api.accounts_switch,
+                       clawd_enabled=lambda: bool(api.settings.get("clawdmeter")),
+                       clawd_show=api.clawdmeter_show_here)
     api._tray = tray
     if s.get("close_to_tray", True):
         tray.start()

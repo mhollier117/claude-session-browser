@@ -206,6 +206,8 @@ TRANSLATIONS = {
             "Quit the app completely now",
         "Aus offenen Fenstern wählen…":
             "Choose from open windows…",
+        "Ausblenden":
+            "Hide",
         "Auslastung":
             "Usage",
         "Aussehen":
@@ -344,6 +346,8 @@ TRANSLATIONS = {
             "Select window",
         "Filtert live nach Titel, Ordner, ID oder erster Frage – auch mit mehreren Wörtern.":
             "Filters live by title, folder, ID, or first question – works with multiple words too.",
+        "GPU auf dem Gerät":
+            "GPU on the gadget",
         "Gerät":
             "Device",
         "Gerät gewählt ✓":
@@ -376,6 +380,8 @@ TRANSLATIONS = {
             "Jump into session",
         "Interne ID (standardmäßig ausgeblendet). Praktisch zum Suchen.":
             "Internal ID (hidden by default). Handy for searching.",
+        "Jede GPU":
+            "Any GPU",
         "Jetzt installieren":
             "Install now",
         "Jetzt verbinden":
@@ -416,6 +422,8 @@ TRANSLATIONS = {
             "Nothing found.",
         "Normalerweise wählt der Buddy die Animation automatisch nach dem, was in deinen Sessions passiert. Klick eine Animation an, um sie kurz auf dem echten Buddy vorzuspielen.":
             "Normally Buddy picks the animation automatically based on what's happening in your sessions. Click an animation to preview it briefly on the real Buddy.",
+        "Nur NVIDIA":
+            "NVIDIA only",
         "Nur wenn Claude Code läuft":
             "Only while Claude Code is running",
         "Nur wenn dieses Fenster vorne ist:":
@@ -512,6 +520,8 @@ TRANSLATIONS = {
             "Warning threshold: {v}%",
         "Weiter":
             "Next",
+        "Welche Grafikkarte der System-Bildschirm zeigt: die mit dem meisten eigenen Speicher, nur eine NVIDIA-Karte oder gar keine.":
+            "Which graphics card the System screen shows: the one with the most dedicated memory, only an NVIDIA card, or none.",
         "Welche Spalten in der Tabelle erscheinen und in welcher Reihenfolge.":
             "Which columns appear in the table and in what order.",
         "Welches gekoppelte Gerät benutzt wird.":
@@ -910,5 +920,10 @@ TRANSLATIONS = {
         "neu anmelden.":
             "The sign-in expires on {datum}. Sign in again via \"Add account\" "
             "before then.",
+        # ---- Clawdmeter mit mehreren PCs ---------------------------------
+        "Auf dem Gerät zeigen": "Show on the gadget",
+        "Wird auf dem Gerät angezeigt": "Shown on the gadget",
+        "Das Gerät zeigt gerade einen anderen PC": "The gadget is showing another PC",
+        "Auf dem Clawdmeter zeigen": "Show on the Clawdmeter",
     },
 }
