@@ -117,3 +117,72 @@ def test_fable_notice_once_per_period_and_quiet_when_free(monkeypatch):
     a.settings["fable_notified"] = {}
     a._check_fable_limits(acct(100, 3e9))            # switched off
     assert len(sent) == 2
+
+
+# -- switch requests from the Clawdmeter (REQ 0x02) ----------------------------
+# Order as sent to the device: live first, then by nickname -> [b, a] here.
+
+@pytest.fixture
+def gadget(api):
+    a, paths = api
+    logs, switched = [], []
+    a._clawd_log = logs.append
+    real = a.accounts_switch
+
+    def spy(uuid):
+        switched.append(uuid)
+        return real(uuid)
+    a.accounts_switch = spy
+    return a, logs, switched
+
+
+def live_uuid(a):
+    return next(x["uuid"] for x in a.accounts_list()["accounts"] if x["live"])
+
+
+def test_gadget_switch_by_index_and_name(gadget):
+    a, logs, switched = gadget
+    a.accounts_rename(UA, "Personal")
+    a._clawd_switch_request(1, "Personal")
+    assert switched == [UA] and live_uuid(a) == UA
+    assert "Personal" in logs[-1]
+
+
+def test_gadget_switch_finds_name_when_index_is_stale(gadget):
+    a, logs, switched = gadget
+    a.accounts_rename(UA, "Personal")
+    a._clawd_switch_request(0, "Personal")      # index 0 is "b" (live) now
+    assert switched == [UA] and live_uuid(a) == UA
+
+
+def test_gadget_switch_unknown_name_does_nothing(gadget):
+    a, logs, switched = gadget
+    a._clawd_switch_request(1, "Nobody")
+    a._clawd_switch_request(1, "")
+    a._clawd_switch_request(9, "Nobody")
+    assert switched == [] and live_uuid(a) == UB
+    assert len(logs) == 3 and all("ignoriert" in m for m in logs)
+
+
+def test_gadget_switch_to_live_account_does_nothing(gadget):
+    a, logs, switched = gadget
+    a._clawd_switch_request(0, "b")
+    assert switched == [] and live_uuid(a) == UB
+    assert "schon aktiv" in logs[-1]
+
+
+def test_gadget_switch_matches_shortened_nickname(gadget):
+    a, logs, switched = gadget
+    a.accounts_rename(UA, "A very long nickname")     # sent as "A very long ni" or less
+    a._clawd_switch_request(1, "A very l")
+    assert switched == [UA] and live_uuid(a) == UA
+
+
+def test_gadget_switch_ambiguous_prefix_does_nothing(gadget):
+    a, logs, switched = gadget
+    a.accounts_rename(UA, "Work one")
+    a.accounts_rename(UB, "Work two")
+    a._clawd_switch_request(5, "Work")                 # bad index, two prefix hits
+    assert switched == [] and "mehrdeutig" in logs[-1]
+    a._clawd_switch_request(1, "Work")                 # index agrees: take it
+    assert switched == [UA] and live_uuid(a) == UA

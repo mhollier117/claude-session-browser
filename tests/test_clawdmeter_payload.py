@@ -186,3 +186,68 @@ def test_only_changed_session_messages_are_resent_and_t_trims():
     assert sent_extras(lk) == [{"k": "se", "i": 0, "t": 1, "n": "Back", "a": "done", "s": "d"}]
     rows.clear()
     assert sent_extras(lk) == [{"k": "se", "t": 0}]
+
+
+# -- requests from the device on REQ (0x01 refresh, 0x02 switch account) ------
+
+def test_parse_request():
+    assert cm.parse_request(b"\x01") == ("refresh",)
+    assert cm.parse_request(b"") == ("refresh",)
+    assert cm.parse_request(None) == ("refresh",)
+    assert cm.parse_request(b"\x07junk") == ("refresh",)
+    assert cm.parse_request(b"\x02\x01work") == ("switch", 1, "work")
+    assert cm.parse_request(bytearray(b"\x02\x00Main acct\x00\x00")) == ("switch", 0, "Main acct")
+    assert cm.parse_request(b"\x02\x03") == ("switch", 3, "")
+    assert cm.parse_request(b"\x02") is None              # no index: dropped
+
+
+def handle(data, on_switch=None):
+    """Run _handle_request; return (switch calls, refresh count) once the
+    switch thread (if any) has finished."""
+    import threading
+    calls, woke, done = [], [], threading.Event()
+
+    def cb(i, n):
+        calls.append((i, n, threading.current_thread().name))
+
+    def wake():
+        woke.append(1)
+        done.set()
+
+    lk = cm.ClawdmeterLink(on_switch_request=cb if on_switch is None else on_switch)
+    lk._handle_request(data, wake)
+    if len(data) > 1 and data[0] == 2:
+        done.wait(2)                                    # switch runs in a thread
+    return calls, len(woke)
+
+
+def test_switch_request_runs_callback_off_the_loop_then_refreshes():
+    calls, woke = handle(b"\x02\x02Personal")
+    assert [(i, n) for i, n, _ in calls] == [(2, "Personal")]
+    assert calls[0][2] == "clawdmeter-switch"            # its own thread
+    assert woke == 1                                     # fresh data after the swap
+
+
+def test_refresh_requests_only_refresh():
+    for data in (b"\x01", b"", bytearray()):
+        calls, woke = handle(data)
+        assert calls == [] and woke == 1
+
+
+def test_malformed_switch_request_is_ignored():
+    calls, woke = handle(b"\x02")
+    assert calls == [] and woke == 0
+
+
+def test_failing_switch_callback_still_refreshes():
+    def boom(_i, _n):
+        raise RuntimeError("nope")
+    calls, woke = handle(b"\x02\x00a", on_switch=boom)
+    assert woke == 1
+
+
+def test_switch_request_without_callback_is_a_refresh():
+    lk = cm.ClawdmeterLink()
+    woke = []
+    lk._handle_request(b"\x02\x00a", lambda: woke.append(1))
+    assert woke == [1]

@@ -4523,8 +4523,87 @@ class Api:
             session_provider=self._clawd_session,
             usage_provider=self._clawd_usage,
             extras_provider=self._clawd_extras,
-            on_battery=self.on_clawd_battery)
+            on_battery=self.on_clawd_battery,
+            on_switch_request=self._clawd_switch_request)
         return self._clawdmeter
+
+    def _clawd_log(self, msg):
+        """Ereignisse vom Clawdmeter mitschreiben, in csb_clawdmeter.log im
+        Temp-Ordner (wie js_error) - die App hat sonst kein Protokoll, und ein
+        Wechsel vom Geraet aus soll sich hinterher nachvollziehen lassen."""
+        line = " ".join(str(msg).split())[:800]
+        print("[clawdmeter] " + line)
+        try:
+            path = os.path.join(tempfile.gettempdir(), "csb_clawdmeter.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+        except Exception:
+            pass
+
+    def _clawd_resolve_account(self, index, nick):
+        """Welches Konto das Geraet meint: (Konto, None) oder (None, Grund).
+
+        Index und Liste sind dieselben wie in _clawd_extras. Der Spitzname
+        kommt so zurueck, wie er geschickt wurde - ASCII, hoechstens 14
+        Zeichen, bei knapper MTU weiter gekuerzt (bis 4) - deshalb zaehlt
+        auch ein Anfang. Passt der Eintrag am Index nicht (die Liste hat sich
+        inzwischen geaendert, z.B. steht nach einem Wechsel das neue Konto
+        vorn), wird der Name in der ganzen Liste gesucht; nur ein eindeutiger
+        Treffer gilt."""
+        from clawdmeter import _ascii
+        want = str(nick or "").rstrip()
+        if not want:
+            return None, "kein Spitzname"
+        liste = self._accounts_mgr().accounts()
+
+        def form(a):
+            return _ascii(a.get("nickname", ""), 14)
+
+        def passt(a):
+            return form(a).startswith(want)
+
+        # Nur die ersten 6 gehen ans Geraet (_extras_messages).
+        if isinstance(index, int) and 0 <= index < min(len(liste), 6) \
+                and passt(liste[index]):
+            return liste[index], None
+        exakt = [a for a in liste if form(a).rstrip() == want]
+        if len(exakt) == 1:
+            return exakt[0], None
+        if exakt:
+            return None, "mehrdeutig"
+        anfang = [a for a in liste if passt(a)]
+        if len(anfang) == 1:
+            return anfang[0], None
+        return None, "mehrdeutig" if anfang else "nicht gefunden"
+
+    def _clawd_switch_request(self, index, nick):
+        """Das Clawdmeter bittet um einen Kontowechsel (REQ 0x02). Kommt aus
+        einem eigenen Thread des Links. Gewechselt wird ueber denselben Weg
+        wie der Knopf auf der Konten-Seite (accounts_switch: Sperre, aktuelle
+        Anmeldung vorher sichern, atomar schreiben, nachlesen, Tray-Menue).
+        Die Konten-Seite zeichnet sich alle 5 s selbst neu und sieht den
+        Wechsel dann; ins Fenster wird nichts geschoben."""
+        try:
+            acct, grund = self._clawd_resolve_account(index, nick)
+        except Exception as e:
+            self._clawd_log(f"Kontowechsel vom Geraet ({index}, {nick!r}): "
+                            f"{type(e).__name__}: {e}")
+            return
+        if acct is None:
+            self._clawd_log(f"Kontowechsel vom Geraet ({index}, {nick!r}) "
+                            f"ignoriert: {grund}")
+            return
+        name = acct.get("nickname", "")
+        if acct.get("live"):
+            self._clawd_log(f"Kontowechsel vom Geraet: {name!r} ist schon aktiv")
+            return
+        res = self.accounts_switch(acct["uuid"])
+        if res.get("ok"):
+            self._clawd_log(f"Kontowechsel vom Geraet: jetzt {name!r}"
+                            + ("" if res.get("changed") else " (war schon aktiv)"))
+        else:
+            self._clawd_log(f"Kontowechsel vom Geraet zu {name!r} fehlgeschlagen: "
+                            f"{res.get('error')}")
 
     def js_error(self, text):
         """JavaScript-Fehler aus der Oberflaeche mitschreiben, in

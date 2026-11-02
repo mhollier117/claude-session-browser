@@ -33,6 +33,10 @@ DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
+# Erstes Byte einer Meldung auf REQ: 0x02 = Konto wechseln (Byte 1 = Index wie
+# in den "ac"-Meldungen, ab Byte 2 der Spitzname, so wie er geschickt wurde).
+# Alles andere (0x01, leer) heisst wie bisher "bitte neue Daten".
+REQ_SWITCH = 0x02
 # Lesbar ab Firmware-Protokoll 2: "2". Fehlt sie, versteht das Geraet nur die
 # einfache Nutzungsmeldung - Sessions- und Kontenlisten gehen dann nicht raus.
 CAPS_CHAR_UUID = "4c41555a-4465-7669-6365-000000000005"
@@ -157,6 +161,21 @@ def _ascii(v, limit: int) -> str:
     Umlaute oder Emoji), Leerraum zusammengezogen, gekuerzt."""
     text = str(v or "").encode("ascii", "ignore").decode()
     return " ".join(text.split())[:limit]
+
+
+def parse_request(data) -> tuple | None:
+    """Meldung des Geraets auf REQ auswerten.
+
+    ("refresh",) fuer 0x01, leer oder unbekannt (alte Bedeutung);
+    ("switch", index, spitzname) fuer 0x02 mit Index; None fuer ein 0x02
+    ohne Index - das wird verworfen, statt irgendein Konto zu raten."""
+    raw = bytes(data or b"")
+    if not raw or raw[0] != REQ_SWITCH:
+        return ("refresh",)
+    if len(raw) < 2:
+        return None
+    nick = raw[2:].split(b"\0", 1)[0].decode("ascii", "ignore").strip()
+    return ("switch", raw[1], nick)
 
 
 def payload_from_usage(u: dict, now: float | None = None) -> tuple[dict, dict]:
@@ -450,7 +469,8 @@ class ClawdmeterLink:
 
     def __init__(self, log=None, address_provider=None, on_usage=None,
                  anim_provider=None, on_battery=None, session_provider=None,
-                 usage_provider=None, extras_provider=None):
+                 usage_provider=None, extras_provider=None,
+                 on_switch_request=None):
         """address_provider: Funktion die die gewuenschte Geraeteadresse liefert
         (leer/None = automatisch suchen). Wird bei jedem Versuch neu gefragt,
         damit eine Aenderung in den Einstellungen sofort greift.
@@ -479,6 +499,11 @@ class ClawdmeterLink:
         # extras_provider: {"se": [...Sessions...], "ac": [...Konten...]} fuer
         # Firmware ab Protokoll 2 (CAPS_CHAR_UUID).
         self._extras_provider = extras_provider or (lambda: {})
+        # on_switch_request(index, spitzname): das Geraet bittet, das aktive
+        # Konto zu wechseln (REQ 0x02). Laeuft in einem eigenen Thread, damit
+        # ein langsamer Wechsel (Token erneuern, Dateien schreiben) die
+        # BLE-Loop nicht aufhaelt; danach gehen frische Daten raus.
+        self._on_switch_request = on_switch_request
         self._proto = 1
         self._mtu = 23
         self._last_extras = {}
@@ -595,9 +620,17 @@ class ClawdmeterLink:
         from bleak import BleakClient
 
         refresh = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
-        def on_refresh(_char, _data) -> None:
-            refresh.set()
+        def wake() -> None:
+            # Darf aus jedem Thread kommen (der Kontowechsel laeuft getrennt).
+            try:
+                loop.call_soon_threadsafe(refresh.set)
+            except RuntimeError:
+                pass  # Loop schon beendet: Sitzung vorbei, nichts zu tun
+
+        def on_refresh(_char, data) -> None:
+            self._handle_request(data, wake)
 
         # Beim ersten Anlauf kurz anklopfen, danach laenger Geduld haben.
         with self._lock:
@@ -673,6 +706,34 @@ class ClawdmeterLink:
         # Ohne Verbindung ist der Ladestand unbekannt, nicht "wie zuletzt" -
         # ein stehengebliebener Wert waere schlimmer als gar keiner.
         self._set(connected=False, battery=None)
+
+    def _handle_request(self, data, wake) -> None:
+        """Eine Meldung auf REQ. wake() stoesst einen sofortigen Durchlauf an
+        (Abfrage + Senden) und muss aus jedem Thread gehen.
+
+        Kontowechsel: der Rueckruf laeuft in einem eigenen Thread, erst danach
+        kommt der Durchlauf - so gehen Zahlen und Kontenliste des neuen Kontos
+        raus, nicht noch einmal die alten."""
+        req = parse_request(data)
+        if req is None:
+            self._log("Clawdmeter: Kontowechsel ohne Index verworfen")
+            return
+        if req[0] != "switch" or not self._on_switch_request:
+            wake()
+            return
+        _, index, nick = req
+        cb = self._on_switch_request
+
+        def _go():
+            try:
+                cb(index, nick)
+            except Exception as e:
+                self._log(f"Clawdmeter: Kontowechsel fehlgeschlagen: {e}")
+            finally:
+                wake()
+
+        threading.Thread(target=_go, daemon=True,
+                         name="clawdmeter-switch").start()
 
     async def _read_battery(self, client) -> None:
         """Ladestand lesen. Fehlt der Dienst, bleibt der Wert None - das ist
