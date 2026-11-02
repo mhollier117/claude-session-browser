@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1",
-  "notes": "Clawd no longer appears when only Claude Desktop is running. Desktop and the Claude Code CLI are both called claude.exe, and a desktop app installed from the Microsoft Store counted as an open CLI. Found and fixed by @icepuente, who also contributed the first test suite for this project.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/latest",
-  "exe_url": "https://github.com/mhollier117/claude-session-browser/releases/latest/download/ClaudeSessionBrowser.exe",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/latest/download/ClaudeSessionBrowser-Setup.exe"
+  "version": "1.6.1.1",
+  "notes": "First release of this fork. Multiple Claude accounts: Accounts page, tray account switcher, background sign-in renewal and re-login warnings. Weekly-only display for plans without a 5-hour limit, and Fable weekly usage everywhere usage shows. Live session tracking from Claude Code's own session registry (state and name of every open session) driving the desktop Buddy and the Clawdmeter. Clawdmeter gadget protocol 2: per-session state and context use, all accounts. Optional naming gate (asks unnamed Claude Code terminal sessions for /rename). Much faster startup; English by default.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.1",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.1/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "e5c0fbe5d230ad9ef5c831cf6ec7737b9df63cfe7b48b2d23a1a865bff02dea9"
 }
