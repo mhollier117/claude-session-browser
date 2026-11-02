@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.5",
-  "notes": "Clawdmeter: works with several paired PCs (the gadget shows the PC you pick; 'Show on the gadget' button in the Clawdmeter tab and the tray). New System screen data: CPU (per core), RAM, GPU (any vendor: AMD, Intel, NVIDIA; 'GPU on the gadget' setting to limit to NVIDIA or hide), system drive and network, sent every 2 s. Needs the matching gadget firmware for the new screens.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.5",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.5/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "37985c83ef57e8ae4e11abc164d8dfa0ae65e62da91d6cb602864091479dee01"
+  "version": "1.6.1.6",
+  "notes": "Clawdmeter: hold the creature screen for about a second to bring that Claude Code session's terminal to the front on the PC, with the right Windows Terminal tab selected. Runs only when asked (no background cost).",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.6",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.6/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "f44796e4b11aa6532c8bc769bdd558dafe5a4fff9143ae4bf9a301b1d82297df"
 }
