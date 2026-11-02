@@ -185,28 +185,19 @@ def _claude_settings_lesen():
 
 def hooks_eingerichtet():
     """Steht unser Hook in den Claude-Code-Einstellungen?"""
-    gruppen = (_claude_settings_lesen().get("hooks") or {}).get("Notification")
-    if not isinstance(gruppen, list):
-        return False
-    for g in gruppen:
-        for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
-            if isinstance(h, dict) and _HOOK_MARKE in str(h.get("command", "")):
-                return True
-    return False
+    return _hook_vorhanden("Notification", _HOOK_MARKE)
 
 
-def hooks_einrichten(an):
-    """Traegt unseren Hook in ~/.claude/settings.json ein oder entfernt ihn.
+def _hook_eintrag_setzen(d, ereignis, marke, eintrag):
+    """Unseren Hook-Eintrag fuer ein Ereignis in den Einstellungen d ersetzen.
 
-    Fremde Hooks bleiben unangetastet - erkannt wird ausschliesslich der
-    eigene Eintrag am Aufrufparameter. Die uebrige Datei wird eingelesen und
-    unveraendert zurueckgeschrieben.
-    """
-    d = _claude_settings_lesen()
+    Alle Eintraege, deren Befehl die Marke enthaelt, fliegen raus; ist
+    eintrag nicht None, kommt er als eigene Gruppe hinten dran. Fremde Hooks
+    bleiben, wie sie sind. Aendert d an Ort und Stelle."""
     hooks = d.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
-    gruppen = hooks.get("Notification")
+    gruppen = hooks.get(ereignis)
     if not isinstance(gruppen, list):
         gruppen = []
 
@@ -220,7 +211,7 @@ def hooks_einrichten(an):
             continue
         rest = [h for h in (g.get("hooks") or [])
                 if not (isinstance(h, dict)
-                        and _HOOK_MARKE in str(h.get("command", "")))]
+                        and marke in str(h.get("command", "")))]
         if rest:
             g = dict(g)
             g["hooks"] = rest
@@ -228,25 +219,142 @@ def hooks_einrichten(an):
         elif not g.get("hooks"):
             sauber.append(g)
 
-    if an:
-        sauber.append({"matcher": "",
-                       "hooks": [{"type": "command",
-                                  "command": _hook_command()}]})
+    if eintrag is not None:
+        sauber.append(eintrag)
 
     if sauber:
-        hooks["Notification"] = sauber
+        hooks[ereignis] = sauber
     else:
-        hooks.pop("Notification", None)
+        hooks.pop(ereignis, None)
     if hooks:
         d["hooks"] = hooks
     else:
         d.pop("hooks", None)
 
+
+def _hook_vorhanden(ereignis, marke):
+    gruppen = (_claude_settings_lesen().get("hooks") or {}).get(ereignis)
+    if not isinstance(gruppen, list):
+        return False
+    for g in gruppen:
+        for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+            if isinstance(h, dict) and marke in str(h.get("command", "")):
+                return True
+    return False
+
+
+def _claude_settings_zum_aendern():
+    """Wie _claude_settings_lesen, aber None, wenn die Datei da ist und sich
+    nicht lesen laesst - dann darf nichts zurueckgeschrieben werden, sonst
+    waeren alle anderen Einstellungen weg."""
+    try:
+        with open(CLAUDE_SETTINGS_FILE, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _claude_settings_schreiben(d):
     try:
         os.makedirs(os.path.dirname(CLAUDE_SETTINGS_FILE), exist_ok=True)
         save_json(CLAUDE_SETTINGS_FILE, d)
     except OSError:
         return False
+    return True
+
+
+def hooks_einrichten(an):
+    """Traegt unseren Hook in ~/.claude/settings.json ein oder entfernt ihn.
+
+    Fremde Hooks bleiben unangetastet - erkannt wird ausschliesslich der
+    eigene Eintrag am Aufrufparameter. Die uebrige Datei wird eingelesen und
+    unveraendert zurueckgeschrieben.
+    """
+    d = _claude_settings_zum_aendern()
+    if d is None:
+        return False
+    _hook_eintrag_setzen(
+        d, "Notification", _HOOK_MARKE,
+        {"matcher": "", "hooks": [{"type": "command",
+                                   "command": _hook_command()}]}
+        if an else None)
+    return _claude_settings_schreiben(d)
+
+
+# ---- Namenspflicht (naming gate) -------------------------------------------
+# Ein UserPromptSubmit-Hook, der in einer unbenannten Terminal-Session die
+# Eingabe zurueckhaelt, bis sie per /rename einen Namen hat - sonst zeigen
+# Gadget und App nur "clawdmeter-37". Das Skript (hooks/csb-name-gate.ps1)
+# laeuft ohne die App und laesst im Zweifel alles durch (fail-open). Die App
+# kopiert es nach ~/.claude/hooks und traegt es ein; erkannt wird der eigene
+# Eintrag am Dateinamen.
+NAME_GATE_FILE = "csb-name-gate.ps1"
+NAME_GATE_DEST = os.path.join(HOME, ".claude", "hooks", NAME_GATE_FILE)
+
+
+def _name_gate_quelle():
+    """Das mitgelieferte Skript: im Build unter _MEIPASS, sonst im Repo."""
+    basis = getattr(sys, "_MEIPASS", None) or os.path.dirname(
+        os.path.abspath(__file__))
+    return os.path.join(basis, "hooks", NAME_GATE_FILE)
+
+
+def _name_gate_command():
+    return ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"'
+            % NAME_GATE_DEST)
+
+
+def name_gate_eingerichtet():
+    """Ist die Namenspflicht eingetragen und das Skript vorhanden?"""
+    return (_hook_vorhanden("UserPromptSubmit", NAME_GATE_FILE)
+            and os.path.isfile(NAME_GATE_DEST))
+
+
+def name_gate_standard():
+    """Fuer den Installer: einschalten (bzw. das Skript auffrischen), ausser
+    der Nutzer hat die Namenspflicht in der App bewusst ausgeschaltet."""
+    st = load_json(SETTINGS_FILE, {})
+    if isinstance(st, dict) and st.get("name_gate_declined"):
+        return True
+    return name_gate_einrichten(True)
+
+
+def name_gate_einrichten(an):
+    """Namenspflicht ein- oder ausschalten. True = hat geklappt.
+
+    Einschalten kopiert erst das Skript (atomar) und traegt dann den Hook
+    ein - so zeigt der Eintrag nie auf eine fehlende Datei. Ausschalten
+    nimmt erst den Eintrag raus und loescht dann das Skript."""
+    if an:
+        quelle = _name_gate_quelle()
+        try:
+            with open(quelle, "rb") as fh:
+                inhalt = fh.read()
+            os.makedirs(os.path.dirname(NAME_GATE_DEST), exist_ok=True)
+            tmp = NAME_GATE_DEST + ".tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(inhalt)
+            os.replace(tmp, NAME_GATE_DEST)
+        except OSError:
+            return False
+    d = _claude_settings_zum_aendern()
+    if d is None:
+        return False
+    _hook_eintrag_setzen(
+        d, "UserPromptSubmit", NAME_GATE_FILE,
+        {"hooks": [{"type": "command", "command": _name_gate_command(),
+                    "timeout": 10}]}
+        if an else None)
+    if not _claude_settings_schreiben(d):
+        return False
+    if not an:
+        try:
+            os.remove(NAME_GATE_DEST)
+        except OSError:
+            pass
     return True
 
 
@@ -4167,6 +4275,20 @@ class Api:
         ok = hooks_einrichten(bool(on))
         return {"ok": ok, "on": hooks_eingerichtet()}
 
+    def name_gate_state(self):
+        return {"on": name_gate_eingerichtet(), "path": NAME_GATE_DEST}
+
+    def name_gate_toggle(self, on):
+        ok = name_gate_einrichten(bool(on))
+        if ok:
+            # Merken, dass es eine bewusste Wahl war - sonst schaltet der
+            # naechste (stille) Update-Installer es wieder ein.
+            settings = getattr(self, "settings", None)
+            if isinstance(settings, dict):
+                settings["name_gate_declined"] = not on
+                save_json(SETTINGS_FILE, settings)
+        return {"ok": ok, "on": name_gate_eingerichtet()}
+
     def set_language(self, code):
         """Sprache umstellen. Gibt Sprache + Tabelle zurueck, damit die
         Oberflaeche sich sofort neu aufbauen kann - ohne Neustart."""
@@ -7650,6 +7772,15 @@ function renderSettings(){
           <div class="desc" id="hook-hint"></div></div>
         <div class="toggle" id="hook-toggle" onclick="toggleHooks(this)"></div>
       </div>
+      <div class="row2">
+        <div><div class="lbl">Sessions müssen einen Namen haben</div>
+          <div class="desc">Eine unbenannte Terminal-Session nimmt erst Nachrichten an, wenn sie mit /rename einen Namen bekommen hat. So zeigen Gadget und App, welche Session was tut.</div>
+          <details class="mehr"><summary>Was das genau tut</summary>
+            <div class="desc">Legt ein kleines PowerShell-Skript in ~/.claude/hooks ab und trägt es als UserPromptSubmit-Hook ein. Es läuft auch ohne die App und lässt im Zweifel alles durch. Befehle mit / sowie Skript- und SDK-Aufrufe sind nie betroffen. Eine abgewiesene Nachricht bleibt im Eingabefeld stehen.</div>
+          </details>
+          <div class="desc" id="namegate-hint"></div></div>
+        <div class="toggle" id="namegate-toggle" onclick="toggleNameGate(this)"></div>
+      </div>
     </div>
 
     <div class="secthead" id="sect-ueber">Über</div>
@@ -7688,6 +7819,7 @@ function renderSettings(){
   translateDom(document.getElementById('settings'));
   buildSettingsJump();
   refreshHooks();
+  refreshNameGate();
   refreshLimit();
 }
 
@@ -8282,6 +8414,29 @@ async function toggleHooks(el){
   toast(an ? t('Hook eingerichtet ✓ – gilt ab der nächsten Claude-Code-Sitzung')
            : t('Hook entfernt'));
   refreshHooks();
+}
+
+// ---- Namenspflicht (UserPromptSubmit-Hook) ----
+async function refreshNameGate(){
+  const el = document.getElementById('namegate-toggle');
+  if(!el) return;
+  let r = null;
+  try{ r = await api.name_gate_state(); }catch(e){ return; }
+  el.classList.toggle('on', !!(r && r.on));
+  const hint = document.getElementById('namegate-hint');
+  if(hint) hint.textContent = (r && r.on)
+    ? t('Eingeschaltet. Unbenannte Sessions werden um einen Namen gebeten.')
+    : '';
+}
+async function toggleNameGate(el){
+  const an = !el.classList.contains('on');
+  el.classList.toggle('on', an);
+  let r = null;
+  try{ r = await api.name_gate_toggle(an); }catch(e){}
+  if(!r || !r.ok){ el.classList.toggle('on', !an); toast(t('Namenspflicht konnte nicht gesetzt werden')); return; }
+  el.classList.toggle('on', !!r.on);
+  toast(an ? t('Namenspflicht eingeschaltet ✓') : t('Namenspflicht ausgeschaltet'));
+  refreshNameGate();
 }
 
 async function setAccent(c){applyAccent(c); ingest(await api.update_setting('accent',c)); renderSettings();}
@@ -9001,6 +9156,17 @@ def main():
         except Exception:
             pass
         return
+    # Namenspflicht ohne Fenster setzen (fuer Installer/Skripte):
+    #   --name-gate on|off|default   -> Rueckgabewert 0 = geklappt
+    #   default = an, ausser in der App bewusst ausgeschaltet
+    if "--name-gate" in sys.argv:
+        i = sys.argv.index("--name-gate")
+        wert = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+        if wert == "default":
+            sys.exit(0 if name_gate_standard() else 1)
+        if wert not in ("on", "off"):
+            sys.exit(2)
+        sys.exit(0 if name_gate_einrichten(wert == "on") else 1)
     if self_install():
         return  # heruntergeladene Instanz beendet sich; installierte Kopie laeuft
     try:

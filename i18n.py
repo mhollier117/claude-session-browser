@@ -792,6 +792,31 @@ TRANSLATIONS = {
         "Hook entfernt": "Hook removed",
         "Hook konnte nicht gesetzt werden": "Couldn't set the hook",
 
+        # ---- Namenspflicht (naming gate) ---------------------------------
+        "Sessions müssen einen Namen haben": "Require session names",
+        "Eine unbenannte Terminal-Session nimmt erst Nachrichten an, wenn "
+        "sie mit /rename einen Namen bekommen hat. So zeigen Gadget und App, "
+        "welche Session was tut.":
+            "An unnamed terminal session only takes messages once it has "
+            "been named with /rename. That way the gadget and the app can "
+            "show which session is doing what.",
+        "Legt ein kleines PowerShell-Skript in ~/.claude/hooks ab und trägt "
+        "es als UserPromptSubmit-Hook ein. Es läuft auch ohne die App und "
+        "lässt im Zweifel alles durch. Befehle mit / sowie Skript- und "
+        "SDK-Aufrufe sind nie betroffen. Eine abgewiesene Nachricht bleibt "
+        "im Eingabefeld stehen.":
+            "Puts a small PowerShell script in ~/.claude/hooks and adds it "
+            "as a UserPromptSubmit hook. It works without the app and lets "
+            "everything through when in doubt. Slash commands and script or "
+            "SDK runs are never affected. A turned-away message stays in the "
+            "input box.",
+        "Eingeschaltet. Unbenannte Sessions werden um einen Namen gebeten.":
+            "On. Unnamed sessions are asked for a name.",
+        "Namenspflicht eingeschaltet ✓": "Session names required ✓",
+        "Namenspflicht ausgeschaltet": "Session names no longer required",
+        "Namenspflicht konnte nicht gesetzt werden":
+            "Couldn't change the session-name setting",
+
         # ---- Rundgang nach einem Update ----------------------------------
         "Neu in dieser Version ✨": "New in this version ✨",
         "Neu:": "New:",

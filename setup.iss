@@ -78,6 +78,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "startupicon"; Description: "Start automatically when Windows starts"; GroupDescription: "System integration"; Flags: unchecked
+Name: "namegate"; Description: "Require a name (/rename) in Claude Code terminal sessions, so the Clawdmeter can tell them apart"; GroupDescription: "System integration"
 
 [Files]
 ; Kompletter onedir-Output. Der Runner selbst + alle DLLs + _internal-Ordner.
@@ -101,6 +102,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     Flags: uninsdeletevalue; Tasks: startupicon
 
 [Run]
+; Namenspflicht (UserPromptSubmit-Hook) einrichten bzw. das Skript nach einem
+; Update auffrischen. "default" laesst sie aus, wenn der Nutzer sie in der App
+; bewusst ausgeschaltet hat - Updates laufen still und sollen das respektieren.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--name-gate default";     Flags: runhidden waituntilterminated; Tasks: namegate
 ; Nach dem Install starten - WICHTIG: auch bei Silent-Install starten!
 ; Der alte Update-Batch (v1.1.2/v1.1.3) hatte einen Bug beim Relaunch.
 ; Indem der Installer selbst die App startet ist der Batch egal.
@@ -111,6 +116,10 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; Alte Runner-Instanz beenden bevor Dateien geloescht werden (verhindert Lock)
 Filename: "{cmd}"; Parameters: "/c taskkill /F /IM {#MyAppExeName} /T"; \
     Flags: runhidden; RunOnceId: "KillRunner"
+; Namenspflicht wieder austragen (Eintrag in settings.json + Skript), damit
+; kein Hook auf eine geloeschte App zeigt. Das Skript selbst braucht die App
+; nicht, aber ohne App laesst sie sich nicht mehr bequem abschalten.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--name-gate off";     Flags: runhidden waituntilterminated; RunOnceId: "NameGateOff"
 
 [UninstallDelete]
 ; Nur {app} entfernen (macht Inno eh). ABSICHTLICH NICHT loeschen:
