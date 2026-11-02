@@ -4553,7 +4553,7 @@ class Api:
         from clawdmeter import _ascii
         want = str(nick or "").rstrip()
         if not want:
-            return None, "kein Spitzname"
+            return None, "no nickname"
         liste = self._accounts_mgr().accounts()
 
         def form(a):
@@ -4570,11 +4570,11 @@ class Api:
         if len(exakt) == 1:
             return exakt[0], None
         if exakt:
-            return None, "mehrdeutig"
+            return None, "ambiguous"
         anfang = [a for a in liste if passt(a)]
         if len(anfang) == 1:
             return anfang[0], None
-        return None, "mehrdeutig" if anfang else "nicht gefunden"
+        return None, "ambiguous" if anfang else "not found"
 
     def _clawd_switch_request(self, index, nick):
         """Das Clawdmeter bittet um einen Kontowechsel (REQ 0x02). Kommt aus
@@ -4586,23 +4586,23 @@ class Api:
         try:
             acct, grund = self._clawd_resolve_account(index, nick)
         except Exception as e:
-            self._clawd_log(f"Kontowechsel vom Geraet ({index}, {nick!r}): "
+            self._clawd_log(f"Account switch from the gadget ({index}, {nick!r}): "
                             f"{type(e).__name__}: {e}")
             return
         if acct is None:
-            self._clawd_log(f"Kontowechsel vom Geraet ({index}, {nick!r}) "
-                            f"ignoriert: {grund}")
+            self._clawd_log(f"Account switch from the gadget ({index}, {nick!r}) "
+                            f"ignored: {grund}")
             return
         name = acct.get("nickname", "")
         if acct.get("live"):
-            self._clawd_log(f"Kontowechsel vom Geraet: {name!r} ist schon aktiv")
+            self._clawd_log(f"Account switch from the gadget: {name!r} is already active")
             return
         res = self.accounts_switch(acct["uuid"])
         if res.get("ok"):
-            self._clawd_log(f"Kontowechsel vom Geraet: jetzt {name!r}"
-                            + ("" if res.get("changed") else " (war schon aktiv)"))
+            self._clawd_log(f"Account switch from the gadget: now {name!r}"
+                            + ("" if res.get("changed") else " (was already active)"))
         else:
-            self._clawd_log(f"Kontowechsel vom Geraet zu {name!r} fehlgeschlagen: "
+            self._clawd_log(f"Account switch from the gadget to {name!r} failed: "
                             f"{res.get('error')}")
 
     def js_error(self, text):

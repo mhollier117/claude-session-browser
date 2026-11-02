@@ -14,10 +14,10 @@ def check(label, path):
         from datetime import datetime
         mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[OK] {label}: {path}")
-        print(f"     Groesse: {size:,} bytes, Geaendert: {mtime}")
+        print(f"     Size: {size:,} bytes, modified: {mtime}")
         return True
     else:
-        print(f"[--] {label}: NICHT GEFUNDEN")
+        print(f"[--] {label}: NOT FOUND")
         return False
 
 def read_file(path, label):
@@ -26,43 +26,43 @@ def read_file(path, label):
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             print(f.read()[:2000])
     else:
-        print(f"\n=== {label}: Datei existiert nicht ===")
+        print(f"\n=== {label}: file does not exist ===")
 
 print("=" * 60)
-print("CSB Update Diagnose")
+print("CSB update diagnostics")
 print("=" * 60)
 
 # 1. Installierte Version
 exe = os.path.join(LAD, "Programs", "ClaudeSessionBrowser", "ClaudeSessionBrowser.exe")
-print("\n[1] Installierte App:")
+print("\n[1] Installed app:")
 check("ClaudeSessionBrowser.exe", exe)
 
 # 2. Temp-Dateien
-print("\n[2] Update-Dateien in TEMP:")
+print("\n[2] Update files in TEMP:")
 setup = os.path.join(TEMP, "ClaudeSessionBrowser_setup.exe")
 check("Setup.exe (Installer)", setup)
 
 bat = os.path.join(TEMP, "csb_installer.bat")
-check("Batch-Datei", bat)
+check("Batch file", bat)
 
 log = os.path.join(TEMP, "csb_update.log")
-check("Update-Log", log)
+check("Update log", log)
 
 fail = os.path.join(TEMP, "csb_update_failed.marker")
-if check("Fehler-Marker", fail):
-    read_file(fail, "Fehler-Marker Inhalt")
+if check("Failure marker", fail):
+    read_file(fail, "Failure marker contents")
 
 lock = os.path.join(LAD, "ClaudeSessionBrowser.instance.lock")
 check("Lock-File (Single-Instance)", lock)
 
 # 3. Batch-Inhalt
-read_file(bat, "Batch-Datei Inhalt")
+read_file(bat, "Batch file contents")
 
 # 4. Update-Log
-read_file(log, "Update-Log Inhalt")
+read_file(log, "Update log contents")
 
 # 5. Laufende Prozesse
-print("\n[3] Laufende CSB-Prozesse:")
+print("\n[3] Running CSB processes:")
 try:
     out = subprocess.check_output(
         'tasklist /FI "IMAGENAME eq ClaudeSessionBrowser*" /FO CSV',
@@ -73,20 +73,20 @@ try:
         for l in lines:
             print(f"     {l}")
     else:
-        print("     Keine CSB-Prozesse laufen")
+        print("     No CSB processes running")
 except Exception as e:
-    print(f"     Fehler: {e}")
+    print(f"     Error: {e}")
 
 # 6. Installer manuell testen?
 print("\n" + "=" * 60)
 if os.path.exists(setup):
-    print("Setup.exe existiert! Moechtest du den Installer manuell testen?")
-    print("Fuehre aus:")
+    print("Setup.exe exists! Want to test the installer by hand?")
+    print("Run:")
     print(f'  "{setup}" /VERYSILENT /LOG="{TEMP}\\inno_test.log"')
     print(f'  type "{TEMP}\\inno_test.log"')
 else:
-    print("Setup.exe nicht gefunden - Update wurde nicht gestartet oder")
-    print("Installer wurde bereits ausgefuehrt und geloescht.")
+    print("Setup.exe not found - the update was not started, or")
+    print("the installer already ran and was deleted.")
 
-print("\n[ENTER] zum Beenden...")
+print("\n[ENTER] to exit...")
 input()

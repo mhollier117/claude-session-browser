@@ -161,14 +161,14 @@ def test_gadget_switch_unknown_name_does_nothing(gadget):
     a._clawd_switch_request(1, "")
     a._clawd_switch_request(9, "Nobody")
     assert switched == [] and live_uuid(a) == UB
-    assert len(logs) == 3 and all("ignoriert" in m for m in logs)
+    assert len(logs) == 3 and all("ignored" in m for m in logs)
 
 
 def test_gadget_switch_to_live_account_does_nothing(gadget):
     a, logs, switched = gadget
     a._clawd_switch_request(0, "b")
     assert switched == [] and live_uuid(a) == UB
-    assert "schon aktiv" in logs[-1]
+    assert "already active" in logs[-1]
 
 
 def test_gadget_switch_matches_shortened_nickname(gadget):
@@ -183,6 +183,6 @@ def test_gadget_switch_ambiguous_prefix_does_nothing(gadget):
     a.accounts_rename(UA, "Work one")
     a.accounts_rename(UB, "Work two")
     a._clawd_switch_request(5, "Work")                 # bad index, two prefix hits
-    assert switched == [] and "mehrdeutig" in logs[-1]
+    assert switched == [] and "ambiguous" in logs[-1]
     a._clawd_switch_request(1, "Work")                 # index agrees: take it
     assert switched == [UA] and live_uuid(a) == UA

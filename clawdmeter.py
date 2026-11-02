@@ -582,7 +582,7 @@ class ClawdmeterLink:
             import asyncio
             asyncio.run(self._loop())
         except Exception as e:
-            self._log(f"Clawdmeter-Thread beendet: {e}")
+            self._log(f"Clawdmeter thread ended: {e}")
             self._set(connected=False, last_error=_fehlertext(e))
 
     async def _loop(self) -> None:
@@ -611,7 +611,7 @@ class ClawdmeterLink:
             except Exception as e:
                 fails += 1
                 self._set(connected=False, last_error=_fehlertext(e))
-                self._log(f"Clawdmeter-Verbindung verloren: {e}")
+                self._log(f"Clawdmeter connection lost: {e}")
                 wait = RETRY_BACKOFF[min(fails - 1, len(RETRY_BACKOFF) - 1)]
                 await self._sleep(wait)
 
@@ -647,12 +647,12 @@ class ClawdmeterLink:
                 self._set(connected=False, last_error=t(
                     "Gerät meldet keinen Clawdmeter-Dienst — falsches Gerät, "
                     "oder es ist von einem anderen Programm belegt"))
-                self._log(f"{address}: kein Clawdmeter-Dienst gefunden")
+                self._log(f"{address}: no Clawdmeter service found")
                 await self._sleep(RETRY_INTERVAL)
                 return
 
             self._set(connected=True, last_error=None)
-            self._log(f"Clawdmeter verbunden ({address})")
+            self._log(f"Clawdmeter connected ({address})")
             try:
                 caps = await client.read_gatt_char(CAPS_CHAR_UUID)
                 self._proto = int(bytes(caps).decode().strip() or "1")
@@ -660,7 +660,7 @@ class ClawdmeterLink:
                 self._proto = 1          # aeltere Firmware
             self._mtu = int(getattr(client, "mtu_size", 23) or 23)
             self._last_extras = {}       # neue Sitzung: alles neu schicken
-            self._log(f"Clawdmeter: Protokoll {self._proto}, MTU {self._mtu}")
+            self._log(f"Clawdmeter: protocol {self._proto}, MTU {self._mtu}")
             try:
                 await client.start_notify(REQ_CHAR_UUID, on_refresh)
             except Exception:
@@ -716,7 +716,7 @@ class ClawdmeterLink:
         raus, nicht noch einmal die alten."""
         req = parse_request(data)
         if req is None:
-            self._log("Clawdmeter: Kontowechsel ohne Index verworfen")
+            self._log("Clawdmeter: account switch without an index dropped")
             return
         if req[0] != "switch" or not self._on_switch_request:
             wake()
@@ -728,7 +728,7 @@ class ClawdmeterLink:
             try:
                 cb(index, nick)
             except Exception as e:
-                self._log(f"Clawdmeter: Kontowechsel fehlgeschlagen: {e}")
+                self._log(f"Clawdmeter: account switch failed: {e}")
             finally:
                 wake()
 
@@ -969,14 +969,14 @@ if __name__ == "__main__":
     def _p(msg):
         print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-    _p("Adresse suchen...")
+    _p("Looking for the address...")
     addr = discover_address()
-    _p(f"Adresse: {addr}")
-    _p("Token lesen...")
+    _p(f"Address: {addr}")
+    _p("Reading the token...")
     tok = read_token()
-    _p("Token: " + ("gefunden" if tok else "NICHT gefunden"))
+    _p("Token: " + ("found" if tok else "NOT found"))
     if tok:
-        _p("API abfragen...")
+        _p("Querying the API...")
         _pl, _mt = poll_usage_meta(tok)
         _p(f"Payload: {_pl}")
         _p(f"Meta:    {_mt}")

@@ -125,11 +125,11 @@ def _build_anim(name, frames):
 
 def main():
     if not os.path.isdir(ROOT):
-        print(f"Fehler: {ROOT} nicht gefunden")
+        print(f"Error: {ROOT} not found")
         return 1
     folders = sorted(f for f in os.listdir(ROOT)
                      if os.path.isdir(os.path.join(ROOT, f)))
-    print(f"Gefundene Anim-Ordner: {len(folders)}")
+    print(f"Anim folders found: {len(folders)}")
 
     # Reihenfolge aus altem BLOB uebernehmen
     order = _current_order()
@@ -141,29 +141,29 @@ def main():
             if n not in ordered:
                 ordered.append(n)
         anim_names = ordered
-    print(f"Anim-Reihenfolge: {anim_names}")
+    print(f"Anim order: {anim_names}")
 
     result = []
     for anim in anim_names:
         folder = anim.replace(" ", "_")
         d = os.path.join(ROOT, folder)
         if not os.path.isdir(d):
-            print(f"  SKIP {anim}: Ordner {folder} fehlt")
+            print(f"  SKIP {anim}: folder {folder} missing")
             continue
         frames = _load_frames(d)
         if not frames:
-            print(f"  SKIP {anim}: keine Frames")
+            print(f"  SKIP {anim}: no frames")
             continue
         palette, idx_frames = _build_anim(anim, frames)
         result.append({"n": anim, "p": palette, "f": idx_frames})
         opaque_count = sum(1 for h in palette[1:] if h != "#000000")
-        print(f"  OK {anim}: {len(frames)} Frames, "
-              f"{opaque_count} opake Farben")
+        print(f"  OK {anim}: {len(frames)} frames, "
+              f"{opaque_count} opaque colors")
 
     # Zu BLOB packen
     raw = json.dumps(result, separators=(",", ":")).encode("utf-8")
     blob = base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
-    print(f"\nBLOB-Groesse: {len(blob)} Zeichen")
+    print(f"\nBLOB size: {len(blob)} characters")
 
     # clawd_sprites.py schreiben
     content = (
@@ -173,7 +173,7 @@ def main():
     )
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"Geschrieben: {OUT}")
+    print(f"Written: {OUT}")
     return 0
 
 
