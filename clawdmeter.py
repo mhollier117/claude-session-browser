@@ -397,7 +397,7 @@ class ClawdmeterLink:
     pywebview-GUI davon nichts mitbekommt."""
 
     def __init__(self, log=None, address_provider=None, on_usage=None,
-                 anim_provider=None, on_battery=None):
+                 anim_provider=None, on_battery=None, session_provider=None):
         """address_provider: Funktion die die gewuenschte Geraeteadresse liefert
         (leer/None = automatisch suchen). Wird bei jedem Versuch neu gefragt,
         damit eine Aenderung in den Einstellungen sofort greift.
@@ -412,6 +412,11 @@ class ClawdmeterLink:
         self._address_provider = address_provider or (lambda: None)
         self._on_usage = on_usage
         self._anim_provider = anim_provider or (lambda: "")
+        # session_provider: {"n": Name der Session, die die Animation meint,
+        # "h": Hinweis auf die anderen, z.B. "+2 working"}. Geht als "n"/"h"
+        # mit; aeltere Firmware ignoriert unbekannte Felder.
+        self._session_provider = session_provider or (lambda: {"n": "", "h": ""})
+        self._last_session = ("", "")
         # Wird nur bei einer Aenderung gerufen, nicht bei jedem Nachlesen -
         # sonst haengt an jedem Poll eine Auswertung.
         self._on_battery = on_battery
@@ -620,12 +625,27 @@ class ClawdmeterLink:
                 pass
 
     def _anim_changed(self) -> bool:
+        """Animation ODER angezeigte Session geaendert -> ohne neue Abfrage
+        nachschicken."""
         if self._last_payload is None:
             return False            # noch keine Zahlen -> nichts zu ergaenzen
         try:
-            return self._current_anim() != self._last_anim
+            return (self._current_anim() != self._last_anim
+                    or self._current_session() != self._last_session)
         except Exception:
             return False
+
+    def _current_session(self) -> tuple:
+        """(Name, Hinweis), fuer das Display auf ASCII gebracht und gekuerzt:
+        die Schriften des Geraets haben keine Umlaute oder Emoji."""
+        try:
+            d = self._session_provider() or {}
+        except Exception:
+            d = {}
+        def ascii24(v):
+            text = str(v or "").encode("ascii", "ignore").decode()
+            return " ".join(text.split())[:24]
+        return ascii24(d.get("n")), ascii24(d.get("h"))
 
     def _current_anim(self) -> str:
         try:
@@ -657,6 +677,10 @@ class ClawdmeterLink:
         anim = self._current_anim()
         payload["a"] = anim          # "" = Geraet entscheidet selbst
         self._last_anim = anim
+        name, hint = self._current_session()
+        payload["n"] = name          # Session, die die Animation meint
+        payload["h"] = hint          # z.B. "+2 working"
+        self._last_session = (name, hint)
 
         data = json.dumps(payload, separators=(",", ":")).encode()
         await client.write_gatt_char(RX_CHAR_UUID, data, response=False)

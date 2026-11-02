@@ -62,7 +62,7 @@ Step "3/5 App (PyInstaller, onedir)"
     --name ClaudeSessionBrowser `
     --icon claude_sessions.ico `
     --add-data "claude_sessions.ico;." `
-    --hidden-import pystray --hidden-import PIL --hidden-import accounts `
+    --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live `
     claude_sessions.py
 Check "PyInstaller (app)"
 

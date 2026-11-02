@@ -338,6 +338,18 @@ def _decode_buddy_anims():
 
 BUDDY_ANIMS = _decode_buddy_anims()
 
+# Zustand einer Session (sessions_live.py) -> Buddy-Aktivitaet (Schluessel
+# fuer BUDDY_STATE_MAP).
+_LIVE_ACT = {
+    "needs_you": "awaiting_approval",   # Rueckfrage, Erlaubnis, Dialog offen
+    "limit": "limit",
+    "thinking": "thinking",
+    "working": "active",
+    "done": "waiting",
+    "idle": "idle",
+    "sleep": "sleep",
+}
+
 # Mapping von "detektiertem Zustand" -> Animations-Name.
 BUDDY_STATE_MAP = {
     "limit":    "limit",             # Rate/Usage-Limit erreicht (sauer!)
@@ -1857,6 +1869,9 @@ class BuddyController:
         # Clawdmeter-Link) sie mitlesen koennen ohne in den Tk-Thread zu
         # greifen. Ein einzelner String-Zuweisung braucht kein Lock.
         self._pub_anim = ""
+        # Offene Claude-Sessions (sessions_live.py), dringendste zuerst. None =
+        # keine Session-Liste verfuegbar (alte Claude-Code-Version).
+        self._pub_sessions = None
         # Limit-Lage zum Mitlesen (Einstellungs-Seite). Ein Tupel wird in
         # einem Rutsch ersetzt, nie halb beschrieben - deshalb kein Lock.
         self._pub_limit = (False, 0.0)   # (im Limit?, bis wann)
@@ -2571,6 +2586,18 @@ class BuddyController:
                     state["last_block_type"] = status.get("last_block_type")
                     state["last_tool_name"] = status.get("last_tool_name")
                     state["internal_state"] = status.get("internal_state", "unknown_active")
+
+            # Bevorzugt: Claude Codes eigene Liste der offenen Sessions
+            # (sessions_live.py) - genau, fuer alle Sessions, ohne Raten aus
+            # Transkripten und Fenstertiteln. Die Limit-Erkennung oben bleibt.
+            snap = self.api._live_sessions()
+            if snap is not None:
+                self._pub_sessions = snap
+                if state["is_limited"] and now < state.get("limited_until", 0):
+                    return "limit"
+                if not snap:
+                    return "none"
+                return _LIVE_ACT.get(snap[0]["state"], "idle")
 
             if state["last_mtime"] <= 0:
                 return "none"
@@ -4168,10 +4195,35 @@ class Api:
         Buddy gibt es keinen Zustand zu spiegeln."""
         if not self.settings.get("clawdmeter_buddy", True):
             return ""
+        # Bevorzugt die Session-Liste: das Geraet zeigt, was die dringendste
+        # Session tut - unabhaengig davon, ob der Desktop-Buddy laeuft oder
+        # gerade Party-Modus, Vorschau oder Zwinkern zeigt (das bleibt auf dem
+        # Desktop). Ohne Session-Liste (alte Claude-Code-Version) wie bisher
+        # den Buddy spiegeln.
+        snap = self._live_sessions()
+        if snap is not None:
+            if not snap:
+                return BUDDY_STATE_MAP["none"]
+            return BUDDY_STATE_MAP.get(_LIVE_ACT.get(snap[0]["state"], "idle"), "")
         try:
             return self.buddy.current_anim()
         except Exception:
             return ""
+
+    def _live_sessions(self):
+        """Neueste Liste der offenen Claude-Sessions, dringendste zuerst; None
+        ohne Session-Liste (Dienst aus oder alte Claude-Code-Version)."""
+        svc = getattr(self, "_sessions_service", None)
+        return svc.latest() if svc else None
+
+    def _clawd_session(self):
+        """Name + Hinweis fuer das Clawdmeter: welche Session die Animation
+        meint, und was die anderen tun ("+2 working")."""
+        snap = self._live_sessions()
+        if not snap:
+            return {"n": "", "h": ""}
+        from sessions_live import hint
+        return {"n": snap[0]["name"], "h": hint(snap)}
 
     def _clawd_link(self):
         """Lazy-Init des BLE-Links. None wenn das Modul nicht verfuegbar ist."""
@@ -4186,6 +4238,7 @@ class Api:
             address_provider=lambda: self.settings.get("clawdmeter_addr") or "",
             on_usage=self.on_usage_meta,
             anim_provider=self._clawd_anim,
+            session_provider=self._clawd_session,
             on_battery=self.on_clawd_battery)
         return self._clawdmeter
 
@@ -8830,6 +8883,16 @@ def main():
             api._usage_watcher.start()
         except Exception:
             pass
+
+    # Offene Claude-Sessions: Claude Codes eigene Session-Liste einmal pro
+    # Sekunde lesen (sessions_live.py). Buddy und Clawdmeter lesen den
+    # letzten Stand, ohne selbst auf die Platte zu warten.
+    try:
+        from sessions_live import SessionsService
+        api._sessions_service = SessionsService()
+        api._sessions_service.start()
+    except Exception:
+        pass
 
     # Konten: im Hintergrund das aktive Konto erkennen, abgelegte Konten
     # frisch halten und die Auslastung aller Konten lesen (accounts.py).
