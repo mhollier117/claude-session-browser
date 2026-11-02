@@ -5276,6 +5276,29 @@ class Api:
             return {"available": False, "current": VERSION, "frozen": frozen,
                     "error": type(e).__name__ + ": " + str(e)[:120]}
 
+    @staticmethod
+    def _update_work_dir():
+        """Arbeitsordner fuer Updates: <Install-Ordner>\\_update statt %TEMP%.
+
+        Auf PCs mit Attack Surface Reduction werden ausfuehrbare Dateien in
+        %TEMP% blockiert - der heruntergeladene Installer, die Kopie des
+        Updaters und die Entpack-Dateien von Inno Setup liefen alle dort.
+        Liegt die App in einem freigegebenen Ordner, bleibt so alles darin.
+        Nicht beschreibbar (z.B. Programme fuer alle Benutzer) oder aus dem
+        Quellcode gestartet: wie bisher %TEMP%."""
+        if not getattr(sys, "frozen", False):
+            return tempfile.gettempdir()
+        d = os.path.join(os.path.dirname(sys.executable), "_update")
+        try:
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".probe")
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+            return d
+        except OSError:
+            return tempfile.gettempdir()
+
     def _install_via_installer(self, data, installer_url):
         """Installer-basiertes Update (v1.1.0+). Laedt Setup.exe, prueft
         SHA-256, startet Silent-Install, danach neue App vom Standard-
@@ -5284,8 +5307,8 @@ class Api:
         if getattr(self, "_installing", False):
             return {"ok": False, "error": t("Update läuft bereits.")}
         self._installing = True
-        part = os.path.join(tempfile.gettempdir(),
-                            "ClaudeSessionBrowser_setup.exe.part")
+        work = self._update_work_dir()
+        part = os.path.join(work, "ClaudeSessionBrowser_setup.exe.part")
         win = self._win()
 
         def js(code):
@@ -5297,8 +5320,7 @@ class Api:
 
         try:
             import time
-            setup = os.path.join(tempfile.gettempdir(),
-                                 "ClaudeSessionBrowser_setup.exe")
+            setup = os.path.join(work, "ClaudeSessionBrowser_setup.exe")
             req = urllib.request.Request(
                 installer_url, headers={"User-Agent": "ClaudeSessionBrowser"})
             with urllib.request.urlopen(
@@ -5368,18 +5390,22 @@ class Api:
 
             js("window.downloadDone&&downloadDone()")
 
+            # TMP/TEMP auf den Arbeitsordner: der Updater kopiert sich dorthin
+            # und Inno Setup entpackt dorthin (siehe _update_work_dir).
+            env = dict(os.environ, TMP=work, TEMP=work)
             if os.path.exists(updater):
                 # Neuer Weg: Updater starten, der macht alles
                 time.sleep(0.5)
                 DETACHED = 0x00000008 | 0x00000200
                 subprocess.Popen([updater, "--install", setup],
-                                 creationflags=DETACHED, close_fds=True)
+                                 creationflags=DETACHED, close_fds=True,
+                                 env=env)
                 time.sleep(0.5)
                 if win:
                     win.destroy()
             else:
                 # Fallback: Batch (fuer alte Installationen ohne Updater)
-                bat = os.path.join(tempfile.gettempdir(), "csb_installer.bat")
+                bat = os.path.join(work, "csb_installer.bat")
                 with open(bat, "w", encoding="utf-8") as f:
                     f.write(
                         "@echo off\r\n"
@@ -5391,7 +5417,7 @@ class Api:
                     )
                 time.sleep(2.6)
                 NOWIN = 0x08000000 | 0x00000200
-                subprocess.Popen(["cmd", "/c", bat], creationflags=NOWIN)
+                subprocess.Popen(["cmd", "/c", bat], creationflags=NOWIN, env=env)
                 if win:
                     win.destroy()
             return {"ok": True}

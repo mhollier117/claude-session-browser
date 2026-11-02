@@ -50,6 +50,16 @@ Remove-Item $portable -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $PSScriptRoot 'dist\ClaudeSessionBrowser') -DestinationPath $portable
 $phash = (Get-FileHash $portable -Algorithm SHA256).Hash.ToLower()
 
+# Install-here zip: installer + Install.cmd, for PCs where Attack Surface
+# Reduction blocks programs started from %TEMP% (see Install.cmd).
+$herezip = Join-Path $PSScriptRoot "dist\ClaudeSessionBrowser-$Version-install-here.zip"
+$stage = Join-Path $PSScriptRoot 'dist\install-here'
+Remove-Item $herezip, $stage -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $stage | Out-Null
+Copy-Item $setup, (Join-Path $PSScriptRoot 'Install.cmd') $stage
+Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $herezip
+$hhash = (Get-FileHash $herezip -Algorithm SHA256).Hash.ToLower()
+
 # 3. version.json (download pinned to this tag, so the checksum always matches)
 $tag = "v$Version"
 $manifest = [ordered]@{
@@ -70,8 +80,8 @@ Write-Host "Committed release $Version (installer SHA-256 $hash)." -ForegroundCo
 # 5. Publish
 if ($Publish) {
     git push -q origin main
-    $body = "$Notes`n`n**Downloads**`n- ClaudeSessionBrowser-Setup.exe: installer (per user, no admin), keeps itself updated.`n- ClaudeSessionBrowser-$Version-portable.zip: the same app without installing. Unzip anywhere and start ClaudeSessionBrowser.exe.`n`nSHA-256`n- Setup: ``$hash```n- Portable: ``$phash``"
-    gh release create $tag $setup $portable --repo $repo --title "Claude Session Browser $Version" --notes $body
+    $body = "$Notes`n`n**Downloads**`n- ClaudeSessionBrowser-Setup.exe: installer (per user, no admin), keeps itself updated.`n- ClaudeSessionBrowser-$Version-install-here.zip: the installer plus Install.cmd, for PCs where Attack Surface Reduction blocks programs started from %TEMP%. Unzip into a folder that is exempt and run Install.cmd: setup unpacks there and installs the app there, and updates stay in that folder too.`n- ClaudeSessionBrowser-$Version-portable.zip: the same app without installing. Unzip anywhere and start ClaudeSessionBrowser.exe.`n`nSHA-256`n- Setup: ``$hash```n- Install-here: ``$hhash```n- Portable: ``$phash``"
+    gh release create $tag $setup $herezip $portable --repo $repo --title "Claude Session Browser $Version" --notes $body
     Write-Host "Published $tag." -ForegroundColor Green
 } else {
     Write-Host "Not published. To publish: git push origin main; gh release create $tag `"$setup`" --repo $repo --notes `"...`""
