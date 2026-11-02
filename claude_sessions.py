@@ -460,6 +460,29 @@ _LIVE_ACT = {
     "sleep": "sleep",
 }
 
+# Zustand einer Session -> ein Buchstabe fuer das Clawdmeter ("s" in der
+# "ss"-Liste): Farbe der Session-Markierung, und reihum durch die aktiven.
+_CLAWD_STATE = {
+    "needs_you": "n",   # Registry "waiting": Rueckfrage, Erlaubnis
+    "limit": "l",
+    "thinking": "w",    # busy (denkt) ...
+    "working": "w",     # ... busy oder shell
+    "done": "d",        # idle, seit weniger als 3 Minuten fertig
+    "idle": "i",
+    "sleep": "z",
+}
+
+
+def _clawd_context(sess, pct_key, window_key):
+    """Kontextbelegung einer Session fuer das Clawdmeter, z.B. {"cx": 33,
+    "cw": "1M"}; leer, solange sie noch keine Antwort mit Nutzung hat."""
+    pct, size = sess.get("ctx_pct"), sess.get("ctx_window")
+    if pct is None or not size:
+        return {}
+    from sessions_live import window_label
+    return {pct_key: int(pct), window_key: window_label(size)}
+
+
 # Mapping von "detektiertem Zustand" -> Animations-Name.
 BUDDY_STATE_MAP = {
     "limit":    "limit",             # Rate/Usage-Limit erreicht (sauer!)
@@ -4435,7 +4458,10 @@ class Api:
     def _clawd_extras(self):
         """Fuer das Clawdmeter (ab Protokoll 2): offene Sessions zum
         Durchwischen auf dem Clawd-Bildschirm und alle Konten fuer die
-        Nutzungsansicht. Prozente -1 = gibt es bei diesem Konto nicht."""
+        Nutzungsansicht. Prozente -1 = gibt es bei diesem Konto nicht.
+        Je Session: "s" = Zustandsbuchstabe (_CLAWD_STATE), "c"/"w" =
+        belegter Kontext in Prozent / Fenster ("1M"), fehlen solange
+        unbekannt."""
         now = time.time()
 
         def mins(at):
@@ -4444,8 +4470,11 @@ class Api:
 
         sessions = []
         for sess in (self._live_sessions() or [])[:4]:
-            sessions.append({"n": sess["name"],
-                             "a": BUDDY_STATE_MAP.get(_LIVE_ACT.get(sess["state"], "idle"), "")})
+            item = {"n": sess["name"],
+                    "a": BUDDY_STATE_MAP.get(_LIVE_ACT.get(sess["state"], "idle"), ""),
+                    "s": _CLAWD_STATE.get(sess["state"], "i")}
+            item.update(_clawd_context(sess, "c", "w"))
+            sessions.append(item)
         accounts = []
         try:
             liste = self._accounts_mgr().accounts()
@@ -4467,12 +4496,15 @@ class Api:
 
     def _clawd_session(self):
         """Name + Hinweis fuer das Clawdmeter: welche Session die Animation
-        meint, und was die anderen tun ("+2 working")."""
+        meint, und was die anderen tun ("+2 working"). Dazu "cx"/"cw", wie
+        voll ihr Kontextfenster ist (fehlen solange unbekannt)."""
         snap = self._live_sessions()
         if not snap:
             return {"n": "", "h": ""}
         from sessions_live import hint
-        return {"n": snap[0]["name"], "h": hint(snap)}
+        out = {"n": snap[0]["name"], "h": hint(snap)}
+        out.update(_clawd_context(snap[0], "cx", "cw"))
+        return out
 
     def _clawd_link(self):
         """Lazy-Init des BLE-Links. None wenn das Modul nicht verfuegbar ist."""

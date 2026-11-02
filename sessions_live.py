@@ -19,6 +19,9 @@ to them are never opened. No hooks, no setup, no cost to Claude.
 Session names come from the session's transcript: the last ``custom-title``
 (the user's ``/rename`` or ``claude -n``) wins over the last ``ai-title``
 (Claude's automatic title), then the registry name, then the folder name.
+
+Context-window usage (for the Clawdmeter donut, "33% of 1M") comes from the
+same transcript, see ``_Transcript._update_context`` and ``context_window``.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import ctypes
 import glob
 import json
 import os
+import re
 import sys
 import time
 
@@ -39,6 +43,7 @@ DONE_FOR_S = 180          # "just finished" for 3 minutes after a reply ends
 SLEEP_AFTER_S = 900       # idle for 15 minutes -> sleep
 TAIL_BYTES = 16 * 1024    # how much of a transcript's end decides thinking/limit
 NAME_MAX = 40
+WINDOW_200K, WINDOW_1M = 200_000, 1_000_000
 
 
 def _claude_home() -> str:
@@ -80,17 +85,26 @@ class _Transcript:
 
     def __init__(self, path: str):
         self.path = path
+        self._reset()
+
+    def _reset(self) -> None:
         self.offset = 0
         self.custom_title = ""
         self.ai_title = ""
+        # Context usage of the main conversation, from the last usage entry:
+        self.ctx_tokens = None            # input + cache read + cache creation
+        self.model = ""                   # requestedModel (keeps "[1m]"), else message.model
+        self.beta_1m = None               # last main api-request asked for context-1m
+        self.ctx_peak = 0                 # highest ctx_tokens seen since the model last changed
 
-    def update_titles(self) -> None:
+    def update(self) -> None:
+        """Reads what was appended since last time: titles and context usage."""
         try:
             size = os.path.getsize(self.path)
         except OSError:
             return
         if size < self.offset:            # rewritten / truncated: start over
-            self.offset, self.custom_title, self.ai_title = 0, "", ""
+            self._reset()
         if size == self.offset:
             return
         try:
@@ -109,27 +123,54 @@ class _Transcript:
         # quotes are escaped (\"ai-title\"); the parsed type is checked anyway.
         for kind, key, attr in (("custom-title", "customTitle", "custom_title"),
                                 ("ai-title", "aiTitle", "ai_title")):
-            title = self._last_entry(data, end, kind, key)
-            if title:
-                setattr(self, attr, title)
+            o = self._last_line(data, end, b'"' + kind.encode() + b'"',
+                                lambda o, kind=kind, key=key: o.get("type") == kind and o.get(key))
+            if o:
+                setattr(self, attr, str(o[key]))
+        self._update_context(data, end)
+
+    def _update_context(self, data: bytes, end: int) -> None:
+        """Context usage the way Claude Code's status line counts it: the LAST
+        entry with ``message.usage``, skipping sidechain and API-error entries;
+        tokens = input + cache_read_input + cache_creation_input. Same backward
+        byte search as the titles, so a 100 MB transcript is not walked line by
+        line, and later calls only see the newly appended bytes."""
+        req = self._last_line(data, end, b'"api-request"', _is_main_api_request)
+        if req:
+            betas = (req.get("params") or {}).get("betas") or []
+            self.beta_1m = any("context-1m" in str(b) for b in betas)
+        o = self._last_line(data, end, b'"usage"', _is_usage_entry)
+        if not o:
+            return
+        msg = o["message"]
+        u = msg["usage"]
+        tokens = sum(int(u.get(k) or 0) for k in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        model = str(o.get("requestedModel") or msg.get("model") or "")
+        if model != self.model:
+            self.model, self.ctx_peak = model, 0
+        self.ctx_tokens = tokens
+        self.ctx_peak = max(self.ctx_peak, tokens)
 
     @staticmethod
-    def _last_entry(data: bytes, end: int, kind: str, key: str) -> str:
-        marker = b'"' + kind.encode() + b'"'
+    def _last_line(data: bytes, end: int, marker: bytes, accept) -> dict | None:
+        """The last complete line containing `marker` whose JSON object passes
+        `accept`, or None. The bare marker can't match inside message text,
+        where the quotes are escaped; `accept` checks the parsed entry anyway."""
         pos = end
         while True:
             idx = data.rfind(marker, 0, pos)
             if idx < 0:
-                return ""
+                return None
             start = data.rfind(b"\n", 0, idx) + 1
             stop = data.find(b"\n", idx)
             try:
                 o = json.loads(data[start:stop if stop >= 0 else end])
-                if isinstance(o, dict) and o.get("type") == kind and o.get(key):
-                    return str(o[key])
+                if isinstance(o, dict) and accept(o):
+                    return o
             except ValueError:
                 pass
-            pos = start                   # not a title entry: look further back
+            pos = start                   # not the entry we want: look further back
 
     def tail_entries(self) -> list[dict]:
         """The last few complete JSON lines, newest last."""
@@ -153,6 +194,83 @@ class _Transcript:
             except ValueError:
                 continue
         return out
+
+
+def _is_usage_entry(o: dict) -> bool:
+    if o.get("type") != "assistant" or o.get("isSidechain") or o.get("isApiErrorMessage"):
+        return False
+    msg = o.get("message")
+    if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+        return False
+    # Claude Code's own placeholder replies carry an all-zero usage.
+    return msg.get("model") != "<synthetic>"
+
+
+def _is_main_api_request(o: dict) -> bool:
+    return o.get("type") == "api-request" and o.get("querySource") in (
+        None, "repl_main_thread", "sdk")
+
+
+# --------------------------------------------------------------------------
+# Context window size
+# --------------------------------------------------------------------------
+#
+# Claude Code hands ``context_window.context_window_size`` only to the status
+# line, never to a file. What the transcripts show (checked read-only on ~700
+# transcripts from Claude Code 2.1.1xx-2.1.316, Nov 2026):
+#
+# * Assistant entries carry ``requestedModel`` (2.1.3xx), which keeps the
+#   "[1m]" suffix when the user picked a 1M variant ("claude-opus-5-5[1m]");
+#   ``message.model`` never has it. ``api-request`` entries list the API betas
+#   in ``params.betas``; "context-1m-..." shows up for those variants (and for
+#   a few plain-id sessions). An ``attachment.identity`` entry repeats the id,
+#   with "(1M context)" in its ``marketingName``.
+# * Plain ids of the current models run past 200K without either signal:
+#   claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-fable-5-1 and
+#   claude-fable-5 all have sessions at 400K-970K, and auto-compaction fired
+#   at 960K-990K. The status line reports 1,000,000 for a plain
+#   claude-opus-5-5. So those families are 1M natively; claude-opus-4-6 only
+#   went past 200K as "[1m]", haiku is 200K.
+# * Neither the session registry, settings.json nor ~/.claude.json records
+#   which model a running session uses.
+#
+# Rule, first match wins:
+#   1. "[1m]" in the session's model id, or its last main API request used
+#      the context-1m beta                                            -> 1M
+#   2. the session already used more than 200K since its model changed -> 1M
+#   3. model id is claude-opus / claude-fable, version 4.8 or newer    -> 1M
+#   4. no model id seen and settings.json "model" contains "[1m]"      -> 1M
+#   5. otherwise                                                       -> 200K
+
+_FAMILY = re.compile(r"claude-(opus|fable|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?!\d)")
+
+
+def context_window(model: str, beta_1m: bool | None = None, peak_tokens: int = 0,
+                   default_model: str = "") -> int:
+    """Size of a session's context window in tokens (rule above)."""
+    model = (model or "").lower()
+    if "[1m]" in model or beta_1m:
+        return WINDOW_1M
+    if peak_tokens > WINDOW_200K:
+        return WINDOW_1M
+    m = _FAMILY.search(model)
+    if m and m.group(1) in ("opus", "fable") and (int(m.group(2)), int(m.group(3) or 0)) >= (4, 8):
+        return WINDOW_1M
+    if not model and "[1m]" in (default_model or "").lower():
+        return WINDOW_1M
+    return WINDOW_200K
+
+
+def window_label(size: int) -> str:
+    """1_000_000 -> "1M", 200_000 -> "200K"."""
+    if size >= 1_000_000:
+        return f"{size // 1_000_000}M"
+    return f"{size // 1000}K"
+
+
+def context_pct(tokens: int, size: int) -> int:
+    """Whole percent of the window in use, 0-100."""
+    return max(0, min(100, int(round(tokens * 100 / size)))) if size else 0
 
 
 def _is_limit_entry(o: dict) -> bool:
@@ -194,9 +312,28 @@ class LiveSessions:
         home = claude_home or _claude_home()
         self.sessions_dir = os.path.join(home, "sessions")
         self.projects_dir = os.path.join(home, "projects")
+        self.settings_path = os.path.join(home, "settings.json")
         self.clock = clock
         self.proc_start = proc_start
         self._transcripts: dict[str, _Transcript] = {}
+        self._settings_cache = (None, "")     # (mtime, its "model")
+
+    def _default_model(self) -> str:
+        """The "model" in Claude Code's settings.json (re-read only when the
+        file changes)."""
+        try:
+            mtime = os.path.getmtime(self.settings_path)
+        except OSError:
+            return ""
+        if self._settings_cache[0] != mtime:
+            model = ""
+            try:
+                with open(self.settings_path, encoding="utf-8") as f:
+                    model = str((json.load(f) or {}).get("model") or "")
+            except (OSError, ValueError, AttributeError):
+                pass
+            self._settings_cache = (mtime, model)
+        return self._settings_cache[1]
 
     def _transcript(self, session_id: str) -> _Transcript | None:
         t = self._transcripts.get(session_id)
@@ -251,7 +388,7 @@ class LiveSessions:
         since = float(rec.get("statusUpdatedAt") or rec.get("updatedAt") or 0) / 1000.0
         t = self._transcript(sid)
         if t:
-            t.update_titles()
+            t.update()
         tail = t.tail_entries() if t and status in ("busy", "idle") else []
 
         if status == "waiting":
@@ -269,6 +406,11 @@ class LiveSessions:
         custom = (t.custom_title if t else "") or (
             str(rec.get("name") or "") if rec.get("nameSource") == "user" else "")
         name = custom or (t.ai_title if t else "") or str(rec.get("name") or "") or folder
+        ctx_pct = ctx_window = None           # unknown until the first reply
+        if t and t.ctx_tokens is not None:
+            ctx_window = context_window(t.model, t.beta_1m, t.ctx_peak,
+                                        "" if t.model else self._default_model())
+            ctx_pct = context_pct(t.ctx_tokens, ctx_window)
         return {
             "session_id": sid,
             "pid": rec.get("pid"),
@@ -280,6 +422,9 @@ class LiveSessions:
             "waiting_for": rec.get("waitingFor") or "",
             "state": state,
             "since": since,
+            "ctx_tokens": t.ctx_tokens if t else None,
+            "ctx_window": ctx_window,         # tokens, None = unknown
+            "ctx_pct": ctx_pct,               # 0-100, None = unknown
         }
 
 

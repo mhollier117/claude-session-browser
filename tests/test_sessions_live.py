@@ -204,4 +204,135 @@ def test_app_bridge_name_hint_and_anim_without_buddy():
     assert api._clawd_anim() == ""                     # mirroring off: device decides
 
     link = cm.ClawdmeterLink(session_provider=lambda: {"n": "Café · naïve → «x»? ok", "h": "+2 working"})
-    assert link._current_session() == ("Caf nave x? ok", "+2 working")
+    assert link._current_session() == ("Caf nave x? ok", "+2 working", None, "")
+
+
+def usage(inp=0, read=0, create=0, out=0):
+    return {"input_tokens": inp, "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": create, "output_tokens": out}
+
+
+def reply(tokens, model="claude-opus-5-5", requested=None, **extra):
+    """Assistant entry with usage; `tokens` split over the three input fields."""
+    e = {"type": "assistant", "message": {"role": "assistant", "model": model, "content": [],
+                                          "usage": usage(10, tokens - 110, 100, out=999)}}
+    if requested:
+        e["requestedModel"] = requested
+    e.update(extra)
+    return e
+
+
+def test_context_tokens_from_last_main_usage_entry(w):
+    w.session(1, "a")
+    w.transcript("a", reply(50_000),
+                 reply(330_000),
+                 reply(900_000, isSidechain=True),                     # subagent
+                 reply(950_000, isApiErrorMessage=True),               # error placeholder
+                 reply(0, model="<synthetic>"),
+                 {"type": "user", "message": {"role": "user", "content": "hi"},
+                  "toolUseResult": {"usage": usage(777_777)}})        # nested "usage" key
+    s = by_id(w.live().snapshot())["a"]
+    # input 10 + cache read + cache creation 100; output tokens don't count
+    assert s["ctx_tokens"] == 330_000
+    assert s["ctx_window"] == 1_000_000 and s["ctx_pct"] == 33
+
+
+def test_context_unknown_without_usage_entry(w):
+    w.session(1, "a")
+    w.transcript("a", ai("Title"))
+    w.session(2, "b")                                     # no transcript at all
+    s = by_id(w.live().snapshot())
+    for sid in ("a", "b"):
+        assert s[sid]["ctx_pct"] is None and s[sid]["ctx_window"] is None
+
+
+def test_context_is_read_incrementally(w):
+    w.session(1, "a")
+    w.transcript("a", reply(20_000, model="claude-haiku-4-5-20251001"))
+    live = w.live()
+    s = by_id(live.snapshot())["a"]
+    assert (s["ctx_tokens"], s["ctx_window"], s["ctx_pct"]) == (20_000, 200_000, 10)
+    # Change the already-read line in place (same length): a reader that
+    # starts over would now see 90_000; an incremental one never looks back.
+    p = w.root / "projects" / "C--work-proj" / "a.jsonl"
+    p.write_bytes(p.read_bytes().replace(b"19890", b"89890"))
+    w.transcript("a", ai("Title"))                          # new bytes, no usage
+    assert by_id(live.snapshot())["a"]["ctx_tokens"] == 20_000
+    w.transcript("a", reply(41_000, model="claude-haiku-4-5-20251001"))
+    s = by_id(live.snapshot())["a"]
+    assert s["ctx_tokens"] == 41_000 and s["ctx_pct"] == 20
+
+
+def test_window_rule():
+    cw = sl.context_window
+    M, K = 1_000_000, 200_000
+    # 1. explicit per-session signal
+    assert cw("claude-opus-4-6[1m]") == M
+    assert cw("claude-opus-4-6", beta_1m=True) == M
+    # 2. already past 200K
+    assert cw("claude-sonnet-4-5", peak_tokens=200_001) == M
+    assert cw("claude-sonnet-4-5", peak_tokens=200_000) == K
+    # 3. model families with a native 1M window
+    for m in ("claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-fable-5-1",
+              "claude-fable-5", "claude-opus-6-20270101"):
+        assert cw(m) == M, m
+    for m in ("claude-opus-4-6", "claude-opus-4-20250514", "claude-haiku-4-5-20251001",
+              "claude-haiku-5-5", "claude-sonnet-4-5", "something-else"):
+        assert cw(m) == K, m
+    # 4. settings.json default only when the session's model is unknown
+    assert cw("", default_model="opus[1m]") == M
+    assert cw("claude-opus-4-6", default_model="opus[1m]") == K
+    assert cw("") == K
+    assert (sl.window_label(M), sl.window_label(K), sl.window_label(2_000_000)) == ("1M", "200K", "2M")
+
+
+def test_window_follows_requested_model_and_beta(w):
+    w.session(1, "a")
+    w.transcript("a", reply(30_000, model="claude-opus-4-6", requested="claude-opus-4-6[1m]"))
+    w.session(2, "b")
+    w.transcript("b", {"type": "api-request", "querySource": "repl_main_thread",
+                       "params": {"model": "claude-opus-4-6",
+                                  "betas": ["context-management-2025-06-27", "context-1m-2025-08-07"]}},
+                 reply(30_000, model="claude-opus-4-6"), folder="C--b")
+    w.session(3, "c")
+    w.transcript("c", reply(30_000, model="claude-opus-4-6"), folder="C--c")
+    s = by_id(w.live().snapshot())
+    assert s["a"]["ctx_window"] == s["b"]["ctx_window"] == 1_000_000
+    assert (s["c"]["ctx_window"], s["c"]["ctx_pct"]) == (200_000, 15)
+
+
+def test_window_peak_resets_on_model_switch(w):
+    w.session(1, "a")
+    w.transcript("a", reply(300_000, model="claude-sonnet-4-5"))
+    live = w.live()
+    assert by_id(live.snapshot())["a"]["ctx_window"] == 1_000_000     # past 200K: must be 1M
+    w.transcript("a", reply(50_000, model="claude-sonnet-4-5"))       # compacted, same model
+    assert by_id(live.snapshot())["a"]["ctx_window"] == 1_000_000
+    w.transcript("a", reply(50_000, model="claude-haiku-4-5"))
+    assert by_id(live.snapshot())["a"]["ctx_window"] == 200_000
+
+
+def test_app_bridge_sends_context_and_state():
+    pytest.importorskip("webview")
+    import claude_sessions as cs
+
+    class FakeService:
+        def latest(self):
+            return [{"state": "needs_you", "name": "Fix login bug", "ctx_pct": 33,
+                     "ctx_window": 1_000_000},
+                    {"state": "thinking", "name": "Other", "ctx_pct": 7, "ctx_window": 200_000},
+                    {"state": "done", "name": "New", "ctx_pct": None, "ctx_window": None},
+                    {"state": "sleep", "name": "Old"}]
+
+    api = cs.Api.__new__(cs.Api)
+    api.settings = {"clawdmeter_buddy": True}
+    api._sessions_service = FakeService()
+    api._accounts_mgr = lambda: type("M", (), {"accounts": lambda self: []})()
+    assert api._clawd_session() == {"n": "Fix login bug", "h": "+1 working", "cx": 33, "cw": "1M"}
+    ss = api._clawd_extras()["ss"]
+    assert [(x["s"], x.get("c"), x.get("w")) for x in ss] == [
+        ("n", 33, "1M"), ("w", 7, "200K"), ("d", None, None), ("z", None, None)]
+    assert "c" not in ss[2] and "w" not in ss[2]
+    api._sessions_service = type("S", (), {"latest": lambda self: [
+        {"state": "working", "name": "Fresh", "ctx_pct": None, "ctx_window": None}]})()
+    assert api._clawd_session() == {"n": "Fresh", "h": ""}

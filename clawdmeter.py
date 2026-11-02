@@ -64,6 +64,11 @@ RETRY_INTERVAL = 15     # Obergrenze der Wartezeit nach einem Fehlschlag
 CONNECT_TIMEOUT_FIRST = 8
 CONNECT_TIMEOUT = 20    # Abbruch wenn das Geraet nicht antwortet
 RETRY_BACKOFF = (2, 4, 8, 15)   # Wartezeit nach dem 1., 2., 3., n-ten Fehlschlag
+# Sessionnamen in der "ss"-Liste: hoechstens so lang; passt die Liste nicht in
+# ein BLE-Paket, werden sie bis auf SS_NAME_MIN gekuerzt, bevor Sessions
+# wegfallen.
+SS_NAME_MAX = 20
+SS_NAME_MIN = 12
 
 
 # --------------------------------------------------------------------------
@@ -460,10 +465,12 @@ class ClawdmeterLink:
         self._on_usage = on_usage
         self._anim_provider = anim_provider or (lambda: "")
         # session_provider: {"n": Name der Session, die die Animation meint,
-        # "h": Hinweis auf die anderen, z.B. "+2 working"}. Geht als "n"/"h"
-        # mit; aeltere Firmware ignoriert unbekannte Felder.
+        # "h": Hinweis auf die anderen, z.B. "+2 working", optional "cx":
+        # belegter Kontext dieser Session in Prozent, "cw": Fenstergroesse
+        # als Text ("1M", "200K")}. Geht unter denselben Schluesseln mit;
+        # aeltere Firmware ignoriert unbekannte Felder.
         self._session_provider = session_provider or (lambda: {"n": "", "h": ""})
-        self._last_session = ("", "")
+        self._last_session = ("", "", None, "")
         # usage_provider: Nutzung des aktiven Kontos aus accounts.py (oder None)
         # - bevorzugt vor der Header-Abfrage: kostet kein Kontingent und
         # funktioniert auch fuer Tarife ohne 5-Stunden-Limit.
@@ -703,9 +710,11 @@ class ClawdmeterLink:
 
     def _extras_messages(self) -> dict:
         """Zusatzmeldungen fuer Protokoll 2, je Schluessel ein fertiger
-        JSON-Text: "ss" = offene Sessions (Name + Animation, dringendste
-        zuerst), "ac<i>" = Konto i. Jede passt in ein BLE-Paket (MTU - 3):
-        Namen werden gekuerzt, notfalls Sessions weggelassen."""
+        JSON-Text: "ss" = offene Sessions (Name, Animation, Zustand,
+        Kontext, dringendste zuerst), "ac<i>" = Konto i. Jede passt in ein
+        BLE-Paket (MTU - 3): bei "ss" werden erst alle Namen Schritt fuer
+        Schritt bis auf SS_NAME_MIN Zeichen gekuerzt (der laengste zuerst),
+        erst dann Sessions von hinten weggelassen."""
         try:
             ex = self._extras_provider() or {}
         except Exception:
@@ -716,11 +725,25 @@ class ClawdmeterLink:
         def enc(obj):
             return json.dumps(obj, separators=(",", ":"))
 
-        sessions = [dict(x) for x in (ex.get("ss") or [])][:4]
+        alle = [dict(x) for x in (ex.get("ss") or [])][:4]
+        for x in alle:
+            x["n"] = _ascii(x.get("n"), SS_NAME_MAX)
+        sessions = []
+        # So viele Sessions wie moeglich; fuer jede Anzahl erst die Namen
+        # kuerzen. Wer nach dem Weglassen noch Platz hat, behaelt die
+        # laengeren Namen.
+        for anzahl in range(len(alle), 0, -1):
+            probe = [dict(x) for x in alle[:anzahl]]
+            while len(enc({"k": "ss", "l": probe})) > limit:
+                laengster = max(probe, key=lambda x: len(x["n"]))
+                if len(laengster["n"]) <= SS_NAME_MIN:
+                    break
+                laengster["n"] = laengster["n"][:-1]
+            else:
+                sessions = probe
+                break
         for x in sessions:
-            x["n"] = _ascii(x.get("n"), 20)
-        while sessions and len(enc({"k": "ss", "l": sessions})) > limit:
-            sessions.pop()
+            x["n"] = x["n"].rstrip()      # gekuerzt endet es sonst auf " "
         out["ss"] = enc({"k": "ss", "l": sessions})
 
         accounts = (ex.get("ac") or [])[:6]
@@ -741,13 +764,21 @@ class ClawdmeterLink:
         self._last_extras = msgs
 
     def _current_session(self) -> tuple:
-        """(Name, Hinweis), fuer das Display auf ASCII gebracht und gekuerzt:
-        die Schriften des Geraets haben keine Umlaute oder Emoji."""
+        """(Name, Hinweis, Kontext-%, Fenster), Name und Hinweis fuer das
+        Display auf ASCII gebracht und gekuerzt: die Schriften des Geraets
+        haben keine Umlaute oder Emoji. Kontext-% ist ein ganzzahliger Wert
+        0-100 oder None (unbekannt), Fenster dann "" - so loest erst ein
+        neuer ganzer Prozentpunkt ein Nachschicken aus."""
         try:
             d = self._session_provider() or {}
         except Exception:
             d = {}
-        return _ascii(d.get("n"), 24), _ascii(d.get("h"), 24)
+        cx, cw = d.get("cx"), _ascii(d.get("cw"), 6)
+        try:
+            cx = max(0, min(100, int(cx))) if cx is not None and cw else None
+        except (TypeError, ValueError):
+            cx = None
+        return _ascii(d.get("n"), 24), _ascii(d.get("h"), 24), cx, cw if cx is not None else ""
 
     def _current_anim(self) -> str:
         try:
@@ -787,10 +818,14 @@ class ClawdmeterLink:
         anim = self._current_anim()
         payload["a"] = anim          # "" = Geraet entscheidet selbst
         self._last_anim = anim
-        name, hint = self._current_session()
+        session = self._current_session()
+        name, hint, cx, cw = session
         payload["n"] = name          # Session, die die Animation meint
         payload["h"] = hint          # z.B. "+2 working"
-        self._last_session = (name, hint)
+        if cx is not None:           # Kontext dieser Session, z.B. 33 % von "1M"
+            payload["cx"] = cx
+            payload["cw"] = cw
+        self._last_session = session
 
         data = json.dumps(payload, separators=(",", ":")).encode()
         await client.write_gatt_char(RX_CHAR_UUID, data, response=False)

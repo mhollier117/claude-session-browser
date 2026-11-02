@@ -50,3 +50,80 @@ def test_extras_fit_one_packet_and_trim():
 def test_extras_are_ascii_only():
     msgs = link({"ss": [{"n": "Café ✳ naïve", "a": "done"}], "ac": []})._extras_messages()
     assert json.loads(msgs["ss"])["l"][0]["n"] == "Caf nave"
+
+
+class FakeClient:
+    def __init__(self):
+        self.writes = []
+
+    async def write_gatt_char(self, _uuid, data, response=False):
+        self.writes.append(json.loads(bytes(data)))
+
+
+def sent_payload(session):
+    import asyncio
+    lk = cm.ClawdmeterLink(session_provider=lambda: session)
+    lk._last_payload = {"s": 1, "w": 2}           # skip the usage poll
+    client = FakeClient()
+    asyncio.run(lk._send_once(client, poll=False))
+    return lk, client.writes[0]
+
+
+def test_usage_payload_carries_context_of_the_named_session():
+    _, p = sent_payload({"n": "Fix login", "h": "", "cx": 33, "cw": "1M"})
+    assert p["n"] == "Fix login" and p["cx"] == 33 and p["cw"] == "1M"
+
+
+def test_usage_payload_omits_context_when_unknown():
+    for session in ({"n": "Fresh", "h": ""}, {"n": "Fresh", "h": "", "cx": None, "cw": ""},
+                    {"n": "Fresh", "h": "", "cx": 5}):            # no window: unusable
+        _, p = sent_payload(session)
+        assert "cx" not in p and "cw" not in p
+
+
+def test_context_change_triggers_resend_only_on_whole_percent():
+    state = {"n": "A", "h": "", "cx": 33, "cw": "1M"}
+    lk, _ = sent_payload(state)
+    lk._session_provider = lambda: state
+    assert not lk._anim_changed()
+    state["cx"] = 33.4                               # provider gives ints; still no spam
+    assert not lk._anim_changed()
+    state["cx"] = 34
+    assert lk._anim_changed()
+    state.update(cx=34, cw="200K")
+    assert lk._anim_changed()
+
+
+def test_session_entries_carry_state_and_context():
+    ex = {"ss": [{"n": "Fix login", "a": "allow", "s": "n", "c": 33, "w": "1M"},
+                 {"n": "Fresh", "a": "work coding", "s": "w"}], "ac": []}
+    ss = json.loads(link(ex, mtu=247)._extras_messages()["ss"])["l"]
+    assert ss == ex["ss"]
+
+
+def test_long_session_list_shortens_names_before_dropping_sessions():
+    names = ["Refactor the payment service", "Fix flaky login test suite",
+             "Write release notes draft", "Investigate memory leak now"]
+    ex = {"ss": [{"n": n, "a": "work coding", "s": "w", "c": 100, "w": "200K"} for n in names],
+          "ac": []}
+
+    def ss_for(mtu):
+        text = link(ex, mtu=mtu)._extras_messages()["ss"]
+        assert len(text.encode()) <= mtu - 3
+        return json.loads(text)["l"]
+
+    roomy = ss_for(400)
+    assert [x["n"] for x in roomy] == [cm._ascii(n, cm.SS_NAME_MAX).rstrip() for n in names]
+    # Tight: all four still fit once names are cut, none shorter than 12.
+    full = len(json.dumps({"k": "ss", "l": roomy}, separators=(",", ":")))
+    tight = ss_for(full - 20 + 3)
+    assert len(tight) == 4
+    assert all(cm.SS_NAME_MIN <= len(x["n"]) < cm.SS_NAME_MAX for x in tight)
+    assert all(x["s"] == "w" and x["c"] == 100 and x["w"] == "200K" for x in tight)
+    # Tighter than four 12-char names allow: only then sessions go, from the end,
+    # and the ones that stay get their longer names back where room allows.
+    small = ss_for(244 - 60)
+    assert 1 <= len(small) < 4
+    assert all(n.startswith(x["n"]) for n, x in zip(names, small))
+    assert all(len(x["n"]) >= cm.SS_NAME_MIN for x in small)
+    assert len(small[0]["n"]) > cm.SS_NAME_MIN       # room left after dropping: longer again
