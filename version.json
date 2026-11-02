@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.4",
-  "notes": "First start no longer looks frozen: 'Loading sessions' now counts the transcripts it reads (e.g. 312 / 1204), and if the window misses the result it asks again by itself instead of needing a restart.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.4",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.4/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "01e2d6a8e2fb43bfc5b7d9dd76cdd6a92fafe29959283cdc96727edb4fa7928f"
+  "version": "1.6.1.5",
+  "notes": "Clawdmeter: works with several paired PCs (the gadget shows the PC you pick; 'Show on the gadget' button in the Clawdmeter tab and the tray). New System screen data: CPU (per core), RAM, GPU (any vendor: AMD, Intel, NVIDIA; 'GPU on the gadget' setting to limit to NVIDIA or hide), system drive and network, sent every 2 s. Needs the matching gadget firmware for the new screens.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.5",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.5/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "37985c83ef57e8ae4e11abc164d8dfa0ae65e62da91d6cb602864091479dee01"
 }
