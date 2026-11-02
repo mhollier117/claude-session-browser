@@ -22,6 +22,22 @@ https://github.com/user-attachments/assets/4718ca04-9353-42bd-baa3-5b24d559bd8d
 
 </div>
 
+> [!NOTE]
+> **This is a fork of [juppeee/claude-session-browser](https://github.com/juppeee/claude-session-browser)**, adapted to drive a Clawdmeter with several Claude accounts and several open Claude Code sessions. Everything below the "This fork" section describes the original app. The download badges above point at the original releases. This fork's builds come from its own releases (none published yet).
+
+## This fork
+
+Added on top of the original:
+
+- **Accounts tab** (`accounts.py`): keep several Claude accounts and switch Claude Code between them without logging out. Also from the tray ("Switch account"). Shows 5-hour, weekly and **Fable** weekly usage per account, a weekly-only view for plans without a 5-hour limit, and re-login warnings. Sign-ins are stored DPAPI-encrypted in `%USERPROFILE%\.claude-accounts`, outside `.claude`.
+- **Live session tracking** (`sessions_live.py`): reads Claude Code's own list of open sessions (`~/.claude/sessions`), so the desktop buddy and the Clawdmeter show the most urgent session (needs you › working › done › idle) and its name. No hooks, no cost to Claude.
+- **Clawdmeter link, protocol 2** (`clawdmeter.py`): usage from the free usage endpoint (also for plans without a 5-hour limit), Fable usage, the session name, and lists of open sessions and accounts for firmware that supports them.
+- **Faster start** with large histories (incremental, on-disk session index), English by default, an informational Fable-limit notification.
+- **Scripts:** `build.ps1` (installer), `release.ps1` (version + checksum + GitHub release), `install.ps1` (checksum-verified install on any PC).
+
+Development: Python 3.12 virtualenv in `.venv` (`uv venv .venv --python 3.12`, then `uv pip install -r requirements-dev.txt`). Tests: `.venv\Scripts\python.exe -m pytest -q tests`.
+
+
 ---
 
 Claude Code keeps every session on disk under `~/.claude/projects`, but getting
