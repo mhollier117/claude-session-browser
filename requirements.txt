@@ -5,3 +5,5 @@ pystray>=0.19.5
 Pillow>=11
 bleak>=1.0
 truststore>=0.10
+psutil>=7.0
+nvidia-ml-py>=12.535

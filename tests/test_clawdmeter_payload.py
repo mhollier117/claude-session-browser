@@ -251,3 +251,95 @@ def test_switch_request_without_callback_is_a_refresh():
     woke = []
     lk._handle_request(b"\x02\x00a", lambda: woke.append(1))
     assert woke == [1]
+
+
+# -- PC system stats ("sy", protocol 2) ------------------------------------
+
+SY = {"c": 12, "cc": [10, 14], "m": 9000, "mt": 32000, "dn": "C:", "du": 400,
+      "dt": 931, "dr": 5, "dw": 7, "nd": 3, "nu": 1}
+
+
+def sy_link(provider, proto=2, mtu=247):
+    lk = cm.ClawdmeterLink(system_provider=provider)
+    lk._proto, lk._mtu = proto, mtu
+    return lk
+
+
+def sent_system(lk):
+    import asyncio
+    client = FakeClient()
+    asyncio.run(lk._maybe_send_system(client))
+    return client.writes
+
+
+def test_system_stats_go_out_only_from_protocol_2():
+    assert sent_system(sy_link(lambda: SY, proto=1)) == []
+    assert sent_system(cm.ClawdmeterLink()) == []                # no provider
+    lk = sy_link(lambda: SY)
+    assert sent_system(lk) == [{"k": "sy", **SY}]
+    text = lk._system_message().decode()
+    assert text.startswith('{"k":"sy","c":12,"cc":[10,14],') and " " not in text
+
+
+def test_system_stats_every_interval_regardless_of_changes(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(cm.time, "monotonic", lambda: now[0])
+    lk = sy_link(lambda: SY)
+    assert len(sent_system(lk)) == 1
+    now[0] += 1.0                                                # 1 s tick: not yet
+    assert sent_system(lk) == []
+    now[0] += 1.0                                                # same values, still sent
+    assert sent_system(lk) == [{"k": "sy", **SY}]
+    now[0] += 1.9                                                # tick a little early
+    assert len(sent_system(lk)) == 1
+
+
+def test_failing_system_provider_never_breaks_the_link():
+    import asyncio
+    calls = {"n": 0}
+
+    def provider():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("psutil exploded")
+        if calls["n"] == 2:
+            return {"cc": "not a list", "c": object()}           # not encodable
+        return SY
+
+    logs = []
+    lk = cm.ClawdmeterLink(system_provider=provider, session_provider=lambda: {"n": "", "h": ""},
+                           log=logs.append)
+    lk._proto, lk._mtu = 2, 247
+    lk._last_payload = {"s": 1, "w": 2}
+    client = FakeClient()
+    asyncio.run(lk._maybe_send_system(client))
+    asyncio.run(lk._maybe_send_system(client))
+    assert client.writes == []
+    asyncio.run(lk._send_once(client, poll=False))              # usage still goes out
+    assert client.writes[0]["s"] == 1
+    asyncio.run(lk._maybe_send_system(client))                  # and sy recovers
+    assert client.writes[-1] == {"k": "sy", **SY}
+    assert sum("system stats failed" in m for m in logs) == 1   # logged once, not per tick
+
+
+def test_system_message_shrinks_only_cc_to_fit_mtu():
+    stats = dict(SY, cc=[100] * 24, g=99, gm=12000, gt=24576)
+    lk = sy_link(lambda: stats, mtu=247)
+    full = lk._system_message()
+    assert len(json.loads(full)["cc"]) == 24
+    base = len(json.dumps({"k": "sy", **dict(stats, cc=[])}, separators=(",", ":")))
+    for mtu in (len(full) + 2, base + 3 + 4 * 6, base + 3 + 4):
+        msg_bytes = sy_link(lambda: stats, mtu=mtu)._system_message()
+        assert msg_bytes is not None and len(msg_bytes) <= mtu - 3
+        msg = json.loads(msg_bytes)
+        assert {k: v for k, v in msg.items() if k != "cc"} == \
+            {"k": "sy", **{k: v for k, v in stats.items() if k != "cc"}}
+        assert msg["cc"] and all(v == 100 for v in msg["cc"])
+    assert len(json.loads(sy_link(lambda: stats, mtu=len(full) + 2)._system_message())["cc"]) == 12
+    # Not even one core value fits: skip this round rather than drop fields.
+    assert sy_link(lambda: stats, mtu=base)._system_message() is None
+
+
+def test_halve_averages_neighbours():
+    assert cm._halve([0, 100, 50, 51, 7]) == [50, 51, 7]
+    assert cm._halve([]) == []

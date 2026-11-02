@@ -4550,8 +4550,25 @@ class Api:
             usage_provider=self._clawd_usage,
             extras_provider=self._clawd_extras,
             on_battery=self.on_clawd_battery,
-            on_switch_request=self._clawd_switch_request)
+            on_switch_request=self._clawd_switch_request,
+            system_provider=self._clawd_system)
         return self._clawdmeter
+
+    def _clawd_system(self):
+        """PC-Systemwerte fuer den System-Bildschirm des Clawdmeter (CPU, RAM,
+        GPU, Laufwerk, Datentraeger, Netz), siehe sysstats.py. Der Sammler
+        merkt sich die Zaehler vom letzten Aufruf; None, wenn psutil fehlt."""
+        stats = getattr(self, "_sysstats", None)
+        if stats is None:
+            if getattr(self, "_sysstats_failed", False):
+                return None
+            try:
+                from sysstats import SystemStats
+                stats = self._sysstats = SystemStats()
+            except Exception:
+                self._sysstats_failed = True
+                return None
+        return stats.sample()
 
     def _clawd_log(self, msg):
         """Ereignisse vom Clawdmeter mitschreiben, in csb_clawdmeter.log im

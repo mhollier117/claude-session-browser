@@ -74,6 +74,9 @@ RETRY_BACKOFF = (2, 4, 8, 15)   # Wartezeit nach dem 1., 2., 3., n-ten Fehlschla
 SE_MAX = 8
 SE_NAME_MAX = 20
 SE_NAME_MIN = 4
+# PC-Systemwerte ({"k":"sy",...}, ab Protokoll 2) gehen alle SY_INTERVAL
+# Sekunden raus, unabhaengig von jeder Aenderungserkennung.
+SY_INTERVAL = 2.0
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +164,16 @@ def _ascii(v, limit: int) -> str:
     Umlaute oder Emoji), Leerraum zusammengezogen, gekuerzt."""
     text = str(v or "").encode("ascii", "ignore").decode()
     return " ".join(text.split())[:limit]
+
+
+def _halve(values) -> list:
+    """Je zwei benachbarte Werte mitteln (ganzzahlig); bei ungerader Anzahl
+    bleibt der letzte allein. Fuer "cc", wenn "sy" nicht ins Paket passt."""
+    out = []
+    for i in range(0, len(values), 2):
+        grp = values[i:i + 2]
+        out.append(int(sum(grp) / len(grp) + 0.5))
+    return out
 
 
 def parse_request(data) -> tuple | None:
@@ -470,7 +483,7 @@ class ClawdmeterLink:
     def __init__(self, log=None, address_provider=None, on_usage=None,
                  anim_provider=None, on_battery=None, session_provider=None,
                  usage_provider=None, extras_provider=None,
-                 on_switch_request=None):
+                 on_switch_request=None, system_provider=None):
         """address_provider: Funktion die die gewuenschte Geraeteadresse liefert
         (leer/None = automatisch suchen). Wird bei jedem Versuch neu gefragt,
         damit eine Aenderung in den Einstellungen sofort greift.
@@ -504,6 +517,12 @@ class ClawdmeterLink:
         # ein langsamer Wechsel (Token erneuern, Dateien schreiben) die
         # BLE-Loop nicht aufhaelt; danach gehen frische Daten raus.
         self._on_switch_request = on_switch_request
+        # system_provider: PC-Systemwerte (sysstats.SystemStats.sample(), ohne
+        # "k") fuer den System-Bildschirm, ab Protokoll 2 alle SY_INTERVAL s.
+        # Fehler darin duerfen die Verbindung nie stoeren.
+        self._system_provider = system_provider
+        self._last_sy = None         # monotonic() der letzten "sy"-Meldung
+        self._sy_failed = False      # Fehler schon gemeldet (nicht alle 2 s)
         self._proto = 1
         self._mtu = 23
         self._last_extras = {}
@@ -682,9 +701,12 @@ class ClawdmeterLink:
 
             self._last_payload = None    # frische Sitzung, nichts zwischenlagern
             self._last_anim = ""
+            self._last_sy = None
+            self._sy_failed = False
             while not self._stop.is_set() and client.is_connected:
                 await self._send_once(client)
                 await self._read_battery(client)
+                await self._maybe_send_system(client)
                 # Auf den naechsten Poll warten -- oder frueher, wenn das
                 # Geraet selbst um Daten bittet.
                 # In kleinen Scheiben warten, damit stop() sofort greift und
@@ -703,6 +725,7 @@ class ClawdmeterLink:
                         # Request kosten.
                         if self._anim_changed():
                             await self._send_once(client, poll=False)
+                        await self._maybe_send_system(client)
         # Ohne Verbindung ist der Ladestand unbekannt, nicht "wie zuletzt" -
         # ein stehengebliebener Wert waere schlimmer als gar keiner.
         self._set(connected=False, battery=None)
@@ -821,6 +844,50 @@ class ClawdmeterLink:
                 continue
             await client.write_gatt_char(RX_CHAR_UUID, text.encode(), response=False)
         self._last_extras = msgs
+
+    def _system_message(self) -> bytes | None:
+        """{"k":"sy",...} als ein BLE-Paket, oder None (kein Anbieter, Firmware
+        unter Protokoll 2, Anbieter liefert nichts oder scheitert). Passt die
+        Meldung nicht in MTU - 3, wird nur "cc" schrittweise auf die halbe
+        Anzahl gemittelt; die anderen Felder bleiben immer. Reicht selbst ein
+        einziger Kernwert nicht, geht diesmal nichts raus."""
+        if self._system_provider is None or self._proto < 2:
+            return None
+        try:
+            stats = self._system_provider()
+            if not stats:
+                return None
+            msg = {"k": "sy", **stats}
+            limit = max(20, self._mtu - 3)
+            data = json.dumps(msg, separators=(",", ":")).encode()
+            cc = list(msg.get("cc") or [])
+            while len(data) > limit and len(cc) > 1:
+                cc = _halve(cc)
+                msg["cc"] = cc
+                data = json.dumps(msg, separators=(",", ":")).encode()
+        except Exception as e:
+            if not self._sy_failed:
+                self._sy_failed = True
+                self._log(f"Clawdmeter: system stats failed: {e}")
+            return None
+        if len(data) > limit:
+            if not self._sy_failed:
+                self._sy_failed = True
+                self._log(f"Clawdmeter: system stats do not fit MTU {self._mtu}")
+            return None
+        return data
+
+    async def _maybe_send_system(self, client) -> None:
+        """Systemwerte schicken, wenn SY_INTERVAL seit dem letzten Mal um ist.
+        Etwas Spielraum, weil der Loop in 1-s-Scheiben aufwacht."""
+        now = time.monotonic()
+        if self._last_sy is not None and now - self._last_sy < SY_INTERVAL - 0.2:
+            return
+        data = self._system_message()
+        if data is None:
+            return
+        self._last_sy = now
+        await client.write_gatt_char(RX_CHAR_UUID, data, response=False)
 
     def _current_session(self) -> tuple:
         """(Name, Hinweis, Kontext-%, Fenster), Name und Hinweis fuer das
