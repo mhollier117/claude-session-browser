@@ -115,6 +115,17 @@ def test_non_user_source_passes(cfg):
     assert _run(cfg, _input(source="queued"))[0] == 0
 
 
+@pytest.mark.parametrize("prompt", [
+    '<cross-session-message from="uds:\\\\.\\pipe\\LOCAL\\cc-msg-1" from-name="peer">\nport the fix',
+    '  <cross-session-message from="x">hi</cross-session-message>',
+])
+def test_cross_session_message_passes(cfg, prompt):
+    # Another Claude session's message, not something the user typed: blocking
+    # it just bounces the message (seen live 2026-11-03, Claude Code 2.1.311).
+    _registry(cfg)
+    assert _run(cfg, _input(prompt=prompt))[0] == 0
+
+
 def test_other_event_passes(cfg):
     _registry(cfg)
     assert _run(cfg, _input(hook_event_name="Stop"))[0] == 0

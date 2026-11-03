@@ -44,3 +44,6 @@ debug/
 
 # Local Python environment
 .venv/
+
+# PowerShell module cache the name-gate tests can leave in the working dir
+Microsoft/

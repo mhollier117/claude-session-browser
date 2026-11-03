@@ -8,8 +8,8 @@
 # It only ever blocks when ALL of these hold:
 #   - the event is UserPromptSubmit and the hook input has no session_title
 #     (Claude Code only sends it for a custom name; auto titles don't count)
-#   - the prompt is not a slash command (/rename itself must get through) or a
-#     ! shell command
+#   - the prompt is not a slash command (/rename itself must get through), a
+#     ! shell command, or a message from another Claude session
 #   - a "source" field, if Claude Code ever sends one, says "user"
 #   - this session's entry in Claude Code's session registry
 #     (<config>\sessions\*.json) says entrypoint "cli", i.e. an interactive
@@ -43,6 +43,9 @@ try {
 
     $prompt = ([string]$d.prompt).TrimStart()
     if ($prompt.StartsWith('/') -or $prompt.StartsWith('!')) { exit 0 }
+    # A message from another Claude session (SendMessage) also arrives as
+    # UserPromptSubmit; the user didn't type it, and blocking only bounces it.
+    if ($prompt.StartsWith('<cross-session-message')) { exit 0 }
 
     $sid = [string]$d.session_id
     if (-not $sid) { exit 0 }
