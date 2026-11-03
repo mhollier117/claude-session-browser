@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.6",
-  "notes": "Clawdmeter: hold the creature screen for about a second to bring that Claude Code session's terminal to the front on the PC, with the right Windows Terminal tab selected. Runs only when asked (no background cost).",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.6",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.6/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "f44796e4b11aa6532c8bc769bdd558dafe5a4fff9143ae4bf9a301b1d82297df"
+  "version": "1.6.1.7",
+  "notes": "Naming gate: messages from other Claude sessions (SendMessage) are no longer blocked in unnamed sessions. Previously the gate bounced them with 'Name this session first' before the receiving Claude saw them.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.7",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.7/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "a5f187c6b4d5c631d7d26aa3123636fed72a66da0c460190d7d3a8eca67c2fc3"
 }
