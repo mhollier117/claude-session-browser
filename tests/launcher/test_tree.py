@@ -25,11 +25,16 @@ def test_level_kinds(fake_env):
 
 def test_new_folder_kind_options(fake_env):
     r = fake_env.root
+    assert new_folder_kind_options(r, r) == ["organisational"]
     assert new_folder_kind_options(r, r / "work") == ["organisational"]
-    assert new_folder_kind_options(r, r / "work" / "net") == ["organisational"]
+    assert new_folder_kind_options(r, r / "WORK") == ["organisational"]
     assert new_folder_kind_options(r, r / "work" / "clients") == ["client"]
+    assert new_folder_kind_options(r, r / "work" / "net") == ["project", "container"]
+    assert new_folder_kind_options(r, r / "work" / "net" / "pxe") == ["project", "container"]
     assert new_folder_kind_options(r, r / "home") == ["project", "container"]
+    assert new_folder_kind_options(r, r / "cc") == ["project", "container"]
     assert new_folder_kind_options(r, r / "work" / "clients" / "bast") == ["project", "container"]
+    assert new_folder_kind_options(r, r / "work" / "clients" / "bast" / "bifrost") == ["project", "container"]
 
 
 def test_resolve_fragment_cl_ba_bi(fake_env):

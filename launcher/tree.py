@@ -47,11 +47,11 @@ def level_kind(root: Path, folder: Path) -> Kind:
 def new_folder_kind_options(root: Path, parent: Path) -> list[str]:
     """Kinds a new folder under `parent` can take, default first."""
     parts = _rel_parts(root, parent)
+    if parts in ((), ("work",)):  # a new area, or a new bucket under work
+        return ["organisational"]
     if parts == ("work", "clients"):
         return ["client"]
-    if parts and parts[0] == "work" and len(parts) <= 2:
-        return ["organisational"]
-    return ["project", "container"]
+    return ["project", "container"]  # home, cc, work\<bucket>, work\clients\<client> and everything below
 
 
 def _listed(folder: Path) -> list[Path]:

@@ -181,8 +181,11 @@ def test_children_listing(fake_env):
     assert listing["start_here"] is True
     assert listing["kind_options"] == ["organisational"]
     assert listing["default_wrapper"] == "clauded"
+    assert bridge.children_listing(fake_env, idx, fake_env.root / "work" / "net")["kind_options"] == \
+        ["project", "container"]
     top = bridge.children_listing(fake_env, idx, fake_env.root)
     assert top["start_here"] is False and top["rel"] == ""
+    assert top["kind_options"] == ["organisational"]
     assert bridge.children_listing(fake_env, idx, fake_env.root / "cc")["default_wrapper"] == "claude"
     idx.close()
 
@@ -222,7 +225,8 @@ def test_parse_new_container_does_not_launch_and_needs_no_wrapper(fake_env):
     ({"wrapper": "bash"}, "wrapper"),
     ({"wrapper": None}, "wrapper"),
     ({"github": "other"}, "github"),
-    ({"new_folder": "x", "kind": "project"}, "kind"),  # work/net only allows organisational
+    ({"new_folder": "x", "kind": "organisational"}, "kind"),  # work/net allows project or container
+    ({"rel": "work/clients", "new_folder": "x", "kind": "project"}, "kind"),  # work/clients only allows client
     ({"rel": "home", "new_folder": "x", "kind": None}, "kind"),
     ({"rel": "home", "new_folder": "a/b", "kind": "project"}, "folder name"),
     ({"rel": "home", "new_folder": "ai", "kind": "project"}, "exists"),
