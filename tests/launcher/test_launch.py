@@ -65,8 +65,15 @@ def test_new_command_keeps_name_verbatim(tmp_path):
 
 
 def test_new_command_with_session_id(tmp_path):
+    launch_ = new_command(tmp_path, "n", "claudeb", session_id="abc-123")
+    assert launch_.argv == ["claudeb", "-n", "n", "--session-id", "abc-123"]
+    assert launch_.cwd == tmp_path
+
+
+def test_new_command_qwen_has_no_name_flag(tmp_path):
     launch_ = new_command(tmp_path, "n", "qwen", session_id="abc-123")
-    assert launch_.argv == ["qwen", "-n", "n", "--session-id", "abc-123"]
+    assert launch_.argv == ["qwen", "--session-id", "abc-123"]  # Qwen Code has no -n
+    assert new_command(tmp_path, "n", "qwen").argv == ["qwen"]
     assert launch_.cwd == tmp_path
 
 

@@ -52,7 +52,8 @@ def resume_command(row: Row, wrapper: str | None, *, root: Path) -> Launch:
 
 
 def new_command(cwd: Path, name: str, wrapper: str, session_id: str | None = None) -> Launch:
-    argv = [wrapper, "-n", name]
+    """`<wrapper> -n <name> [--session-id <id>]`; Qwen Code has no name flag, so `qwen` gets no `-n`."""
+    argv = [wrapper] if wrapper == "qwen" else [wrapper, "-n", name]
     if session_id:
         argv += ["--session-id", session_id]
     return Launch(Path(cwd), argv, [])

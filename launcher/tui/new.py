@@ -14,19 +14,19 @@ from ..display import age, rel_or_abs
 from ..index import FolderStats, Index
 from ..launch import WRAPPERS, Launch, default_wrapper, new_command
 from ..paths import Env
-from ..scaffold import Runner, _check_name, create_folder
+from ..scaffold import Runner, check_name, create_folder
 from ..suggest import Pending, Suggestion, default_http, suggest
 from ..tree import children, folder_stats_map, new_folder_kind_options, resolve_fragment, slug
 from .resume import fit
 
 _KIND_LABELS = {"project": ("a project", "start the session in it · git init · .claude-project · plan.md"),
-                "container": ("a container", "a grouping folder only"),
+                "container": ("a container", "a grouping folder only · then keep choosing inside it"),
                 "client": ("a client", "writes a CLAUDE.md stub naming the client"),
                 "organisational": ("organisational", "a grouping folder")}
 _GITHUB = (("personal", "personal", "mhollier117"), ("work", "work", "mhollierBPT"))
 _SEP = " › "
 _NAME_COL = 28
-PICKER_KEYS = "type to filter (a/b/c jumps) · ↑↓ · enter opens · backspace up · esc root · q quit"
+PICKER_KEYS = "type to filter (a/b jumps, /a/b from the root) · ↑↓ · enter opens · backspace up · esc root · q quit"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
 
@@ -68,6 +68,7 @@ class NewFlow:
         self.name = ""
         self.text = ""  # the text being edited on the name and folder-name steps
         self.error = ""
+        self.status = ""  # set by the app while a folder is being created (git/gh can take a while)
         self.folder = env.root
         self.filter = ""
         self.rows: list[tuple[str, str, Path | None]] = []
@@ -123,7 +124,10 @@ class NewFlow:
     # ---- picker -----------------------------------------------------------------------------------------------------
 
     def apply_suggestion(self, s: Suggestion) -> None:
-        """Jump to `s` if the user has not acted in the picker yet; otherwise offer it as a ★ row at the top."""
+        """Jump to `s` if the user has not acted in the picker yet; otherwise offer it as a ★ row at the top.
+        Ignored once the walk has left the picker."""
+        if self.step != "picker":
+            return
         if not self.moved:
             self._jump(s)
         else:
@@ -142,14 +146,17 @@ class NewFlow:
         self._refresh()
 
     def _refresh(self, select_first: bool = True) -> None:
+        """Rebuild the rows. `select_first`: select the preselected new-folder row, else the first row that is not
+        the ★ offer (enter must go where the user typed, not to the offer); otherwise keep the selected row."""
         current = self.rows[self.selected] if self.rows and not select_first else None
         self.rows = self._build_rows()
+        kinds = [k for k, _l, _p in self.rows]
         if current in self.rows:
             self.selected = self.rows.index(current)
+        elif self._preselect and "new_named" in kinds:
+            self.selected = kinds.index("new_named")
         else:
-            want = "new_named" if self._preselect else None
-            kinds = [k for k, _l, _p in self.rows]
-            self.selected = kinds.index(want) if want in kinds else 0
+            self.selected = next((i for i, k in enumerate(kinds) if k != "suggested"), 0)
 
     def _build_rows(self) -> list[tuple[str, str, Path | None]]:
         rows: list[tuple[str, str, Path | None]] = []
@@ -157,8 +164,9 @@ class NewFlow:
             s = self.offered
             rows.append(("suggested", f"★ {rel_or_abs(self.env.root, s.path)} — suggested by {s.source}"
                                       + (f" · {s.reason}" if s.reason else ""), Path(s.path)))
-        if "/" in self.filter:
-            for p in resolve_fragment(self.env, self.folder, self.filter):
+        if "/" in self.filter:  # a fragment: `a/b` from this level, `/a/b` from the root
+            base = self.env.root if self.filter.startswith("/") else self.folder
+            for p in resolve_fragment(self.env, base, self.filter):
                 rows.append(("match", self.crumb(p), p))
             return rows
         kids = [c for c in children(self.env, self.index, self.folder, self._stats)
@@ -233,12 +241,10 @@ class NewFlow:
         elif self.step == "kind":
             self._to_folder_name(self.new_name or "")
         elif self.step == "wrapper":
-            if self.new_name is None:
+            if self.new_name is None:  # start here
                 self.step = "picker"
                 self._refresh()
-            elif self._kind_values() == ["organisational"]:  # that step was skipped
-                self._to_folder_name(self.new_name)
-            else:
+            else:  # a project: back to its kind
                 self._to_kind()
         elif self.step == "github":
             self._to_wrapper()
@@ -290,23 +296,24 @@ class NewFlow:
     def _kind_values(self) -> list[str]:
         return new_folder_kind_options(self.env.root, self.folder)
 
-    def submit_folder_name(self, name: str) -> None:
-        """Check the name (same rule as `create_folder`) and that it is free, then ask the kind, or skip the question
-        when the level only allows an organisational folder."""
-        name = name.strip()
+    def _name_problem(self, name: str) -> str:
         try:
-            _check_name(name)
+            check_name(name)
         except ValueError as e:
-            self.error = str(e)
+            return str(e)
+        return f"{name} already exists here" if (self.folder / name).exists() else ""
+
+    def submit_folder_name(self, name: str) -> None:
+        """Check the name (same rule as `create_folder`) and that it is free, then ask the kind; where the level only
+        allows an organisational folder there is no question and it is created at once."""
+        name = name.strip()
+        self.error = self._name_problem(name)
+        if self.error:
             return
-        if (self.folder / name).exists():
-            self.error = f"{name} already exists here"
-            return
-        self.error = ""
         self.new_name = name
         if self._kind_values() == ["organisational"]:
             self.new_kind = "organisational"
-            self._to_wrapper()
+            self._walk_into_new()
         else:
             self._to_kind()
 
@@ -319,7 +326,10 @@ class NewFlow:
         if kind not in self._kind_values():
             raise ValueError(f"{kind!r} is not offered here")
         self.new_kind = kind
-        self._to_wrapper()
+        if kind == "project":
+            self._to_wrapper()
+        else:  # a container or client is a grouping folder: create it and keep walking inside it
+            self._walk_into_new()
 
     def choose_new_folder(self, name: str, kind: str | None = None) -> None:
         """Name the new folder and, when given, its kind (the name and kind steps in one call)."""
@@ -358,18 +368,43 @@ class NewFlow:
         self.github = account
         self._create()
 
+    def creating(self) -> Path | None:
+        """The folder `enter` is about to create on this step (so the app can say so before git/gh block it)."""
+        if self.step == "github" or (self.step == "kind" and self.options()
+                                     and self.options()[self.selected][0] != "project"):
+            return self.target()
+        if self.step == "folder_name" and self._kind_values() == ["organisational"] \
+                and not self._name_problem(self.text.strip()):
+            return self.folder / self.text.strip()
+        return None
+
+    def _create_new(self) -> Path | None:
+        """`create_folder` for the pending new folder; on failure back to the folder-name step with the error."""
+        try:
+            created = create_folder(self.folder, self.new_name, self.new_kind, self.name, runner=self.runner,
+                                    github=self.github if self.new_kind == "project" else None)
+        except (ValueError, OSError) as e:
+            self.error = str(e) if isinstance(e, ValueError) else f"could not create the folder: {e}"
+            self._to_folder_name(self.new_name)
+            return None
+        self.warnings.extend(created.warnings)
+        return created.path
+
+    def _walk_into_new(self) -> None:
+        path = self._create_new()
+        if path is None:
+            return
+        self.new_name = self.new_kind = None
+        self.step = "picker"
+        self._open(path)
+
     def _create(self) -> None:
-        self.warnings = []
+        """Start here, or create the new project: then the walk is done."""
         if self.new_name:
-            try:
-                created = create_folder(self.folder, self.new_name, self.new_kind, self.name, runner=self.runner,
-                                        github=self.github if self.new_kind == "project" else None)
-            except (ValueError, OSError) as e:
-                self.error = str(e) if isinstance(e, ValueError) else f"could not create the folder: {e}"
-                self._to_folder_name(self.new_name)
+            path = self._create_new()
+            if path is None:
                 return
-            self.cwd = created.path
-            self.warnings = list(created.warnings)
+            self.cwd = path
         else:
             self.cwd = self.folder
         self.session_id = str(uuid.uuid4())
@@ -403,8 +438,10 @@ class NewFlow:
                 extra += f" ; GitHub ({self.github})"
             lines.append(f"→ mkdir {self.target()}{extra}")
         if self.step in ("wrapper", "github", "done"):
-            wrapper = self.wrapper or (self.options()[self.selected][0] if self.step == "wrapper" else "")
-            lines.append(f'→ cd {self.target()} ; {wrapper} -n "{self.name}"')
+            wrapper = self.options()[self.selected][0] if self.step == "wrapper" else self.wrapper
+            argv = new_command(self.target(), self.name, wrapper).argv  # the same flags the launch will use
+            run = " ".join(f'"{a}"' if a == self.name and i == 2 else a for i, a in enumerate(argv))
+            lines.append(f"→ cd {self.target()} ; {run}")
         return lines
 
 
@@ -417,6 +454,9 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
     def line(*parts: tuple[str, str]) -> None:
         frags.extend(parts)
         frags.append(("", "\n"))
+
+    if flow.status:
+        line(("class:status", fit(flow.status, width)))
 
     if flow.step == "name":
         line(("class:title", "Session name: "), ("", flow.text), ("class:dim", "▏"))

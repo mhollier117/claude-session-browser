@@ -150,8 +150,11 @@ def test_new_folder_under_work_bucket_is_organisational(fake_env, index):
     _go(flow, fake_env.root / "work")
     _pick(flow, "new")
     assert flow.step == "folder_name" and flow.text == "zebra_things"
-    flow.enter()  # organisational is the only option: no kind prompt
-    assert flow.new_kind == "organisational" and flow.step == "wrapper"
+    assert flow.creating() == fake_env.root / "work" / "zebra_things"
+    flow.enter()  # organisational is the only option: no kind prompt; created, and the walk goes on inside it
+    assert flow.step == "picker" and flow.folder == fake_env.root / "work" / "zebra_things"
+    assert _kinds(flow) == ["start", "new"]
+    assert flow.new_name is None and flow.result() is None
 
 
 def test_new_folder_under_clients_is_client(fake_env, index):
@@ -163,7 +166,9 @@ def test_new_folder_under_clients_is_client(fake_env, index):
     assert flow.step == "kind"
     assert [(v, label) for v, label, _hint in flow.options()] == [("client", "a client")]
     flow.enter()
-    assert flow.new_kind == "client" and flow.step == "wrapper"
+    acme = fake_env.root / "work" / "clients" / "acme"
+    assert flow.step == "picker" and flow.folder == acme and (acme / "CLAUDE.md").is_file()
+    assert _kinds(flow) == ["start", "new"]
 
 
 def test_new_folder_deep_asks_project_or_container_default_project(fake_env, index):
@@ -225,14 +230,55 @@ def test_suggestion_is_offered_not_forced_after_user_moved(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("zzz qqq")
     _go(flow, r / "home")
+    flow.move(1)
+    before = flow.rows[flow.selected]
     flow.apply_suggestion(Suggestion(r / "work" / "net", None, "high", "matched net", "qwen"))
     assert flow.folder == r / "home"
     assert flow.rows[0] == ("suggested", "★ work\\net — suggested by qwen · matched net", r / "work" / "net")
-    assert flow.selected == 0 or flow.rows[flow.selected][0] != "suggested"
+    assert flow.rows[flow.selected] == before  # the row the user had selected stays selected
     flow.selected = 0
     flow.enter()
     assert flow.folder == r / "work" / "net"
     assert "suggested" not in _kinds(flow)
+
+
+def test_offer_never_steals_enter_from_what_the_user_typed(fake_env, index):
+    r = fake_env.root
+    flow = _flow(fake_env, index)
+    flow.start("zzz qqq")
+    _go(flow, r / "home")
+    flow.apply_suggestion(Suggestion(r / "work" / "net", None, "high", "matched net", "qwen"))
+    flow.type_filter("ai")
+    assert flow.rows[0][0] == "suggested" and flow.rows[flow.selected][2] == r / "home" / "ai"
+    flow.enter()
+    assert flow.folder == r / "home" / "ai"
+    flow.esc()  # the offer is still there at the root; a fragment must not lose to it either
+    flow.type_filter("w/h")
+    assert flow.rows[0][0] == "suggested" and flow.rows[flow.selected][0] == "match"
+    flow.enter()
+    assert flow.folder == r / "work" / "halo"
+    flow.back()  # opening a level selects its first real row, not the offer
+    assert flow.rows[0][0] == "suggested" and flow.selected == 1
+
+
+def test_suggestion_ignored_after_the_picker(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("zzz qqq")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    flow.apply_suggestion(Suggestion(fake_env.root / "work" / "net", None, "high", "late", "qwen"))
+    assert flow.step == "wrapper" and flow.folder == fake_env.root / "home" and flow.offered is None
+
+
+def test_slash_fragment_resolves_from_the_root(fake_env, index):
+    r = fake_env.root
+    flow = _flow(fake_env, index)
+    flow.start("zzz qqq")
+    _go(flow, r / "home" / "ai")
+    flow.type_filter("/w/cl/ba/bi")
+    assert flow.rows == [("match", "work › clients › bast › bifrost", r / "work" / "clients" / "bast" / "bifrost")]
+    flow.enter()
+    assert flow.folder == r / "work" / "clients" / "bast" / "bifrost"
 
 
 def test_live_model_answer_arrives_through_poll(fake_env, index):
@@ -351,16 +397,37 @@ def test_result_carries_scaffold_warnings(fake_env, index):
     assert any("git init failed" in w for w in launch.warnings)
 
 
-def test_container_needs_no_github_and_no_git(fake_env, index):
+def test_container_is_created_and_the_walk_continues_inside(fake_env, index):
     runner = FakeRunner()
     flow = _flow(fake_env, index, runner=runner)
     flow.start("grouping")
     _go(flow, fake_env.root / "home")
     _pick(flow, "new")
-    flow.choose_new_folder("group_x", "container")
+    flow.submit_folder_name("group_x")
+    flow.selected = 1  # a container
+    assert flow.creating() == fake_env.root / "home" / "group_x"
+    flow.enter()
+    group = fake_env.root / "home" / "group_x"
+    assert group.is_dir() and flow.step == "picker" and flow.folder == group  # no launch yet
+    assert _kinds(flow) == ["start", "new"] and flow.result() is None
+    _pick(flow, "new")  # keep walking: a project inside the container
+    flow.choose_new_folder("inner", "project")
     flow.choose_wrapper("clauded")
-    assert flow.step == "done"
-    assert (fake_env.root / "home" / "group_x").is_dir()
+    flow.choose_github("personal")
+    assert flow.result().cwd == group / "inner"
+    assert not (group / ".git").exists() and not (group / "plan.md").exists()
+
+
+def test_container_then_start_here_launches_in_it(fake_env, index):
+    runner = FakeRunner()
+    flow = _flow(fake_env, index, runner=runner)
+    flow.start("grouping")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "new")
+    flow.choose_new_folder("group_y", "container")
+    _pick(flow, "start")
+    flow.choose_wrapper("clauded")
+    assert flow.result().cwd == fake_env.root / "home" / "group_y"
     assert not [c for c in runner.calls if c[0] in ("git", "gh")]
 
 
@@ -369,10 +436,29 @@ def test_folder_taken_at_create_returns_to_name_prompt(fake_env, index):
     flow.start("late clash")
     _go(flow, fake_env.root / "home")
     _pick(flow, "new")
-    flow.choose_new_folder("late", "container")
+    flow.choose_new_folder("late", "project")
     (fake_env.root / "home" / "late").mkdir()  # someone else made it meanwhile
     flow.choose_wrapper("clauded")
+    flow.choose_github("personal")
     assert flow.step == "folder_name" and flow.error and flow.result() is None
+    flow.submit_folder_name("late2")
+    (fake_env.root / "home" / "late2").mkdir()
+    flow.choose_kind("container")
+    assert flow.step == "folder_name" and flow.error.startswith("could not create the folder")
+    assert flow.text == "late2"
+
+
+def test_summary_matches_the_launch_flags(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("net stuff")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "start")
+    target = fake_env.root / "work" / "net"
+    assert flow.summary() == [f'→ cd {target} ; clauded -n "net stuff"']
+    flow.selected = [v for v, _l, _h in flow.options()].index("qwen")
+    assert flow.summary() == [f"→ cd {target} ; qwen"]  # Qwen Code has no -n
+    flow.choose_wrapper("qwen")
+    assert flow.result().argv[:2] == ["qwen", "--session-id"]
 
 
 def test_result_none_until_done(fake_env, index):

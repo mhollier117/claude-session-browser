@@ -269,10 +269,32 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
     def _quit(event) -> None:
         event.app.exit(result=None)
 
+    busy = {"on": False}
+
     @kb.add("enter")
     def _enter(event) -> None:
-        flow.enter()
-        after(event)
+        if busy["on"]:
+            return
+        target = flow.creating()
+        if target is None:
+            flow.enter()
+            after(event)
+            return
+
+        async def create() -> None:  # draw the status first: git init / gh repo create block for seconds
+            busy["on"] = True
+            flow.status = f"creating {target}…"
+            event.app.invalidate()
+            await asyncio.sleep(0.05)
+            try:
+                flow.enter()
+            finally:
+                flow.status = ""
+                busy["on"] = False
+            event.app.invalidate()
+            after(event)
+
+        event.app.create_background_task(create())
 
     @kb.add("escape", eager=True)
     def _escape(event) -> None:
