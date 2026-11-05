@@ -488,6 +488,34 @@ def test_result_none_until_done(fake_env, index):
     assert flow.result() is None
 
 
+def _run_keys(flow, keys):
+    """Run the real prompt_toolkit app for `flow` on a pipe, feeding `keys`; returns its result."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from launcher.tui.app import build_new_app
+    with create_pipe_input() as pipe:
+        app = build_new_app(flow, output=DummyOutput(), input=pipe)
+        pipe.send_text(keys)
+        return app.run()
+
+
+def test_picker_q_is_a_filter_character_and_ctrl_c_quits(fake_env, index):
+    (fake_env.root / "home" / "quartz").mkdir()
+    flow = _flow(fake_env, index)
+    flow.start("zzz qqq")
+    _go(flow, fake_env.root / "home")
+    assert _run_keys(flow, "qu\x03") is None  # ctrl-c aborts
+    assert flow.step == "picker" and flow.filter == "qu"
+    assert [p.name for k, _l, p in flow.rows if k == "child"] == ["quartz"]
+
+
+def test_picker_footer_names_ctrl_c_not_q(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("zzz qqq")
+    text = "".join(t for _s, t in render_new(flow, 200, 40))
+    assert "ctrl-c quit" in text and "q quit" not in text.replace("ctrl-c quit", "")
+
+
 def test_render_new_shows_breadcrumb_banner_and_rows(fake_env, index):
     r = fake_env.root
     flow = _flow(fake_env, index)

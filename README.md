@@ -235,7 +235,8 @@ that tab; `cc.ps1` prefers the `cc.exe` beside it.
   while you are not typing a filter, so a filter that begins with one of those letters
   starts with `/` (`/n`, `/queue`). Esc clears the filter.
 - **New session walk:** name, then a destination picker, then the wrapper. enter
-  confirms or chooses, esc goes back, ctrl-c quits.
+  confirms or chooses, esc goes back (in the picker: to the root), ctrl-c quits. In the
+  picker every letter, `q` included, filters the folders.
 
 **How the destination suggestion works.** Local answers (your history, then keywords,
 then the root folder) appear at once and the picker never waits. In the background the

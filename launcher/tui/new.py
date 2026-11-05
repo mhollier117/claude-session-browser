@@ -26,7 +26,7 @@ _KIND_LABELS = {"project": ("a project", "start the session in it · git init ·
 _GITHUB = (("personal", "personal", "mhollier117"), ("work", "work", "mhollierBPT"))
 _SEP = " › "
 _NAME_COL = 28
-PICKER_KEYS = "type to filter (a/b jumps, /a/b from the root) · ↑↓ · enter opens · backspace up · esc root · q quit"
+PICKER_KEYS = "type to filter (a/b jumps, /a/b from the root) · ↑↓ · enter opens · backspace up · esc root · ctrl-c quit"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
 
