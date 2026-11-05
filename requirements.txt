@@ -7,3 +7,4 @@ bleak>=1.0
 truststore>=0.10
 psutil>=7.0
 nvidia-ml-py>=12.535
+prompt_toolkit>=3.0.48
