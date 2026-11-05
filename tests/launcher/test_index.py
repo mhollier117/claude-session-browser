@@ -104,6 +104,23 @@ def test_counts_are_incremental_when_a_file_grows(fake_env, monkeypatch):
     assert idx.row("claude", "c1").display_name == "Mine"
 
 
+def test_last_ask_beyond_the_tail_cap_keeps_the_stored_one(fake_env):
+    cwd = fake_env.root / "cc"
+    p = write_claude_session(fake_env, cwd, "c1", [_u("first", cwd), _a("r1"), _u("the last typed ask"), _a("r2")])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("claude", "c1").last_ask == "the last typed ask"
+    mb = 1024 * 1024
+    _append(p, *[_a(f"{i} " + "z" * (mb - 100)) for i in range(18)], _a("final reply"))  # 18 MB of tool run
+    assert idx.refresh() == 1
+    r = idx.row("claude", "c1")
+    assert r.last_reply == "final reply" and r.last_ask == "the last typed ask" and r.assistant_msgs == 21
+    _append(p, _u("a new ask"), _a("ok"))
+    idx.refresh()
+    assert idx.row("claude", "c1").last_ask == "a new ask"  # a newer ask within reach still replaces it
+    idx.close()
+
+
 def test_shrunk_file_is_counted_from_the_start(fake_env, monkeypatch):
     cwd = fake_env.root / "cc"
     p = write_claude_session(fake_env, cwd, "c1", [_u("one", cwd), _a("r1"), _u("two"), _a("r2")])

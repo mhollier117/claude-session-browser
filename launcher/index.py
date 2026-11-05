@@ -221,8 +221,8 @@ class Index:
         touched = 0
         with self._db:  # one transaction: an unexpected error rolls the whole refresh back
             old = {(r["store"], r["sid"]): r for r in self._db.execute(
-                "SELECT store, sid, path, size, mtime, counted_to, user_msgs, assistant_msgs, custom_title, ai_title "
-                "FROM sessions")}
+                "SELECT store, sid, path, size, mtime, counted_to, user_msgs, assistant_msgs, custom_title, ai_title, "
+                "last_ask FROM sessions")}
             for done, (key, (path, st)) in enumerate(files.items(), 1):
                 prev = old.get(key)
                 if not (prev and prev["path"] == str(path) and prev["size"] == st.st_size
@@ -274,8 +274,10 @@ class Index:
             ai = ai or prev["ai_title"]
         else:
             users, assistants, end, custom, ai = stores.count_messages(path, store)
+        # the tail read is capped (stores.TAIL_MAX_BYTES): no ask within it means "not seen", so a stored one stays
+        last_ask = facts.last_ask or (prev["last_ask"] if prev is not None else "") or ""
         row = {"path": str(path), "cwd": facts.cwd, "name": custom or ai, "first_ask": facts.first_ask,
-               "last_ask": facts.last_ask, "last_reply": facts.last_reply[:_LAST_REPLY_CHARS],
+               "last_ask": last_ask, "last_reply": facts.last_reply[:_LAST_REPLY_CHARS],
                "user_msgs": users, "assistant_msgs": assistants, "size": facts.size, "mtime": facts.mtime,
                "last_activity": facts.mtime, "counted_to": end, "custom_title": custom, "ai_title": ai}
         row["display_name"] = self._display_name(store, facts.sid, row, live, titles)
