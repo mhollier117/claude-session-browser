@@ -937,6 +937,7 @@ TRANSLATIONS = {
         "Lädt…": "Loading…",
         "Ausgewählt:": "Selected:",
         "noch keine Sessions": "no sessions yet",
+        "{n} Session": "{n} session",
         "zuletzt aktiv {wann}": "last active {wann}",
         "vor {n} Min.": "{n} min ago",
         "vor {n} Std.": "{n} h ago",
