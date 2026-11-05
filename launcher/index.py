@@ -55,6 +55,7 @@ class Row:
     live_pid: int | None
     wrapper: str | None
     cwd_exists: bool
+    path: str = ""  # the transcript file (the preview reads the whole last reply from it)
 
 
 @dataclass
@@ -244,7 +245,7 @@ class Index:
                 first_ask=r["first_ask"] or "", last_ask=r["last_ask"] or "", last_reply=r["last_reply"] or "",
                 user_msgs=r["user_msgs"], assistant_msgs=r["assistant_msgs"], size=r["size"], mtime=r["mtime"],
                 last_activity=r["last_activity"], live_pid=reg.pid if reg else None, wrapper=r["wrapper"],
-                cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir()))
+                cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir(), path=r["path"]))
         return out
 
     def rows(self, filter_text: str = "") -> list[Row]:
