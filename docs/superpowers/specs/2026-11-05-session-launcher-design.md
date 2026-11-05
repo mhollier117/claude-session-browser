@@ -76,13 +76,15 @@ Levels, from `C:\claude-code`:
 Rules the UI applies:
 - "Start here" (use the current folder as the session's cwd) is offered at every level. The
   tree is read live from disk; nothing is hard-coded except the level kinds above.
-- "New folder here…" under `work` at L1 and L2, and under `clients\<x>`, creates an
-  **organisational** folder: no `git init`, no `plan.md`; under `clients` it is labelled
-  **"a client"** and gets a `CLAUDE.md` stub (`# <name>` + "Client work for <name>.").
-  Directly under `home` and `cc` the tree is flat (`cc\reorg`, `home\LlamaNote` are
-  projects), so there the user picks **project** or **container**, default project.
-  Below the organisational levels the user picks **project** (scaffold below) or
-  **container** (grouping folder only; the walk continues inside it).
+- "New folder here…" directly under the root or under `work` creates an **organisational**
+  folder (a new area or bucket): no `git init`, no `plan.md`. Under `work\clients` it is a
+  **client**: labelled **"a client"** and given a `CLAUDE.md` stub (`# <name>` +
+  "Client work for <name>."). Everywhere else, including under a bucket (`work\net`),
+  under a client (`work\clients\bast`), and directly under `home` and `cc` (flat:
+  `cc\reorg`, `home\LlamaNote` are projects), the user picks **project** (scaffold below,
+  default) or **container** (grouping folder only; the walk continues inside it).
+  (Amended 2026-11-05 at the final review: the earlier wording made bucket-level folders
+  organisational, which left `work\net\<new>` without a scaffold.)
 - Project scaffold: `git init`; `plan.md` written from a small template in this repo
   (`templates/plan.md`: title, goal, "Current phase", "Next", "Decisions", "Known issues");
   no project `CLAUDE.md`. Then an initial commit, and the launcher **creates the GitHub repo**:
