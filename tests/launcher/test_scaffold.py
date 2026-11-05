@@ -110,7 +110,7 @@ def test_organisational_and_container_make_folder_only(fake_env, kind):
 
 
 @pytest.mark.parametrize("name", ["", ".", "..", ".hidden", "a/b", "a\\b", "../escape", "D:evil", "C:evil",
-                                  "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b"])
+                                  "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b", "a;b", "x; calc"])
 def test_bad_names_rejected_before_touching_disk(fake_env, name):
     parent = fake_env.root / "cc"
     before = sorted(p.name for p in parent.iterdir())
@@ -120,6 +120,34 @@ def test_bad_names_rejected_before_touching_disk(fake_env, name):
     assert sorted(p.name for p in parent.iterdir()) == before
     assert sorted(p.name for p in parent.parent.iterdir()) == ["cc", "home", "work"]
     assert runner.calls == []
+
+
+def test_semicolon_rejected_everywhere_a_folder_name_is_checked(fake_env):
+    from launcher import bridge
+    from launcher.index import Index
+    from launcher.scaffold import check_name
+    from launcher.suggest import validate
+    from launcher.tui.new import NewFlow
+    with pytest.raises(ValueError, match=";"):
+        check_name("a;b")
+    assert validate(fake_env, {"path": "home", "new_folder": "a;b"}) is None  # the model's new_folder
+    with pytest.raises(ValueError, match=";"):  # the browser's New session request
+        bridge.parse_new(fake_env.root, {"name": "x", "rel": "home", "new_folder": "a;b", "kind": "project",
+                                         "wrapper": "clauded"})
+    idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
+    try:
+        flow = NewFlow(fake_env, idx, FakeRunner(), http=lambda *a: (_ for _ in ()).throw(OSError("offline")))
+        flow.start("x")
+        flow.esc()
+        flow.selected = next(i for i, (k, _l, p) in enumerate(flow.rows) if k == "child" and p.name == "home")
+        flow.enter()
+        flow.selected = [k for k, _l, _p in flow.rows].index("new")
+        flow.enter()
+        flow.submit_folder_name("a;b")  # the terminal walk shows the error inline and stays on the name
+        assert flow.step == "folder_name" and ";" in flow.error
+    finally:
+        idx.close()
+    assert not (fake_env.root / "home" / "a;b").exists()
 
 
 def test_unknown_kind_rejected(fake_env):
