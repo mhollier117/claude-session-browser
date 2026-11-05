@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.7",
-  "notes": "Naming gate: messages from other Claude sessions (SendMessage) are no longer blocked in unnamed sessions. Previously the gate bounced them with 'Name this session first' before the receiving Claude saw them.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.7",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.7/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "a5f187c6b4d5c631d7d26aa3123636fed72a66da0c460190d7d3a8eca67c2fc3"
+  "version": "1.6.1.8",
+  "notes": "Clawdmeter: session list keeps updating when the usage check fails; waiting prompts debounced (5 s), stable session order, unique session names, wait start time for the gadget",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.8",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.8/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "074c4663366fade0a88c3f3826e6be96e85234e32aa91d93da0160c19546bc19"
 }
