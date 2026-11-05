@@ -1,5 +1,7 @@
 """launcher.bridge: the pure glue behind the browser's launcher API (no webview needed)."""
+import base64
 import json
+import os
 import shutil
 import subprocess
 import uuid
@@ -56,36 +58,57 @@ def test_ps_command_needs_a_command():
         bridge.ps_command([])
 
 
+def test_encoded_command_decodes_back():
+    cmd = bridge.ps_command(["clauded", "-n", 'a "b" \\" ; $c `d  e ’f'])
+    enc = bridge.encoded_command(cmd)
+    assert set(enc) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    assert base64.b64decode(enc).decode("utf-16-le") == cmd
+
+
+_TRICKY = ["-n", "it's", 'say "hi"', 'back\\"slash', "one; two", "$env:USERNAME", "back`tick", "two  spaces",
+           "’quoted’", "a & b | c"]
+
+
 @pytest.mark.skipif(not shutil.which("pwsh"), reason="pwsh not installed")
-def test_ps_command_round_trips_through_pwsh():
-    """The quoted command, run by real pwsh from an argv list, hands every argument back unchanged."""
-    args = ["-n", "it's", 'say "hi"', "$env:USERNAME", "back`tick", "a ; b & c", "\u2019quoted\u2019", "two  spaces"]
-    script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+def test_encoded_command_round_trips_through_pwsh():
+    """The launch argv as built (`console_argv`, which `wt_argv` ends with), run by real pwsh, hands every argument
+    back unchanged. A `show` function stands in for the wrapper (defined by an outer -Command)."""
+    argv = bridge.console_argv(["show", *_TRICKY], "pwsh")
+    assert argv[:3] == ["pwsh", "-NoExit", "-EncodedCommand"]
+    define = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
               "function show { foreach ($a in $args) { [Console]::Out.WriteLine('<' + $a + '>') } }; "
-              + bridge.ps_command(["show", *args]))
-    out = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
+              "$cmd = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($env:ENC)); "
+              "Invoke-Expression $cmd")
+    out = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", define],
+                         env={**os.environ, "ENC": argv[3]}, capture_output=True, timeout=60).stdout.decode("utf-8")
+    assert out.splitlines() == [f"<{a}>" for a in _TRICKY]
+
+
+@pytest.mark.skipif(not shutil.which("pwsh"), reason="pwsh not installed")
+def test_encoded_command_runs_as_pwsh_argument():
+    """pwsh itself decodes -EncodedCommand (a command needing no profile function)."""
+    enc = bridge.encoded_command("[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + bridge.ps_command(
+        ["Write-Output", 'x "y" \\" ; $z `w  v']))
+    out = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
                          capture_output=True, timeout=60).stdout.decode("utf-8")
-    assert out.splitlines() == [f"<{a}>" for a in args]
+    assert out.splitlines() == ['x "y" \\" ; $z `w  v']
 
 
 # ---- terminal argv ----------------------------------------------------------------------------------------------
 
+def _enc(argv):
+    return bridge.encoded_command(bridge.ps_command(argv))
+
+
 def test_wt_argv_opens_a_tab_running_powershell(tmp_path):
-    argv = bridge.wt_argv(tmp_path, ["clauded", "-n", "x"], "pwsh")
-    assert argv == ["wt", "-w", "0", "nt", "-d", str(tmp_path), "pwsh", "-NoExit", "-Command",
-                    "& 'clauded' '-n' 'x'"]
-
-
-def test_wt_argv_escapes_semicolons_for_wt():
-    """wt splits its command line at every unescaped `;`, even inside one argument."""
-    argv = bridge.wt_argv(Path(r"C:\a;b"), ["clauded", "-n", "one; two"], "pwsh")
-    assert argv[5] == r"C:\a\;b"
-    assert argv[-1] == r"& 'clauded' '-n' 'one\; two'"
+    argv = bridge.wt_argv(tmp_path, ["clauded", "-n", "x; y"], "pwsh")
+    assert argv == ["wt", "-w", "0", "nt", "-d", str(tmp_path), "pwsh", "-NoExit", "-EncodedCommand",
+                    _enc(["clauded", "-n", "x; y"])]
 
 
 def test_console_argv_has_no_wt():
     assert bridge.console_argv(["qwen", "-r", "s1"], "powershell") == [
-        "powershell", "-NoExit", "-Command", "& 'qwen' '-r' 's1'"]
+        "powershell", "-NoExit", "-EncodedCommand", _enc(["qwen", "-r", "s1"])]
 
 
 def test_pick_shell_prefers_pwsh():
