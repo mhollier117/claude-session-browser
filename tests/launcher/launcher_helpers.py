@@ -32,3 +32,11 @@ def write_qwen_session(env: Env, work_dir: Path, sid: str, records: list[dict]) 
     _write_jsonl(path, records)
     (chats / f"{sid}.runtime.json").write_text(json.dumps({"work_dir": str(work_dir)}), encoding="utf-8")
     return path
+
+
+def make_row(cwd, name: str, last_activity: float, sid: str = "s"):
+    """A synthetic index Row (no transcript behind it) for tests that only need cwd, name and activity."""
+    from launcher.index import Row
+    return Row(store="claude", sid=sid, cwd=None if cwd is None else str(cwd), name=None, display_name=name,
+               first_ask=name, last_ask="", last_reply="", user_msgs=1, assistant_msgs=0, size=0,
+               mtime=last_activity, last_activity=last_activity, live_pid=None, wrapper=None, cwd_exists=True)

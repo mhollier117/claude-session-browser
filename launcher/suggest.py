@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import os
 import socket
-import subprocess
 import threading
 import time
 import urllib.error
@@ -30,9 +30,8 @@ QWEN_TOTAL_S = 6.0
 QWEN_CONNECT_S = 1.0
 QWEN_MODELS_S = 2.0
 CLAUDE_TOTAL_S = 20.0
-_MAX_CMDLINE = 32_000  # CreateProcess limit is 32,767 characters
 
-# Copied from cc\launcher-spike\cc-new-spike.ps1 ($keywords). Matched as substrings of the lower-cased name.
+# Copied from cc\launcher-spike\cc-new-spike.ps1 ($keywords). Matched as whole words of the lower-cased name.
 KEYWORDS: dict[str, tuple[str, ...]] = {
     "work\\net": ("forti", "fortigate", "fortios", "vpn", "ikev2", "cert", "dns", "firewall", "acme"),
     "work\\halo": ("halo", "psa", "ticket", "runbook"),
@@ -48,6 +47,8 @@ KEYWORDS: dict[str, tuple[str, ...]] = {
 
 _STOP = {"new", "fix", "phase", "update", "the", "and", "for", "with"}
 _CONFIDENCE = ("high", "medium", "low")
+_NULLS = ("", "null", "none")
+_CLAUDE_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")  # use the subscription login, never a key
 _ANSWER_LOG_CHARS = 1000
 
 
@@ -144,8 +145,8 @@ def validate(env: Env, raw, source: str = "") -> Suggestion | None:
     if path is None:
         return None
     new_folder = raw.get("new_folder")
-    if new_folder == "":
-        new_folder = None
+    if isinstance(new_folder, str) and new_folder.strip().lower() in _NULLS:
+        new_folder = None  # models copy the schema's "<name or null>" literally
     if new_folder is not None:
         if not isinstance(new_folder, str) or slug(new_folder) != new_folder:
             return None
@@ -198,9 +199,16 @@ def _remaining(deadline: float) -> float:
 
 # ---- model stages ---------------------------------------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx is returned as an error status instead of being followed (urllib would resend Authorization)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def default_http(method: str, url: str, headers: dict, body: dict | None, timeout: float) -> tuple[int, dict | str]:
     """One HTTP call: a TCP connect check (at most 1 s) first, then the request without any proxy (the endpoint is
-    on the LAN/VPN). Returns (status, parsed JSON or text); network errors raise."""
+    on the LAN/VPN) and without following redirects. Returns (status, parsed JSON or text); network errors raise."""
     parts = urllib.parse.urlsplit(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
     with socket.create_connection((parts.hostname, port), timeout=min(QWEN_CONNECT_S, timeout)):
@@ -210,7 +218,7 @@ def default_http(method: str, url: str, headers: dict, body: dict | None, timeou
     if data is not None:
         hdrs["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     try:
         with opener.open(req, timeout=timeout) as resp:
             status, raw = resp.status, resp.read()
@@ -261,8 +269,14 @@ def stage_qwen(http: Http = default_http, message: str | None = None) -> Stage:
             msg = message if message is not None else build_user_message(env, index, name)
             info["prompt_chars"] = len(SYSTEM_PROMPT) + len(msg)
             headers = {"Authorization": f"Bearer {key}"}
-            status, data = http("GET", base + "/models", headers, None, min(QWEN_MODELS_S, _remaining(end)))
-            model = (_current_alias(data) if status == 200 else None) or configured
+            try:
+                status, data = http("GET", base + "/models", headers, None, min(QWEN_MODELS_S, _remaining(end)))
+                alias = _current_alias(data) if status == 200 else None
+            except _Skip:
+                raise
+            except Exception:  # noqa: BLE001 - no model list: fall back to the configured name
+                alias = None
+            model = alias or configured
             request = {
                 "model": model,
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": msg}],
@@ -310,12 +324,12 @@ def stage_claude(runner: Runner | None = None, exe: Path | None = None, message:
             info["prompt_chars"] = len(SYSTEM_PROMPT) + len(msg)
             cwd = env.data_dir / "suggest-cwd"
             cwd.mkdir(parents=True, exist_ok=True)
-            args = [str(binary), "-p", msg, "--model", "haiku", "--output-format", "json",
+            # the user message goes on stdin (print mode reads the prompt from it): no command-line length limit
+            args = [str(binary), "-p", "--model", "haiku", "--output-format", "json",
                     "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                     "--tools", "", "--no-session-persistence"]
-            if len(subprocess.list2cmdline(args)) > _MAX_CMDLINE:
-                raise _Skip("command line exceeds the Windows limit (prompt too large)")
-            res = runner.run(args, cwd, timeout=_remaining(end))
+            env_ = {k: v for k, v in os.environ.items() if k.upper() not in _CLAUDE_ENV_DROP}
+            res = runner.run(args, cwd, env=env_, timeout=_remaining(end), input=msg)
             if res.code != 0:
                 raise _Skip(f"claude exited {res.code}: {res.err.strip()[:200]}")
             try:
@@ -366,12 +380,12 @@ def stage_history(env: Env, index: Index, name: str, deadline: float) -> Suggest
 
 
 def stage_keywords(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
-    """Stage 4: the bucket whose keywords the name mentions most (ties: table order). Bucket only."""
+    """Stage 4: the bucket whose keywords the name mentions most, as whole words (ties: table order). Bucket only."""
 
     def body(info: dict) -> Suggestion:
         lower = name.lower()
         ranked = sorted(((-len(hits), i, bucket, hits) for i, (bucket, words) in enumerate(KEYWORDS.items())
-                         if (hits := [w for w in words if w in lower])))
+                         if (hits := [w for w in words if re.search(rf"\b{re.escape(w)}\b", lower)])))
         for _n, _i, bucket, hits in ranked:
             s = validate(env, {"path": bucket, "confidence": "low", "reason": "name mentions " + ", ".join(hits)},
                          source="keywords")
@@ -431,14 +445,37 @@ def _offer(env: Env, name: str, pending: Pending, s: Suggestion | None,
         pending._settled.set()
 
 
-def _fan_out(env: Env, index: Index, name: str, stages: list[tuple[str, Stage, float]], pending: Pending,
-             on_update: Callable[[Suggestion], None]) -> None:
+class _Rows:
+    """A materialised `index.rows()` list, served to stages and the prompt builder (any thread)."""
+
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def rows(self, filter_text: str = "") -> list:
+        return self._rows
+
+
+def _fan_out(env: Env, rows: _Rows, name: str, http: Http, runner: Runner | None, claude_exe: Path | None,
+             pending: Pending, on_update: Callable[[Suggestion], None]) -> None:
+    """Background thread: build the prompt from the row snapshot, then run Qwen and Claude concurrently."""
+    def failed(stage: str, e: Exception) -> None:
+        _log(env, {"ts": env.now(), "stage": stage, "name": name, "latency_ms": 0, "ok": False,
+                   "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
+
+    try:
+        message = build_user_message(env, rows, name)
+    except Exception as e:  # noqa: BLE001
+        failed("prompt", e)
+        pending._settled.set()
+        return
+    stages = [("qwen", stage_qwen(http, message=message), QWEN_TOTAL_S),
+              ("claude", stage_claude(runner, exe=claude_exe, message=message), CLAUDE_TOTAL_S)]
+
     def work(stage: Stage, budget: float) -> None:
         try:
-            _offer(env, name, pending, stage(env, index, name, time.monotonic() + budget), on_update)
+            _offer(env, name, pending, stage(env, rows, name, time.monotonic() + budget), on_update)
         except Exception as e:  # noqa: BLE001 - stages already catch; this is a last guard
-            _log(env, {"ts": env.now(), "stage": "fan_out", "name": name, "latency_ms": 0, "ok": False,
-                       "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
+            failed("fan_out", e)
 
     threads = [threading.Thread(target=work, args=(stage, budget), name=f"suggest-{label}", daemon=True)
                for label, stage, budget in stages]
@@ -452,21 +489,15 @@ def _fan_out(env: Env, index: Index, name: str, stages: list[tuple[str, Stage, f
 def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, runner: Runner | None = None,
             on_update: Callable[[Suggestion], None], claude_exe: Path | None = None) -> Pending:
     """Return at once with the best local answer (history, then keywords, then root) and start one daemon thread
-    that runs Qwen and Claude concurrently; `on_update` gets the first valid model answer, once, from that thread.
-    The index is only read here, on the calling thread (its sqlite connection is single-threaded)."""
-    local = (stage_history(env, index, name, 0.0) or stage_keywords(env, index, name, 0.0)
-             or stage_root(env, index, name, 0.0))
+    that builds the prompt and runs Qwen and Claude concurrently; `on_update` gets the first valid model answer,
+    once, from that thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection
+    is single-threaded); everything else works from that list."""
+    rows = _Rows(index.rows())
+    local = (stage_history(env, rows, name, 0.0) or stage_keywords(env, rows, name, 0.0)
+             or stage_root(env, rows, name, 0.0))
     pending = Pending(local)
-    try:
-        message = build_user_message(env, index, name)
-    except Exception as e:  # noqa: BLE001
-        _log(env, {"ts": env.now(), "stage": "prompt", "name": name, "latency_ms": 0, "ok": False,
-                   "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
-        pending._settled.set()
-        return pending
-    stages = [("qwen", stage_qwen(http, message=message), QWEN_TOTAL_S),
-              ("claude", stage_claude(runner, exe=claude_exe, message=message), CLAUDE_TOTAL_S)]
-    pending._thread = threading.Thread(target=_fan_out, args=(env, index, name, stages, pending, on_update),
-                                       name="suggest", daemon=True)
+    pending._thread = threading.Thread(
+        target=_fan_out, args=(env, rows, name, http, runner, claude_exe, pending, on_update),
+        name="suggest", daemon=True)
     pending._thread.start()
     return pending

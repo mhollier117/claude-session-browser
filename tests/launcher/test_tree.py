@@ -1,6 +1,6 @@
-from launcher.index import Index
-from launcher.tree import children, level_kind, new_folder_kind_options, resolve_fragment, slug
-from launcher_helpers import write_claude_session
+from launcher.index import FolderStats, Index
+from launcher.tree import children, folder_stats_map, level_kind, new_folder_kind_options, resolve_fragment, slug
+from launcher_helpers import make_row, write_claude_session
 
 
 def _u(text, cwd, ts="2026-11-01T10:00:00Z"):
@@ -88,3 +88,18 @@ def test_children_stats_per_child_recursive(fake_env):
     assert by["clients"].last_activity == max(x.last_activity for x in idx.rows() if "bifrost" in x.display_name)
     for name, stats in by.items():  # same semantics as Index.folder_stats
         assert stats == idx.folder_stats(f"work/{name}")
+
+
+def test_folder_stats_map_one_pass(fake_env):
+    r = fake_env.root
+    rows = [make_row(r / "work" / "net", "net old", 10.0, "a"),
+            make_row(str(r) + r"\WORK\Net\sub", "net sub", 30.0, "b"),
+            make_row(r / "work" / "network", "network", 20.0, "c"),
+            make_row(r / "work" / "net", "net mid", 25.0, "d"),
+            make_row(r / "work" / "net", "net newest", 40.0, "e"),
+            make_row(None, "no cwd", 50.0, "f")]
+    m = folder_stats_map(rows)
+    key = tuple(p.lower() for p in (r / "work" / "net").parts)
+    assert m[key] == FolderStats(4, 40.0, ["net newest", "net sub", "net mid"])
+    assert m[tuple(p.lower() for p in (r / "work").parts)].sessions == 5
+    assert key + ("sub",) in m and tuple(p.lower() for p in (r / "work" / "halo").parts) not in m
