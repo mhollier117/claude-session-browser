@@ -33,6 +33,9 @@ _WORK_CONFIG = (
 )
 
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows only; 0 elsewhere
+
+
 @dataclass
 class Result:
     code: int
@@ -45,14 +48,17 @@ class Runner:
     """Runs a command without a shell or console input. `env`, when given, is the complete environment for this
     one call (default: the current environment); git is never allowed to prompt for credentials. `input`, when
     given, is written to the command's stdin as exact UTF-8 bytes (no newline translation); otherwise stdin is
-    empty. Output is decoded as UTF-8 with CRLF read as LF."""
+    empty. Output is decoded as UTF-8 with CRLF read as LF. On Windows the child gets no console window
+    (CREATE_NO_WINDOW), so a windowed caller such as the browser does not flash a terminal for every
+    `claude.exe`, `git` or `gh` call."""
 
     def run(self, args: list[str], cwd: Path, env: dict | None = None, timeout: float = 60,
             input: str | None = None) -> Result:
         full = {**(os.environ if env is None else env), "GIT_TERMINAL_PROMPT": "0"}
         stdin = {"input": input.encode("utf-8")} if input is not None else {"stdin": subprocess.DEVNULL}
         try:
-            p = subprocess.run(args, cwd=cwd, env=full, **stdin, capture_output=True, timeout=timeout)
+            p = subprocess.run(args, cwd=cwd, env=full, **stdin, capture_output=True, timeout=timeout,
+                               creationflags=NO_WINDOW)
         except FileNotFoundError as e:
             return Result(127, "", str(e))
         except subprocess.TimeoutExpired:
