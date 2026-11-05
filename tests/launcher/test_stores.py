@@ -1,0 +1,129 @@
+import json
+
+from launcher.stores import SessionFacts, clean_user_text, full_last_reply, is_top_level_claude, read_claude, read_qwen
+from launcher_helpers import write_claude_session, write_qwen_session
+
+
+def _u(text):
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _a(text):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def test_claude_first_and_last_ask_skip_tool_results(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "work" / "net", "s1", [
+        {"type": "user", "cwd": str(fake_env.root / "work" / "net"), "timestamp": "2026-11-01T10:00:00Z",
+         "message": {"role": "user", "content": "set up PXE <system-reminder>x</system-reminder>"}},
+        _a("Reply one."),
+        _u("why no DHCP offer?"),
+        _a("Add the VLAN."),
+        {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+    ])
+    f = read_claude(p)
+    assert isinstance(f, SessionFacts) and f.store == "claude" and f.sid == "s1" and f.path == p
+    assert (f.first_ask, f.last_ask, f.last_reply) == ("set up PXE", "why no DHCP offer?", "Add the VLAN.")
+    assert f.cwd == str(fake_env.root / "work" / "net") and f.user_msgs == 2 and f.assistant_msgs == 2
+    assert f.size == p.stat().st_size and f.mtime == p.stat().st_mtime and f.name is None
+
+
+def test_claude_user_text_blocks_are_joined(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "cc", "s2", [
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "look at"}, {"type": "image", "source": {}}, {"type": "text", "text": "this"}]}},
+    ])
+    assert read_claude(p).first_ask == "look at this"
+
+
+def test_claude_name_custom_title_beats_ai_title(fake_env):
+    cwd = fake_env.root / "cc"
+    p = write_claude_session(fake_env, cwd, "s3", [
+        _u("hi"), {"type": "ai-title", "aiTitle": "AI one"}, {"type": "custom-title", "customTitle": "Mine"},
+        _a("yo"), {"type": "ai-title", "aiTitle": "AI later"},
+    ])
+    assert read_claude(p).name == "Mine"
+    p2 = write_claude_session(fake_env, cwd, "s4", [_u("hi"), {"type": "ai-title", "aiTitle": "A1"},
+                                                    {"type": "ai-title", "aiTitle": "A2"}])
+    assert read_claude(p2).name == "A2"
+
+
+def test_head_read_grows_when_first_ask_is_large(fake_env):
+    big = "x" * 200_000
+    p = write_claude_session(fake_env, fake_env.root / "cc", "s5", [_u(big), _a("done")])
+    f = read_claude(p)
+    assert f.first_ask == big and f.last_reply == "done"
+
+
+def test_tail_read_grows_when_last_reply_is_large(fake_env):
+    big = "y" * 600_000
+    p = write_claude_session(fake_env, fake_env.root / "cc", "s6", [_u("q1"), _a("early"), _u("q2"), _a(big)])
+    f = read_claude(p, tail_bytes=4096)
+    assert f.last_reply == big and f.last_ask == "q2"
+    assert full_last_reply(p, "claude") == big
+
+
+def test_tail_skips_partial_first_line(fake_env):
+    recs = [_u("q1"), _a("r1")] + [_u(f"filler {i}" * 50) for i in range(40)] + [_u("final q"), _a("final r")]
+    p = write_claude_session(fake_env, fake_env.root / "cc", "s7", recs)
+    f = read_claude(p, tail_bytes=300)
+    assert (f.first_ask, f.last_ask, f.last_reply) == ("q1", "final q", "final r")
+
+
+def test_empty_and_malformed_lines_tolerated(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "cc", "s8", [_u("only")])
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write("not json\n\n")
+    f = read_claude(p)
+    assert (f.first_ask, f.last_ask, f.last_reply, f.assistant_msgs) == ("only", "only", "", 0)
+
+
+def test_is_top_level_claude_filters_agent_and_subagent_files(fake_env):
+    d = fake_env.claude_home / "projects" / "p"
+    assert is_top_level_claude(d / "abc.jsonl")
+    assert not is_top_level_claude(d / "agent-1234.jsonl")
+    assert not is_top_level_claude(d / "abc" / "subagents" / "x.jsonl")
+    assert not is_top_level_claude(d / "abc.jsonl.bak")
+    assert not is_top_level_claude(d / "abc.companion.json")
+    assert not is_top_level_claude(d / "abc.jsonl.bak-20261101")
+
+
+def _q_user(text, cwd, provenance="real_user"):
+    return {"type": "user", "provenance": provenance, "cwd": cwd, "message": {"role": "user", "parts": [{"text": text}]}}
+
+
+def _q_asst(*parts):
+    return {"type": "assistant", "provenance": "assistant_output", "message": {"role": "model", "parts": list(parts)}}
+
+
+def test_read_qwen_uses_runtime_work_dir(fake_env):
+    wd = fake_env.root / "home" / "ai"
+    p = write_qwen_session(fake_env, wd, "q1", [
+        {"type": "system", "subtype": "attribution_snapshot"},
+        _q_user("first <system-reminder>z</system-reminder> q", "C:\stale"),
+        _q_asst({"text": "thinking...", "thought": True}, {"text": "Answer one."}),
+        {"type": "tool_result", "message": {"role": "user", "parts": [{"functionResponse": {"name": "x"}}]}},
+        _q_user("injected", "C:\stale", provenance="system"),
+        _q_user("second q", "C:\stale"),
+        _q_asst({"functionCall": {"name": "x"}}),
+        _q_asst({"text": "Answer two."}),
+    ])
+    f = read_qwen(p)
+    assert f.store == "qwen" and f.sid == "q1" and f.cwd == str(wd) and f.name is None
+    assert (f.first_ask, f.last_ask, f.last_reply) == ("first q", "second q", "Answer two.")
+    assert (f.user_msgs, f.assistant_msgs) == (2, 2)
+    assert full_last_reply(p, "qwen") == "Answer two."
+
+
+def test_read_qwen_falls_back_to_record_cwd(fake_env):
+    wd = fake_env.root / "home" / "ai"
+    p = write_qwen_session(fake_env, wd, "q2", [_q_user("hi", "C:\from\record")])
+    p.with_name("q2.runtime.json").unlink()
+    assert read_qwen(p).cwd == "C:\from\record"
+
+
+def test_clean_user_text():
+    s = "<local-command-caveat>c</local-command-caveat><command-name>/x</command-name>\n real  <b>ask</b>\n<system-reminder>\nz\n</system-reminder>"
+    assert clean_user_text(s) == "real ask"
+    assert clean_user_text("<local-command-stdout>out</local-command-stdout>") == ""
+    assert clean_user_text("") == ""
