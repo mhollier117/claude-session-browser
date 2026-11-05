@@ -97,14 +97,15 @@ def _q_asst(*parts):
 
 
 def test_read_qwen_uses_runtime_work_dir(fake_env):
+    STALE = str(fake_env.root / "stale")
     wd = fake_env.root / "home" / "ai"
     p = write_qwen_session(fake_env, wd, "q1", [
         {"type": "system", "subtype": "attribution_snapshot"},
-        _q_user("first <system-reminder>z</system-reminder> q", "C:\stale"),
+        _q_user("first <system-reminder>z</system-reminder> q", STALE),
         _q_asst({"text": "thinking...", "thought": True}, {"text": "Answer one."}),
         {"type": "tool_result", "message": {"role": "user", "parts": [{"functionResponse": {"name": "x"}}]}},
-        _q_user("injected", "C:\stale", provenance="system"),
-        _q_user("second q", "C:\stale"),
+        _q_user("injected", STALE, provenance="system"),
+        _q_user("second q", STALE),
         _q_asst({"functionCall": {"name": "x"}}),
         _q_asst({"text": "Answer two."}),
     ])
@@ -117,9 +118,32 @@ def test_read_qwen_uses_runtime_work_dir(fake_env):
 
 def test_read_qwen_falls_back_to_record_cwd(fake_env):
     wd = fake_env.root / "home" / "ai"
-    p = write_qwen_session(fake_env, wd, "q2", [_q_user("hi", "C:\from\record")])
+    from_record = str(fake_env.root / "elsewhere" / "record")
+    p = write_qwen_session(fake_env, wd, "q2", [_q_user("hi", from_record)])
     p.with_name("q2.runtime.json").unlink()
-    assert read_qwen(p).cwd == "C:\from\record"
+    assert read_qwen(p).cwd == from_record
+
+
+def test_empty_transcript_gives_empty_facts(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "cc", "e1", [])
+    assert p.stat().st_size == 0
+    f = read_claude(p)
+    assert (f.cwd, f.name, f.first_ask, f.last_ask, f.last_reply) == (None, None, "", "", "")
+    assert (f.user_msgs, f.assistant_msgs, f.size) == (0, 0, 0)
+
+
+def test_tail_window_inside_multibyte_character(fake_env):
+    reply = "é…" * 3000  # 5 bytes per pair in UTF-8
+    path = fake_env.claude_home / "projects" / "mb" / "m1.jsonl"
+    path.parent.mkdir(parents=True)
+    records = [_u("q1"), _a("r1"), _u("qé…"), _a(reply)]
+    lines = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)  # raw UTF-8, not \u escapes
+    path.write_bytes(lines.encode("utf-8"))
+    assert len(reply.encode("utf-8")) > 4096 * 3
+    # windows of 4096..4101 bytes start at every offset of the 5-byte period inside the last record
+    for tail_bytes in range(4096, 4102):
+        f = read_claude(path, tail_bytes=tail_bytes)
+        assert (f.last_ask, f.last_reply) == ("qé…", reply)
 
 
 def test_clean_user_text():
