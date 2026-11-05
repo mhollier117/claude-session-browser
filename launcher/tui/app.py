@@ -252,7 +252,8 @@ POLL_S = 0.25  # how often the picker looks for the model's suggestion
 
 def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Application:
     """Draw `render_new(flow)` and route keys to it; a 250 ms timer applies the model's suggestion via `flow.poll`
-    (it never blocks: `Pending.wait(0)`). Exits with the flow's `Launch`, or None on q / ctrl-c."""
+    (it never blocks: `Pending.wait(0)`). Exits with the flow's `Launch`, or None on ctrl-c (or q on a choice
+    step; in the picker q is a filter character)."""
     from .new import render_new
     kb = KeyBindings()
     texty = Condition(lambda: flow.step in ("name", "folder_name"))
@@ -324,10 +325,10 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
         if flow.step in ("name", "folder_name"):
             flow.text += ch
             flow.error = ""
-        elif ch == "q" and not (flow.step == "picker" and flow.filter):
-            event.app.exit(result=None)
-        elif flow.step == "picker":
+        elif flow.step == "picker":  # every printable key filters, q included (folder names start with q too)
             flow.type_filter(flow.filter + ch)
+        elif ch == "q":  # the kind, wrapper and GitHub choices have no text to type
+            event.app.exit(result=None)
 
     window = Window(FormattedTextControl(fragments, focusable=True, show_cursor=False), wrap_lines=False)
     app = Application(layout=Layout(window), key_bindings=kb, style=STYLE, full_screen=True, mouse_support=False,
