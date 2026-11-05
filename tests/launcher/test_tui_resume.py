@@ -286,3 +286,61 @@ def test_cli_index_reports_to_stderr(fake_env, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "1 session" in captured.err
+
+
+# ---- fix round 1 ---------------------------------------------------------------------------------------------
+
+def test_render_preview_wraps_wide_text_by_cells(fake_env):
+    from prompt_toolkit.utils import get_cwidth
+    row = make_row(cwd=r"C:\x", display_name="漢字の名前" * 6, first_ask="日本語のテキスト " * 30,
+                   last_ask="😀" * 80)
+    text = render_preview(row, "長い" * 100, 40)
+    lines = text.split("\n")
+    body = lines[:-1]  # the fixed footer text is the one line allowed to be cut by a very narrow window
+    assert all(get_cwidth(line) <= 38 for line in body), [l for l in body if get_cwidth(l) > 38]
+    joined = "".join(l.strip() for l in lines)
+    assert joined.count("😀") == 80 and joined.count("長い") == 100  # nothing lost at the line ends
+
+
+def test_cli_does_not_record_launch_for_missing_folder(fake_env, capsys):
+    idx = _two_sessions(fake_env)
+
+    def app(env, index):
+        st = ResumeState(env, index)
+        st.rows[0].cwd_exists = False
+        return st.enter()
+
+    assert cli.main([], env=fake_env, index=idx, app=app) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["warnings"] and "no longer exists" in out["warnings"][0]
+    assert idx.row("claude", "aaa").wrapper is None
+
+
+@pytest.mark.parametrize("where", ["refresh", "app"])
+def test_cli_ctrl_c_exits_130_quietly(fake_env, capsys, monkeypatch, where):
+    idx = _two_sessions(fake_env)
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    if where == "refresh":
+        monkeypatch.setattr(idx, "refresh", boom)
+    assert cli.main([], env=fake_env, index=idx, app=boom) == 130
+    assert capsys.readouterr().out == ""
+
+
+def test_spawn_detached_leaves_no_resource_warning():
+    import gc
+    import sys
+    import time
+    import warnings
+    from launcher.tui.resume import spawn_detached
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        proc = spawn_detached([sys.executable, "-c", "pass"])
+        deadline = time.time() + 10
+        while proc.returncode is None and time.time() < deadline:
+            time.sleep(0.05)  # the reaper thread sets returncode
+        del proc
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, ResourceWarning)]

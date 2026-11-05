@@ -6,6 +6,8 @@ Nothing here touches the terminal, so both are tested directly. Columns follow t
 from __future__ import annotations
 
 import subprocess
+import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +45,16 @@ class _Signal:
 
     def __repr__(self) -> str:
         return self.name
+
+
+def spawn_detached(argv: list[str]) -> subprocess.Popen:
+    """Start `argv` on its own (no console, no inherited handles) and reap it from a daemon thread, so the
+    Popen is never dropped while the child runs (no ResourceWarning) and the UI never waits on it."""
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if sys.platform == "win32" else 0
+    proc = subprocess.Popen(argv, close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, creationflags=flags)
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return proc
 
 
 NEW = _Signal("NEW")  # `n`: start a new session (the cli hands over to the new-session flow)
@@ -130,7 +142,7 @@ class ResumeState:
     """What the list shows and what each key does, without a terminal. All Index use stays on this (main) thread."""
 
     def __init__(self, env: Env, index: Index, *, focus: Callable[[Row], dict] = focus_live,
-                 popen: Callable[[list[str]], object] = subprocess.Popen):
+                 popen: Callable[[list[str]], object] = spawn_detached):
         self.env = env
         self.index = index
         self._focus = focus
@@ -181,7 +193,7 @@ class ResumeState:
             self.typing = False
 
     def escape(self) -> bool:
-        """Clear the filter; False when there was none (the app then quits)."""
+        """Clear the filter; False when there was none (esc then does nothing: only q and ctrl-c quit)."""
         if not (self.typing or self.filter):
             return False
         self.typing = False

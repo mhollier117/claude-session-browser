@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from sessions_live import LiveSessions
+from sessions_live import proc_start_filetime
 
 from . import stores
 from .paths import Env
@@ -91,6 +91,35 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def claude_registry_live(claude_home: Path) -> list[dict] | None:
+    """Live interactive Claude sessions from `<claude_home>/sessions/<pid>.json`, as `LiveSessions.snapshot`
+    would list them (same liveness rule: the pid is running and its creation time matches the record's
+    `procStart`, so a reused pid does not count), but without opening any transcript: the index needs only
+    session_id, pid and whether the user named it. None when this Claude Code keeps no registry."""
+    registry = Path(claude_home) / "sessions"
+    if not registry.is_dir():
+        return None
+    out: list[dict] = []
+    seen: set[str] = set()
+    for entry in sorted(registry.glob("*.json")):
+        if not entry.stem.isdigit():
+            continue
+        rec = _read_json(entry)
+        if rec.get("kind", "interactive") != "interactive":
+            continue
+        pid, sid = rec.get("pid"), str(rec.get("sessionId") or "")
+        if not isinstance(pid, int) or isinstance(pid, bool) or not sid or sid in seen:
+            continue
+        started = proc_start_filetime(pid)
+        want = rec.get("procStart")
+        if started is None or (want is not None and str(want) != str(started)):
+            continue
+        seen.add(sid)
+        out.append({"session_id": sid, "pid": pid, "cwd": _str(rec.get("cwd")),
+                    "named": rec.get("nameSource") == "user"})
+    return out
+
+
 def _str(value) -> str:
     return value if isinstance(value, str) else ""
 
@@ -103,13 +132,13 @@ class Index:
     def __init__(self, env: Env, db_path: Path | None = None,
                  claude_live: Callable[[], list[dict] | None] | None = None,
                  pid_exists: Callable[[int], bool] | None = None):
-        """`claude_live` (a `LiveSessions.snapshot`-shaped callable) and `pid_exists` (Qwen registry check) are
-        injectable for tests; by default the real Claude registry and `psutil.pid_exists` are used."""
+        """`claude_live` (a `LiveSessions.snapshot`-shaped callable: dicts with session_id, pid, named) and
+        `pid_exists` (Qwen registry check) are injectable for tests; by default the Claude registry is read
+        directly (`claude_registry_live`) and Qwen pids are checked with `psutil.pid_exists`."""
         self.env = env
         self.db_path = Path(db_path) if db_path else env.data_dir / "index.sqlite"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # one LiveSessions for the Index's lifetime: it reads each live transcript incrementally after the first pass
-        self._claude_live = claude_live or LiveSessions(claude_home=str(env.claude_home)).snapshot
+        self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
         self._pid_exists = pid_exists or _default_pid_exists
         self._db = sqlite3.connect(self.db_path)
         self._db.row_factory = sqlite3.Row

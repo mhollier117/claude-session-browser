@@ -1,13 +1,12 @@
-import functools
 import json
 import os
+import pathlib
 import re
 
 import pytest
 
 import launcher.index as index_mod
 import launcher.stores as stores
-import sessions_live
 from launcher.index import FolderStats, Index, Row
 from launcher_helpers import write_claude_session, write_qwen_session
 
@@ -254,8 +253,7 @@ def test_live_pid_from_registry(fake_env, monkeypatch):
         "name": "Live one", "nameSource": "user", "status": "idle"}), encoding="utf-8")
     (fake_env.claude_home / "sessions" / "5555.json").write_text(json.dumps({
         "pid": 5555, "sessionId": "l2", "cwd": str(cwd), "kind": "interactive", "procStart": "1"}), encoding="utf-8")
-    monkeypatch.setattr(index_mod, "LiveSessions", functools.partial(
-        sessions_live.LiveSessions, proc_start={4242: 77, 6666: 88}.get))
+    monkeypatch.setattr(index_mod, "proc_start_filetime", {4242: 77, 6666: 88}.get)
     idx = Index(fake_env, pid_exists=lambda pid: False)
     idx.refresh()
     assert idx.row("claude", "l1").live_pid == 4242 and idx.row("claude", "l1").display_name == "Live one"
@@ -263,6 +261,36 @@ def test_live_pid_from_registry(fake_env, monkeypatch):
     # live without any name: the first ask, not the folder name the snapshot falls back to
     l3 = idx.row("claude", "l3")
     assert l3.live_pid == 6666 and l3.display_name == "untitled live ask"
+
+
+def test_claude_registry_live_matches_proc_start_and_reads_no_transcript(fake_env, monkeypatch):
+    reg = fake_env.claude_home / "sessions"
+    rec = {"pid": 4242, "sessionId": "live", "cwd": r"C:\x", "kind": "interactive", "procStart": "77",
+           "name": "Named", "nameSource": "user"}
+    (reg / "4242.json").write_text(json.dumps(rec), encoding="utf-8")
+    reused = dict(rec, pid=5555, sessionId="reused", procStart="1")  # pid running, but a different process
+    (reg / "5555.json").write_text(json.dumps(reused), encoding="utf-8")
+    (reg / "6666.json").write_text(json.dumps(dict(rec, pid=6666, sessionId="bg", kind="background")),
+                                   encoding="utf-8")
+    (reg / "4242.key").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(index_mod, "proc_start_filetime", {4242: 77, 5555: 99, 6666: 77}.get)
+    opened = []
+    real_open = pathlib.Path.open
+    monkeypatch.setattr(pathlib.Path, "open", lambda self, *a, **k: opened.append(self.name) or real_open(self, *a, **k))
+    live = index_mod.claude_registry_live(fake_env.claude_home)
+    assert live == [{"session_id": "live", "pid": 4242, "cwd": r"C:\x", "named": True}]
+    assert sorted(opened) == ["4242.json", "5555.json", "6666.json"]  # registry records only, no transcript
+    assert index_mod.claude_registry_live(fake_env.root / "nowhere") is None
+
+
+def test_index_default_live_source_is_the_registry(fake_env, monkeypatch):
+    cwd = fake_env.root / "cc"
+    write_claude_session(fake_env, cwd, "l1", [_u("ask", cwd)])
+    _register(fake_env, 4242, "l1", cwd)
+    monkeypatch.setattr(index_mod, "proc_start_filetime", lambda pid: 1)
+    idx = Index(fake_env, pid_exists=lambda pid: False)
+    idx.refresh()
+    assert idx.row("claude", "l1").live_pid == 4242
 
 
 def test_qwen_live_pid_from_registry(fake_env):

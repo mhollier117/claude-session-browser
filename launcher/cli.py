@@ -65,7 +65,8 @@ def _run_new(env: Env, index: Index, name: str | None) -> int:
 
 def _finish(result: object, env: Env, index: Index) -> int:
     if isinstance(result, Resume):
-        index.record_launch(result.row.store, result.row.sid, result.wrapper)
+        if result.row.cwd_exists:  # a missing folder: cc.ps1 shows the warning and refuses, so nothing ran
+            index.record_launch(result.row.store, result.row.sid, result.wrapper)
         _emit(to_shell_result(result.launch))
     elif isinstance(result, Launch):
         _emit(to_shell_result(result))
@@ -95,27 +96,33 @@ def main(argv: list[str] | None = None, *, env: Env | None = None, index: Index 
     try:
         if args.command == "new":
             return _run_new(env, index, args.name)
-        touched = index.refresh(progress=_progress())
-        if args.command == "index":
-            sys.stderr.write(f"{_plural(len(index.rows()), 'session')} indexed, {touched} changed\n")
-            return 0
-        if args.json:
-            _emit(json.dumps([asdict(r) for r in index.rows()], ensure_ascii=False))
-            return 0
-        if app is None:
-            from .tui.app import NoTerminal, run_resume
-            try:
-                result = run_resume(env, index)
-            except NoTerminal as exc:
-                sys.stderr.write(f"cc: {exc}\n")
-                return 1
-        else:
-            result = app(env, index)
-        return _finish(result, env, index)
+        return _main(args, env, index, app)
+    except KeyboardInterrupt:  # ctrl-c during the refresh (the app itself maps ctrl-c to a quiet quit)
+        sys.stderr.write("\n")
+        return 130
     finally:
         if own_index:
             index.close()
 
+
+def _main(args: argparse.Namespace, env: Env, index: Index, app: AppFn | None) -> int:
+    touched = index.refresh(progress=_progress())
+    if args.command == "index":
+        sys.stderr.write(f"{_plural(len(index.rows()), 'session')} indexed, {touched} changed\n")
+        return 0
+    if args.json:
+        _emit(json.dumps([asdict(r) for r in index.rows()], ensure_ascii=False))
+        return 0
+    if app is None:
+        from .tui.app import NoTerminal, run_resume
+        try:
+            result = run_resume(env, index)
+        except NoTerminal as exc:
+            sys.stderr.write(f"cc: {exc}\n")
+            return 1
+    else:
+        result = app(env, index)
+    return _finish(result, env, index)
 
 if __name__ == "__main__":
     sys.exit(main())
