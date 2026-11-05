@@ -88,6 +88,10 @@ Source: "dist\ClaudeSessionBrowser\_internal\*"; DestDir: "{app}\_internal"; Fla
 ; alte Updater-Version aus diesem Ordner, ist die Datei gesperrt - dann wird
 ; sie beim naechsten Neustart ersetzt statt den Install scheitern zu lassen.
 Source: "dist\csb_updater.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+; cc launcher: the console exe and the PowerShell function that wraps it. cc.ps1 prefers a cc.exe in its own
+; folder, so both live side by side in {app}. A terminal may have cc.exe running: restartreplace, as above.
+Source: "dist\cc.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+Source: "tools\cc.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

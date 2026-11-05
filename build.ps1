@@ -42,39 +42,52 @@ if (-not $iscc) {
 $version = (Select-String -Path claude_sessions.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
 Write-Host "Claude Session Browser $version"
 
-Step "1/5 Translations"
+Step "1/6 Translations"
 & $py tools\check_i18n.py | Select-Object -Last 1
 Check "Translation check"
 
 if (-not $SkipTests) {
-    Step "2/5 Tests"
+    Step "2/6 Tests"
     & $py -m pytest -q tests
     Check "Tests"
 } else {
-    Step "2/5 Tests skipped"
+    Step "2/6 Tests skipped"
 }
 
 Remove-Item build, dist -Recurse -Force -ErrorAction SilentlyContinue
 
-Step "3/5 App (PyInstaller, onedir)"
+Step "3/6 App (PyInstaller, onedir)"
 & $py -m PyInstaller --noconfirm --clean --log-level WARN `
     --onedir --noconsole `
     --name ClaudeSessionBrowser `
     --icon claude_sessions.ico `
     --add-data "claude_sessions.ico;." `
     --add-data "hooks\csb-name-gate.ps1;hooks" `
+    --add-data "launcher\templates\plan.md;launcher\templates" `
+    --add-data "launcher\templates\CLAUDE.client.md;launcher\templates" `
     --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live --hidden-import sysstats --hidden-import termfocus `
     --hidden-import psutil --hidden-import pynvml --hidden-import clr `
     claude_sessions.py
 Check "PyInstaller (app)"
 
-Step "4/5 Updater (csb_updater.exe)"
+Step "4/6 cc launcher (cc.exe, PyInstaller onefile console)"
+# Entry is cc_main.py: launcher\cli.py uses relative imports and cannot be the top-level script.
+& $py -m PyInstaller --noconfirm --clean --log-level WARN `
+    --onefile --console --name cc --icon claude_sessions.ico `
+    --add-data "launcher\templates\plan.md;launcher\templates" `
+    --add-data "launcher\templates\CLAUDE.client.md;launcher\templates" `
+    --hidden-import sessions_live --hidden-import termfocus --hidden-import psutil `
+    --hidden-import launcher --collect-submodules prompt_toolkit `
+    cc_main.py
+Check "PyInstaller (cc)"
+
+Step "5/6 Updater (csb_updater.exe)"
 & $py -m PyInstaller --noconfirm --clean --log-level WARN `
     --onefile --noconsole --name csb_updater --icon claude_sessions.ico `
     csb_updater.py
 Check "PyInstaller (updater)"
 
-Step "5/5 Installer (Inno Setup)"
+Step "6/6 Installer (Inno Setup)"
 & $iscc /Q "/DMyAppVersion=$version" setup.iss
 Check "Inno Setup"
 
