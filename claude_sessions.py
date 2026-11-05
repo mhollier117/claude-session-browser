@@ -6023,10 +6023,22 @@ def logo_data_uri():
         return ""
 
 
+def _launcher_wrappers_json():
+    """The launcher's wrapper names (launcher.launch.WRAPPERS) for the New session dialog; [] when the launcher
+    package cannot be imported."""
+    try:
+        from launcher.launch import WRAPPERS
+        return json.dumps(list(WRAPPERS))
+    except Exception as e:
+        _launcher_log(f"no wrapper list for the dialog: {type(e).__name__}: {e}")
+        return "[]"
+
+
 def build_html():
     return (HTML_TEMPLATE
             .replace("__LOGO__", logo_data_uri())
-            .replace("__I18N__", i18n.js_payload()))
+            .replace("__I18N__", i18n.js_payload())
+            .replace("__LAUNCHER_WRAPPERS__", _launcher_wrappers_json()))
 
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -6677,6 +6689,64 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     border-radius:8px; padding:6px 10px; font-family:Consolas,monospace; font-size:13px;
     letter-spacing:.05em; outline:none; width:160px; text-transform:uppercase}
   .ba-frame-label input:focus{border-color:var(--accent)}
+
+  /* launcher ---------------------------------------------------------------
+     Tool badge and tool filter in the session list, New session dialog. */
+  .tool-badge{display:inline-block; font-size:10.5px; font-weight:600; line-height:16px; padding:0 6px;
+    margin-right:8px; border-radius:6px; vertical-align:1px; letter-spacing:.2px;
+    background:rgba(255,255,255,.06); color:var(--muted); border:1px solid var(--border)}
+  .tool-badge.qwen{background:rgba(124,140,255,.16); color:#b3bcff; border-color:rgba(124,140,255,.38)}
+  .row.colored .tool-badge{background:transparent; color:inherit; border-color:currentColor; opacity:.8}
+  .toolfilter{display:flex; align-items:center; gap:3px; background:var(--surface);
+    border:1px solid var(--border); border-radius:12px; padding:0 5px; height:42px; flex:none}
+  .toolfilter button{height:30px; padding:0 11px; border:none; border-radius:8px; background:transparent;
+    color:var(--muted); font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer}
+  .toolfilter button:hover{color:var(--fg)}
+  .toolfilter button.on{background:var(--surface2); color:var(--fg)}
+  .ln-pop{width:min(1000px,94vw); max-height:92vh; display:flex; flex-direction:column}
+  .ln-pop [hidden]{display:none !important}
+  .ln-body{overflow-y:auto; min-height:0; padding-right:2px}
+  .ln-field{margin:10px 0}
+  .ln-field>label,.ln-lbl{display:block; font-size:12px; color:var(--muted); margin-bottom:5px}
+  .ln-pop .modal-input{margin-bottom:0; user-select:text}
+  .ln-sugg{display:inline-block; max-width:100%; padding:7px 12px; margin:2px 0 10px; border-radius:8px;
+    font-family:inherit; font-size:12.5px; text-align:left; cursor:pointer; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; background:rgba(62,207,142,.12); color:#86e3b6; border:1px solid rgba(62,207,142,.32)}
+  .ln-sugg:hover{background:rgba(62,207,142,.2)}
+  .ln-sugg.none{background:transparent; color:var(--muted); border-color:var(--border); cursor:default}
+  .ln-sugg .wait{opacity:.7}
+  .ln-cols{display:flex; height:260px; overflow-x:auto; background:var(--bg);
+    border:1px solid var(--border); border-radius:10px}
+  .ln-col{flex:0 0 210px; overflow-y:auto; padding:6px 0; border-right:1px solid var(--border)}
+  .ln-col:last-child{border-right:0}
+  .ln-col .t{font-size:11px; color:var(--muted); padding:6px 12px 8px; text-transform:uppercase;
+    letter-spacing:.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .ln-col .i{padding:7px 12px; font-size:13px; cursor:pointer; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis}
+  .ln-col .i:hover{background:var(--surface)}
+  .ln-col .i.on{background:var(--select)}
+  .ln-col .i .m{color:var(--muted); font-size:11.5px}
+  .ln-col .i.new{color:var(--accent)}
+  .ln-col .i.wait{color:var(--muted); cursor:default; font-style:italic}
+  .ln-crumb{font-size:13px; color:var(--muted); padding:8px 12px; background:var(--bg);
+    border:1px solid var(--border); border-radius:8px; min-height:36px}
+  .ln-crumb b{color:var(--fg)}
+  .ln-chips{display:flex; flex-wrap:wrap; gap:6px}
+  .ln-chip{height:30px; padding:0 13px; border:1px solid var(--border); border-radius:15px; background:var(--bg);
+    color:var(--fg); font-family:inherit; font-size:12.5px; cursor:pointer}
+  .ln-chip:hover{border-color:var(--accent)}
+  .ln-chip.on{background:var(--accent); border-color:transparent; color:#fff}
+  .ln-nf{margin-top:12px; padding:12px 14px; border:1px solid var(--border); border-radius:10px;
+    background:var(--surface2)}
+  .ln-nf h4{font-size:13.5px}
+  .ln-pop label.ln-kind{display:flex; gap:9px; align-items:baseline; padding:4px 0; font-size:13px; cursor:pointer}
+  .ln-kind input{accent-color:var(--accent)}
+  .ln-kind .h,.ln-note{color:var(--muted); font-size:12px}
+  .ln-msg{margin-top:10px; font-size:12.5px; white-space:pre-wrap; user-select:text}
+  .ln-msg.err{color:#ff9a9a}
+  .ln-msg.ok{color:#86e3b6}
+  .ln-msg.info{color:var(--muted)}
+  .ln-actions{display:flex; flex-wrap:wrap; gap:9px; justify-content:flex-end; margin-top:14px}
 </style>
 </head>
 <body>
@@ -6730,6 +6800,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         <input id="search" placeholder="Suche nach Titel, Ordner, Inhalt …" autocomplete="off">
       </label>
+      <!-- launcher: tool filter (filled by renderToolFilter) and New session -->
+      <div class="toolfilter" id="toolfilter" title="Nach Werkzeug filtern"></div>
+      <button class="btn accent" onclick="lnOpen()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
+        Neue Session
+      </button>
       <button class="btn" onclick="doRefresh(this)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
         Aktualisieren
@@ -6939,6 +7015,29 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <button class="btn" onclick="closeOverlay('overlay-rename')">Abbrechen</button>
       <button class="btn accent" onclick="saveRename()">Speichern</button>
     </div>
+  </div>
+</div>
+
+<!-- launcher: New session dialog (columns, chips and buttons are drawn by lnRender) -->
+<div class="overlay" id="overlay-launcher">
+  <div class="pop ln-pop">
+    <h3>Neue Session</h3>
+    <div class="ln-body">
+      <div class="ln-field">
+        <label for="ln-name">Session-Name</label>
+        <input class="modal-input" id="ln-name" placeholder="Worum geht es in der Session?" autocomplete="off" spellcheck="false">
+      </div>
+      <div id="ln-sugg"></div>
+      <div class="ln-cols" id="ln-cols"></div>
+      <div class="ln-field" id="ln-crumb-field"><div class="ln-crumb" id="ln-crumb"></div></div>
+      <div class="ln-nf" id="ln-nf" hidden></div>
+      <div class="ln-field" id="ln-wrap-field">
+        <div class="ln-lbl">Starten mit</div>
+        <div class="ln-chips" id="ln-wrappers"></div>
+      </div>
+      <div class="ln-msg" id="ln-msg" hidden></div>
+    </div>
+    <div class="ln-actions" id="ln-actions"></div>
   </div>
 </div>
 
@@ -7237,7 +7336,7 @@ async function saveColWidth(key, w){
 }
 function cellHtml(s,key){
   switch(key){
-    case 'title':   return `<div class="cell title">${esc(s.display_title)}</div>`;
+    case 'title':   return `<div class="cell title"><span class="tool-badge ${toolOf(s)}">${toolOf(s)}</span>${esc(s.display_title)}</div>`;
     case 'project': return `<div class="cell dim">${esc(s.cwd||s.project)}</div>`;
     case 'msgs':    return `<div class="cell"><span class="ic">${SVG_MSG}${s.total_msgs} <span class="dim">(${s.user_msgs}/${s.assistant_msgs})</span></span></div>`;
     case 'when':    return `<div class="cell"><span class="ic">${SVG_CAL}${esc(s.when)}</span></div>`;
@@ -7376,6 +7475,7 @@ async function boot(){
     buildSwatches();
     renderHead();
     render();
+    repollQwen();
     watchTableWidth();
     renderSettings();
     kopfSymbole();
@@ -7416,10 +7516,10 @@ window.addEventListener('focus', async ()=>{
 function ingest(st){STATE=st; sessions=st.sessions||[];}
 
 let _toastT=null;
-function toast(msg){
+function toast(msg, ms){
   const el=document.getElementById('toast');
   el.textContent=msg; el.classList.add('show');
-  clearTimeout(_toastT); _toastT=setTimeout(()=>el.classList.remove('show'), 2600);
+  clearTimeout(_toastT); _toastT=setTimeout(()=>el.classList.remove('show'), ms || 2600);
 }
 
 function visible(){
@@ -7430,6 +7530,7 @@ function visible(){
     const cwd=(s.cwd||'').toLowerCase();
     if(hideHome && cwd===home) return false;
     if(hidden.some(h=>cwd===h)) return false;
+    if(TOOL_FILTER!=='all' && toolOf(s)!==TOOL_FILTER) return false;
     if(q){const hay=((s.display_title||'')+' '+(s.project||'')+' '+(s.cwd||'')+' '+(s.first_user||'')+' '+(s.id||'')).toLowerCase();
       if(!hay.includes(q)) return false;}
     return true;
@@ -7456,6 +7557,7 @@ function renderHead(){
 }
 
 function render(){
+  renderToolFilter();
   const rows=visible();
   const tb=document.getElementById('tbody');
   if(!STATE.found){
@@ -7508,7 +7610,10 @@ function updateDetail(){
   const en=!!s;
   // rechtes Panel nur zeigen, wenn etwas ausgewaehlt ist
   document.querySelector('.main').classList.toggle('show-side', en);
-  ['btn-resume','btn-rename','btn-color','btn-copy'].forEach(b=>document.getElementById(b).disabled=!en);
+  ['btn-resume','btn-copy'].forEach(b=>document.getElementById(b).disabled=!en);
+  // Qwen sessions have no title override or colour (the backend ignores both)
+  const qwen = en && toolOf(s)==='qwen';
+  ['btn-rename','btn-color'].forEach(b=>document.getElementById(b).disabled=!en || qwen);
   const d=document.getElementById('detail');
   if(!s){
     d.innerHTML=`<div class="dt-empty">${t('Wähle eine Session aus, um Details zu sehen.')}</div>`;
@@ -7840,8 +7945,8 @@ async function refreshBuddyStatus(){
 }
 
 async function doRefresh(btn){if(btn)btn.disabled=true; ingest(await api.refresh()); render(); updateDetail(); if(btn)btn.disabled=false;}
-async function doResume(){const s=getSel(); if(!s)return; await api.resume(s.id,s.cwd,s.project||'');}
-async function doResumeRow(id){clearTimeout(DESELECT_T); const s=sessions.find(x=>x.id===id); if(!s)return; selected=id; render(); await api.resume(s.id,s.cwd,s.project||'');}
+async function doResume(){const s=getSel(); if(!s)return; resumeResult(await api.resume(s.id,s.cwd,s.project||'',toolOf(s)));}
+async function doResumeRow(id){clearTimeout(DESELECT_T); const s=sessions.find(x=>x.id===id); if(!s)return; selected=id; render(); resumeResult(await api.resume(s.id,s.cwd,s.project||'',toolOf(s)));}
 async function doCopy(){const s=getSel(); if(!s)return; await api.copy(s.id); toast(t('Session-ID kopiert ✓'));}
 
 /* ---- Farbe ---- */
@@ -7849,7 +7954,7 @@ function buildSwatches(){
   const html=COLORS.map(c=>`<div class="sw" style="background:${c}" onclick="setColor('${c}')"></div>`).join('');
   document.getElementById('color-swatches').innerHTML=html;
 }
-function openColor(){const s=getSel(); if(!s)return;
+function openColor(){const s=getSel(); if(!s || toolOf(s)==='qwen')return;
   const start=s.color||STATE.settings.accent||'#6c6cff';
   const v=hex2hsv(start); CP.h=v.h; CP.s=v.s||1; CP.v=(v.v===undefined?1:v.v); cpRender();
   document.getElementById('overlay-color').classList.add('show');}
@@ -7886,7 +7991,7 @@ function cpDown(e){CPdrag=true; try{e.target.setPointerCapture(e.pointerId);}cat
 function cpHexIn(v){const x=hex2hsv(v); CP.h=x.h; CP.s=x.s; CP.v=x.v; cpRender();}
 
 /* ---- Umbenennen ---- */
-function openRename(){const s=getSel(); if(!s)return;
+function openRename(){const s=getSel(); if(!s || toolOf(s)==='qwen')return;
   const i=document.getElementById('rename-input'); i.value=s.display_title;
   document.getElementById('overlay-rename').classList.add('show'); setTimeout(()=>{i.focus();i.select();},50);}
 async function saveRename(){const s=getSel(); if(!s)return;
@@ -9164,8 +9269,374 @@ async function obFinish(){
   render(); renderSettings();
 }
 
+// launcher -------------------------------------------------------------------
+// Tool badge and filter of the session list, and the New session dialog. The
+// backend is launcher/bridge.py behind Api.launcher_*; every launcher call can
+// answer {ok:false, error}, which is shown, never left hanging.
+let TOOL_FILTER = 'all';
+const LN_WRAPPERS = __LAUNCHER_WRAPPERS__;
+function toolOf(s){ return s && s.tool==='qwen' ? 'qwen' : 'claude'; }
+function renderToolFilter(){
+  const el=document.getElementById('toolfilter'); if(!el) return;
+  el.innerHTML=[['all',t('alle')],['claude','claude'],['qwen','qwen']].map(([k,label])=>
+    `<button class="${TOOL_FILTER===k?'on':''}" onclick="setToolFilter('${k}')">${esc(label)}</button>`).join('');
+}
+function setToolFilter(k){ TOOL_FILTER=k; render(); }
+function resumeResult(r){
+  if(r && r.ok===false) toast(r.error || t('Das hat nicht geklappt.'), 6000);
+}
+// Qwen rows come from the launcher's index, built in the background on the
+// first call: when the first list has none, ask once more shortly after.
+function repollQwen(){
+  if(sessions.some(s=>s.tool==='qwen')) return;
+  setTimeout(async ()=>{
+    try{
+      const st=await api.get_state();
+      if(st && (st.sessions||[]).some(s=>s.tool==='qwen')){ ingest(st); render(); }
+    }catch(e){}
+  }, 2000);
+}
+
+// ---- New session dialog
+// LN.cols: one listing (api.launcher_children) per open column, root first;
+// the last column is the selected folder. LN.nf: the new-folder form, opened
+// on the column whose folder gets the new one.
+const LN = {openId:0, cols:[], loading:false, nf:null, wrapper:null, wrapperSet:false,
+            sugg:null, suggWaiting:false, seq:0, navSeq:0, pollT:null, debT:null, busy:false, msg:null};
+
+function lnIsOpen(){ return document.getElementById('overlay-launcher').classList.contains('show'); }
+function lnName(){ return document.getElementById('ln-name').value; }
+function lnCur(){ return LN.cols[LN.cols.length-1] || null; }
+// Same as launcher/tree.py:slug
+function lnSlug(s){ return (s||'').toLowerCase().replace(/[^a-z0-9._-]+/g,'_').replace(/^_+|_+$/g,''); }
+function lnPathText(rel, extra){
+  const parts=(rel||'').split('/').filter(Boolean);
+  if(extra) parts.push('+ '+extra);
+  return parts.length ? parts.join(' › ') : t('Stammordner');
+}
+function lnLeaf(rel){ const p=(rel||'').split('/').filter(Boolean); return p.length ? p[p.length-1] : t('Stammordner'); }
+function lnSame(a, b){ return (a||'').toLowerCase()===(b||'').toLowerCase(); }
+function lnAge(ts){
+  const s=Math.max(0, Date.now()/1000 - ts);
+  if(s<3600) return t('vor {n} Min.', {n: Math.max(1, Math.round(s/60))});
+  if(s<86400) return t('vor {n} Std.', {n: Math.round(s/3600)});
+  return t('vor {tage} Tagen', {tage: Math.round(s/86400)});
+}
+
+function lnOpen(){
+  if(lnIsOpen()) return;
+  clearTimeout(LN.debT); clearTimeout(LN.pollT);
+  Object.assign(LN, {openId:LN.openId+1, cols:[], loading:false, nf:null, wrapper:null, wrapperSet:false,
+                     sugg:null, suggWaiting:false, seq:LN.seq+1, navSeq:LN.navSeq+1, busy:false, msg:null});
+  const inp=document.getElementById('ln-name'); inp.value='';
+  document.getElementById('overlay-launcher').classList.add('show');
+  lnRender();
+  setTimeout(()=>inp.focus(), 50);
+  lnGoto('');
+}
+// Cancel always works, also while a request runs: its answer is then ignored
+// (only a started session is still reported).
+function lnClose(){
+  clearTimeout(LN.debT); clearTimeout(LN.pollT);
+  LN.seq++; LN.navSeq++; LN.openId++; LN.busy=false;
+  closeOverlay('overlay-launcher');
+}
+function lnKey(e){
+  if(!lnIsOpen()) return false;
+  if(e.key==='Escape'){
+    e.preventDefault();
+    if(LN.nf && !LN.busy) lnBackFromNf(); else lnClose();
+    return true;
+  }
+  // Enter must not resume the selected session behind the dialog, F2 not rename it
+  return e.key==='Enter' || e.key==='F2';
+}
+
+function lnSetMsg(text, kind){ LN.msg = text ? {text, kind: kind||'err'} : null; lnRenderMsg(); }
+function lnClearMsg(){ lnSetMsg(null); }
+
+async function lnFetchCol(rel){
+  let r;
+  try{ r=await api.launcher_children(rel); }catch(e){ r={ok:false, error:String(e)}; }
+  if(!r || r.ok===false) throw new Error((r && r.error) || t('Das hat nicht geklappt.'));
+  return r;
+}
+// Open the columns down to `rel` ('' = the root only), keeping the columns
+// that are already open along the way.
+async function lnGoto(rel){
+  const my=++LN.navSeq;
+  const parts=(rel||'').split('/').filter(Boolean);
+  const want=[''].concat(parts.map((_,i)=>parts.slice(0,i+1).join('/')));
+  let keep=0;
+  while(keep<LN.cols.length && keep<want.length && lnSame(LN.cols[keep].rel, want[keep])) keep++;
+  LN.cols=LN.cols.slice(0, keep);
+  LN.loading=keep<want.length;
+  lnRender();
+  try{
+    for(let i=keep; i<want.length; i++){
+      const col=await lnFetchCol(want[i]);
+      if(my!==LN.navSeq) return;
+      LN.cols.push(col);
+      lnRenderCols();
+    }
+  }catch(e){
+    if(my===LN.navSeq) lnSetMsg(e.message, 'err');
+  }finally{
+    if(my===LN.navSeq){ LN.loading=false; lnApplyDefaultWrapper(); lnRender(); lnScrollCols(); }
+  }
+}
+function lnPick(i, j){
+  const col=LN.cols[i], ch=col && (col.children||[])[j];
+  if(!ch) return;
+  LN.nf=null; lnClearMsg();
+  lnGoto(ch.rel);
+}
+function lnScrollCols(){ const el=document.getElementById('ln-cols'); if(el) el.scrollLeft=el.scrollWidth; }
+
+// ---- suggestion: the local answer at once, then the model's (polled)
+function lnOnName(){
+  const name=lnName();
+  if(LN.nf && !LN.nf.touched){
+    LN.nf.name=lnSlug(name);
+    const f=document.getElementById('ln-nf-name'); if(f) f.value=LN.nf.name;
+  }
+  if(LN.msg && LN.msg.kind==='err') lnClearMsg();
+  clearTimeout(LN.debT);
+  LN.debT=setTimeout(()=>lnSuggest(name), 400);
+}
+async function lnSuggest(name){
+  const my=++LN.seq;
+  clearTimeout(LN.pollT);
+  if(!name.trim()){ LN.sugg=null; LN.suggWaiting=false; lnRenderSugg(); return; }
+  let r;
+  try{ r=await api.launcher_suggest(name); }catch(e){ r={ok:false, error:String(e)}; }
+  if(my!==LN.seq || !lnIsOpen()) return;
+  if(!r || r.ok===false || !r.local){
+    LN.sugg={error: (r && r.error) || t('Das hat nicht geklappt.')}; LN.suggWaiting=false; lnRenderSugg(); return;
+  }
+  LN.sugg=r.local; LN.suggWaiting=!!r.token; lnRenderSugg();
+  if(!r.token) return;
+  const started=Date.now();
+  const tick=async ()=>{
+    if(my!==LN.seq || !lnIsOpen()) return;
+    let s=null;
+    try{ s=await api.launcher_suggest_poll(r.token); }catch(e){ s={ok:false}; }
+    if(my!==LN.seq || !lnIsOpen()) return;
+    if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }   // keep the local answer
+    if(s && typeof s.path==='string'){ LN.sugg=s; LN.suggWaiting=false; lnRenderSugg(); return; }
+    if(Date.now()-started>=20000){ LN.suggWaiting=false; lnRenderSugg(); return; }
+    LN.pollT=setTimeout(tick, 500);
+  };
+  LN.pollT=setTimeout(tick, 500);
+}
+function lnSourceName(src){
+  return ({qwen:'Qwen', claude:'Claude', history:t('deinem Verlauf'), keywords:t('Stichwörtern')})[src] || src;
+}
+function lnRenderSugg(){
+  const el=document.getElementById('ln-sugg'), s=LN.sugg;
+  if(!s){ el.innerHTML=''; return; }
+  const wait=LN.suggWaiting ? ` <span class="wait">${esc(t('· Modell denkt nach…'))}</span>` : '';
+  if(s.error){ el.innerHTML=`<span class="ln-sugg none">${esc(t('Kein Vorschlag: {grund}', {grund: s.error}))}</span>`; return; }
+  if(s.source==='root'){ el.innerHTML=`<span class="ln-sugg none">${esc(t('Noch kein Vorschlag'))}${wait}</span>`; return; }
+  const vars={quelle: lnSourceName(s.source), pfad: lnPathText(s.path, s.new_folder), grund: s.reason};
+  const text=s.reason ? t('Vorschlag von {quelle}: {pfad} ({grund})', vars) : t('Vorschlag von {quelle}: {pfad}', vars);
+  el.innerHTML=`<button class="ln-sugg" onclick="lnUseSugg()" title="${esc(text + '\n' + t('Spalten bis zu diesem Ordner öffnen'))}">${esc(text)}${wait}</button>`;
+}
+async function lnUseSugg(){
+  const s=LN.sugg;
+  if(!s || s.error || s.source==='root') return;
+  LN.nf=null; lnClearMsg();
+  await lnGoto(s.path);
+  const cur=lnCur();
+  if(s.new_folder && cur && lnSame(cur.rel, s.path) && !LN.loading){
+    lnOpenNewFolder(LN.cols.length-1);
+    LN.nf.name=s.new_folder; LN.nf.touched=true;
+    lnRender();
+  }
+}
+
+// ---- wrappers
+function lnApplyDefaultWrapper(){
+  if(LN.wrapperSet) return;
+  const c=LN.nf ? LN.cols.find(x=>x.rel===LN.nf.rel) : lnCur();
+  if(c && c.default_wrapper) LN.wrapper=c.default_wrapper;
+}
+function lnSetWrapper(w){ LN.wrapper=w; LN.wrapperSet=true; lnRenderWrappers(); }
+// whether the main button starts a session (and the wrapper matters)
+function lnLaunches(){
+  if(LN.nf) return LN.nf.kind==='project';
+  const c=lnCur(); return !!(c && c.start_here);
+}
+
+// ---- new folder
+function lnKindLabel(k){
+  return ({project:t('ein Projekt'), container:t('ein Container'), client:t('ein Kunde'),
+           organisational:t('ein Ordnungsordner')})[k] || k;
+}
+function lnKindHint(k){
+  return ({project:t('Session darin starten · git init · .claude-project · plan.md'),
+           container:t('nur ein Gruppierungsordner · danach darin weiter wählen'),
+           client:t('ein Kundenordner mit CLAUDE.md · danach darin weiter wählen'),
+           organisational:t('ein Ordnungsordner · danach darin weiter wählen')})[k] || '';
+}
+function lnOpenNewFolder(i){
+  const col=LN.cols[i]; if(!col) return;
+  LN.navSeq++; LN.loading=false;
+  LN.cols=LN.cols.slice(0, i+1);
+  const kinds=col.kind_options || [];
+  LN.nf={rel: col.rel, name: lnSlug(lnName()), touched:false, kind: kinds[0] || null, github:'personal'};
+  lnClearMsg(); lnApplyDefaultWrapper(); lnRender();
+  setTimeout(()=>{ const f=document.getElementById('ln-nf-name'); if(f){ f.focus(); f.select(); } }, 30);
+}
+function lnBackFromNf(){ LN.nf=null; lnClearMsg(); lnApplyDefaultWrapper(); lnRender(); }
+function lnNfName(v){ if(LN.nf){ LN.nf.name=v; LN.nf.touched=true; } }
+function lnSetKind(k){ if(LN.nf){ LN.nf.kind=k; lnRender(); } }
+function lnSetGithub(g){ if(LN.nf){ LN.nf.github=g; lnRenderNf(); } }
+
+// ---- create / start
+function lnStartHere(){
+  const c=lnCur(); if(!c || !c.start_here) return;
+  lnSubmit({name: lnName(), rel: c.rel, new_folder: null, kind: null, wrapper: LN.wrapper, github: null});
+}
+function lnCreate(){
+  const nf=LN.nf; if(!nf) return;
+  const folder=(nf.name||'').trim();
+  if(!folder){ lnSetMsg(t('Bitte gib einen Ordnernamen ein.'), 'err'); return; }
+  const project=nf.kind==='project';
+  lnSubmit({name: lnName(), rel: nf.rel, new_folder: folder, kind: nf.kind,
+            wrapper: project ? LN.wrapper : null, github: project ? nf.github : null});
+}
+async function lnSubmit(payload){
+  if(LN.busy) return;
+  if(!payload.name.trim()){
+    lnSetMsg(t('Bitte gib einen Session-Namen ein.'), 'err');
+    document.getElementById('ln-name').focus();
+    return;
+  }
+  const openId=LN.openId;
+  LN.busy=true;
+  lnSetMsg(payload.new_folder ? t('Wird angelegt…') : t('Wird gestartet…'), 'info');
+  lnRenderActions();
+  let r;
+  try{ r=await api.launcher_new(payload); }catch(e){ r={ok:false, error:String(e)}; }
+  const notes=(r && r.warnings) || [];
+  if(openId!==LN.openId){   // the dialog was closed meanwhile
+    if(r && r.ok && r.launched) toast(t('Session gestartet ✓'));
+    return;
+  }
+  LN.busy=false;
+  if(!r || r.ok===false){
+    lnSetMsg((r && r.error) || t('Das hat nicht geklappt.'), 'err');
+    lnRenderActions();
+    return;
+  }
+  if(r.launched){
+    lnClose();
+    if(notes.length) toast(t('Session gestartet – Hinweise: {hinweise}', {hinweise: notes.join('; ')}), 9000);
+    else toast(t('Session gestartet ✓'));
+    return;
+  }
+  // A grouping folder was created: walk into it (the parent column is
+  // fetched again so the new folder shows there too).
+  LN.nf=null;
+  const parent=LN.cols.findIndex(c=>lnSame(c.rel, payload.rel));
+  LN.cols=LN.cols.slice(0, Math.max(0, parent));
+  lnSetMsg(t('Ordner angelegt: {ordner}', {ordner: lnPathText(r.rel)})
+           + (notes.length ? '\n' + t('Hinweise: {hinweise}', {hinweise: notes.join('; ')}) : ''), 'ok');
+  await lnGoto(r.rel);
+}
+
+// ---- drawing
+function lnRender(){
+  lnRenderSugg(); lnRenderCols(); lnRenderCrumb(); lnRenderNf(); lnRenderWrappers(); lnRenderActions(); lnRenderMsg();
+}
+function lnRenderCols(){
+  const el=document.getElementById('ln-cols');
+  const last=LN.cols.length-1;
+  el.innerHTML=LN.cols.map((c,i)=>{
+    const next=LN.cols[i+1];
+    const title=i===0 ? t('Stammordner') : lnLeaf(c.rel);
+    const items=(c.children||[]).map((ch,j)=>{
+      const on=next && lnSame(next.rel, ch.rel);
+      const meta=ch.sessions ? ` <span class="m">· ${ch.sessions}</span>` : '';
+      const tip=[ch.name].concat(ch.names||[]).join('\n');
+      return `<div class="i${on?' on':''}" onclick="lnPick(${i},${j})" title="${esc(tip)}">${esc(ch.name)}${meta}</div>`;
+    }).join('');
+    const nfOn=LN.nf && i===last;
+    return `<div class="ln-col"><div class="t" title="${esc(title)}">${esc(title)}</div>${items}`
+      + `<div class="i new${nfOn?' on':''}" onclick="lnOpenNewFolder(${i})">${esc(t('+ Neuer Ordner…'))}</div></div>`;
+  }).join('') + (LN.loading ? `<div class="ln-col"><div class="i wait">${esc(t('Lädt…'))}</div></div>` : '');
+  // keep the highlighted folder of every column in view
+  el.querySelectorAll('.i.on').forEach(e=>{
+    const c=e.parentElement, cr=c.getBoundingClientRect(), er=e.getBoundingClientRect();
+    if(er.top<cr.top || er.bottom>cr.bottom) c.scrollTop+=er.top-cr.top-(c.clientHeight-er.height)/2;
+  });
+}
+function lnRenderCrumb(){
+  const el=document.getElementById('ln-crumb'), c=lnCur();
+  document.getElementById('ln-crumb-field').hidden=!!LN.nf;
+  if(!c){ el.textContent=LN.loading ? t('Lädt…') : ''; return; }
+  if(!c.start_here){ el.textContent=t('Wähle einen Ordner – oder lege einen neuen an.'); return; }
+  const parent=LN.cols[LN.cols.length-2];
+  const ch=parent && (parent.children||[]).find(x=>lnSame(x.rel, c.rel));
+  const n=ch ? ch.sessions : 0;
+  let html=esc(t('Ausgewählt:')) + ' <b>' + esc(lnPathText(c.rel)) + '</b> · '
+    + esc(n ? t('{n} Sessions', {n}) : t('noch keine Sessions'));
+  if(ch && ch.last_activity) html+=' · ' + esc(t('zuletzt aktiv {wann}', {wann: lnAge(ch.last_activity)}));
+  el.innerHTML=html;
+}
+function lnRenderNf(){
+  const el=document.getElementById('ln-nf'), nf=LN.nf;
+  el.hidden=!nf;
+  if(!nf){ el.innerHTML=''; return; }
+  const col=LN.cols.find(c=>c.rel===nf.rel);
+  const kinds=(col && col.kind_options) || [];
+  const kindHtml=(kinds.length===1 && kinds[0]==='organisational')
+    ? `<div class="ln-note">${esc(lnKindHint('organisational'))}</div>`
+    : kinds.map(k=>`<label class="ln-kind"><input type="radio" name="ln-kind" ${k===nf.kind?'checked':''}
+        onchange="lnSetKind('${k}')"><span>${esc(lnKindLabel(k))}</span><span class="h">${esc(lnKindHint(k))}</span></label>`).join('');
+  const github=nf.kind!=='project' ? '' :
+    `<div class="ln-field"><div class="ln-lbl">${esc(t('GitHub-Repo'))}</div><div class="ln-chips">`
+    + [['personal', t('persönlich')], ['work', t('Arbeit')]].map(([g,label])=>
+        `<button class="ln-chip${nf.github===g?' on':''}" onclick="lnSetGithub('${g}')">${esc(label)}</button>`).join('')
+    + `</div></div>`;
+  el.innerHTML=`<h4>${esc(t('Neuer Ordner in {ordner}', {ordner: lnPathText(nf.rel)}))}</h4>`
+    + `<div class="ln-field"><label for="ln-nf-name">${esc(t('Ordnername'))}</label>`
+    + `<input class="modal-input" id="ln-nf-name" autocomplete="off" spellcheck="false" oninput="lnNfName(this.value)"></div>`
+    + `<div class="ln-field"><div class="ln-lbl">${esc(t('Was ist es?'))}</div>${kindHtml}</div>${github}`;
+  document.getElementById('ln-nf-name').value=nf.name;
+}
+function lnRenderWrappers(){
+  document.getElementById('ln-wrap-field').hidden=!lnLaunches();
+  const list=LN_WRAPPERS.length ? LN_WRAPPERS : (LN.wrapper ? [LN.wrapper] : []);
+  document.getElementById('ln-wrappers').innerHTML=list.map(w=>
+    `<button class="ln-chip${w===LN.wrapper?' on':''}" onclick="lnSetWrapper('${w}')">${esc(w)}</button>`).join('');
+}
+function lnRenderActions(){
+  const el=document.getElementById('ln-actions'), c=lnCur();
+  const off=(LN.busy || LN.loading) ? ' disabled' : '';
+  let html=`<button class="btn" onclick="lnClose()">${esc(t('Abbrechen'))}</button>`;
+  if(LN.nf){
+    html+=`<button class="btn" onclick="lnBackFromNf()"${LN.busy?' disabled':''}>${esc(t('Zurück'))}</button>`
+      + `<button class="btn accent" onclick="lnCreate()"${off}>`
+      + esc(LN.nf.kind==='project' ? t('Anlegen und starten') : t('Anlegen')) + `</button>`;
+  }else if(c){
+    html+=`<button class="btn" onclick="lnOpenNewFolder(${LN.cols.length-1})"${off}>`
+      + esc(t('Neuer Ordner in {ordner}…', {ordner: lnLeaf(c.rel)})) + `</button>`;
+    if(c.start_here) html+=`<button class="btn accent" onclick="lnStartHere()"${off}>${esc(t('Hier starten'))}</button>`;
+  }
+  el.innerHTML=html;
+}
+function lnRenderMsg(){
+  const el=document.getElementById('ln-msg'), m=LN.msg;
+  el.hidden=!m;
+  el.className='ln-msg' + (m ? ' ' + m.kind : '');
+  el.textContent=m ? m.text : '';
+}
+
 /* ---- Tastatur ---- */
 document.addEventListener('keydown',e=>{
+  if(lnKey(e)) return;   // the New session dialog takes these keys while it is open
   if(e.key==='Escape'){closeOverlay('overlay-color');closeOverlay('overlay-rename');}
   if(e.key==='F11'){ e.preventDefault(); try{api.toggle_fullscreen();}catch(_){}}
   if(e.key==='F2' && getSel()) openRename();
@@ -9175,6 +9646,7 @@ document.addEventListener('keydown',e=>{
   }
 });
 document.getElementById('search').addEventListener('input',render);
+document.getElementById('ln-name').addEventListener('input',lnOnName);
 document.addEventListener('pointermove',e=>{ if(CPdrag) cpPick(e); });
 document.addEventListener('pointerup',()=>{ CPdrag=false; });
 document.addEventListener('pointercancel',()=>{ CPdrag=false; });
