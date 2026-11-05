@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -271,6 +272,21 @@ def test_default_runner_has_no_stdin_and_no_git_prompt(tmp_path, monkeypatch):
     probe = "import os; print(os.environ.get('GIT_TERMINAL_PROMPT'), os.environ.get('X_INHERITED'))"
     assert scaffold.Runner().run([sys.executable, "-c", probe], tmp_path).out.split() == ["0", "yes"]
     assert scaffold.Runner().run(["definitely-not-a-command-xyz"], tmp_path).code == 127
+
+
+def test_default_runner_creates_no_console_window(tmp_path, monkeypatch):
+    """A windowed caller (the browser) must not flash a console per child: the Windows flag is passed."""
+    seen = {}
+
+    def fake_run(args, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    scaffold.Runner().run([sys.executable, "-c", "pass"], tmp_path)
+    assert seen["creationflags"] == scaffold.NO_WINDOW
+    if sys.platform == "win32":
+        assert scaffold.NO_WINDOW == subprocess.CREATE_NO_WINDOW != 0
 
 
 def test_default_runner_pipes_input(tmp_path):
