@@ -492,7 +492,12 @@ def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, run
     that builds the prompt and runs Qwen and Claude concurrently; `on_update` gets the first valid model answer,
     once, from that thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection
     is single-threaded); everything else works from that list."""
-    rows = _Rows(index.rows())
+    try:
+        rows = _Rows(index.rows())
+    except Exception as e:  # noqa: BLE001 - suggest() never raises: carry on with no history
+        _log(env, {"ts": env.now(), "stage": "index", "name": name, "latency_ms": 0, "ok": False,
+                   "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
+        rows = _Rows([])
     local = (stage_history(env, rows, name, 0.0) or stage_keywords(env, rows, name, 0.0)
              or stage_root(env, rows, name, 0.0))
     pending = Pending(local)
