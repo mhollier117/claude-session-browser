@@ -47,3 +47,6 @@ debug/
 
 # PowerShell module cache the name-gate tests can leave in the working dir
 Microsoft/
+
+# Subagent-driven-development working files
+.superpowers/
