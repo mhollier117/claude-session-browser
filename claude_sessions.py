@@ -4489,16 +4489,17 @@ class Api:
 
     @_launcher_api
     def launcher_suggest(self, name):
-        """The local suggestion for session `name` at once; the model stages keep running in the background and
-        their first answer is fetched with launcher_suggest_poll(token)."""
+        """The local suggestion for session `name` at once. The model stages start only once the name has been idle
+        for bridge.MODEL_IDLE_S (a newer call cancels this one first), run in the background, and their first
+        answer is fetched with launcher_suggest_poll(token)."""
         from launcher import bridge
         from launcher.suggest import default_http, suggest
         with self._launcher_state():
             env = self._launcher_env
             pending = suggest(env, self._launcher_idx(), str(name or "").strip(),
                               http=_LAUNCHER_HTTP or default_http, runner=_LAUNCHER_RUNNER,
-                              on_update=lambda s: None)
-        token = self._launcher_suggestions.add(pending)
+                              on_update=lambda s: None, defer_models=True)
+        token = self._launcher_suggestions.supersede(pending)
         return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token}
 
     @_launcher_api
@@ -9429,7 +9430,7 @@ async function lnSuggest(name){
       if(s.source==='qwen' || s.source==='claude') LN.sugg=s;
       LN.suggWaiting=false; lnRenderSugg(); return;
     }
-    if(Date.now()-started>=20000){ LN.suggWaiting=false; lnRenderSugg(); return; }
+    if(Date.now()-started>=22000){ LN.suggWaiting=false; lnRenderSugg(); return; }   // 1.5 s idle + Claude's 20 s
     LN.pollT=setTimeout(tick, 500);
   };
   LN.pollT=setTimeout(tick, 500);

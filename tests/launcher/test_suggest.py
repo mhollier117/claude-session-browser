@@ -273,6 +273,60 @@ def test_suggest_returns_local_first_then_updates_once(fake_env, index, tmp_path
     assert {"history", "keywords", "qwen", "claude"} <= set(stages)
 
 
+def test_cancel_before_the_deferred_models_start_runs_nothing(fake_env, index, tmp_path):
+    _qwen_settings(fake_env)
+    exe = tmp_path / "claude.exe"
+    exe.write_text("")
+    updates = []
+    http, runner = FakeHttp(_answer(r"work\net")), FakeRunner(_claude_out(_answer(r"home\ai")))
+    handle = suggest(fake_env, index, "fortigate vpn", http=http, runner=runner, on_update=updates.append,
+                     claude_exe=exe, defer_models=True)
+    assert handle.local.source == "keywords"
+    time.sleep(0.2)
+    assert http.calls == [] and runner.calls == []  # deferred: nothing started yet
+    handle.cancel()
+    handle.release_models()  # too late: a cancelled request never starts its stages
+    assert handle.join(5)
+    assert handle.wait(0) is None and handle.cancelled
+    assert http.calls == [] and runner.calls == [] and updates == []
+
+
+def test_cancel_discards_an_answer_from_stages_already_running(fake_env, index, tmp_path):
+    _qwen_settings(fake_env)
+    exe = tmp_path / "claude.exe"
+    exe.write_text("")
+    updates, asked = [], threading.Event()
+    release = threading.Event()
+
+    class SlowHttp(FakeHttp):
+        def __call__(self, method, url, headers, body, timeout):
+            if url.endswith("/chat/completions"):
+                asked.set()
+                release.wait(5)
+            return super().__call__(method, url, headers, body, timeout)
+
+    handle = suggest(fake_env, index, "fortigate vpn", http=SlowHttp(_answer(r"work\net")),
+                     runner=FakeRunner("", code=1), on_update=updates.append, claude_exe=exe)
+    assert asked.wait(5)  # the Qwen stage is waiting on its answer
+    handle.cancel()
+    release.set()
+    assert handle.join(5)
+    assert handle.wait(0) is None and updates == []
+
+
+def test_deferred_models_start_on_release(fake_env, index, tmp_path):
+    _qwen_settings(fake_env)
+    exe = tmp_path / "claude.exe"
+    exe.write_text("")
+    http = FakeHttp(_answer(r"work\halo"))
+    handle = suggest(fake_env, index, "fortigate vpn", http=http, runner=FakeRunner("", code=1),
+                     on_update=lambda s: None, claude_exe=exe, defer_models=True)
+    handle.release_after(0.05)
+    got = handle.wait(5)
+    assert got is not None and got.source == "qwen" and got.path == fake_env.root / "work" / "halo"
+    assert handle.join(5)
+
+
 def test_suggest_never_hangs_on_bad_model_answers(fake_env, index, tmp_path):
     _qwen_settings(fake_env)
     exe = tmp_path / "claude.exe"

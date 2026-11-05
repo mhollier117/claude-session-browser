@@ -338,5 +338,28 @@ def test_launcher_suggest_returns_local_then_poll(fake_env, api, monkeypatch):
     assert http_calls[0] == ("GET", "http://qwen.test:8000/v1/models")
 
 
+def test_launcher_suggest_runs_the_models_only_for_the_latest_name(fake_env, api, monkeypatch):
+    _qwen_settings(fake_env)
+    monkeypatch.setattr(bridge, "MODEL_IDLE_S", 0.3)
+    posts = []
+
+    def http(method, url, headers, body, timeout):
+        if method == "GET":
+            return 200, {"data": [{"id": "m-current"}]}
+        posts.append(body["messages"][1]["content"])
+        return 200, {"choices": [{"message": {"content": json.dumps({"path": "work/halo"})}}]}
+    monkeypatch.setattr(cs, "_LAUNCHER_HTTP", http)
+    tokens = [api.launcher_suggest(n)["token"] for n in ("vpn", "vpn tun", "vpn tunnel")]
+    assert posts == []  # nothing before the name has been idle
+    got, deadline = None, time.monotonic() + 10
+    while got is None and time.monotonic() < deadline:
+        got = api.launcher_suggest_poll(tokens[-1])
+        time.sleep(0.02)
+    assert got["source"] == "qwen"
+    time.sleep(0.5)  # a superseded request would have released by now
+    assert len(posts) == 1 and "vpn tunnel" in posts[0]
+    assert api.launcher_suggest_poll(tokens[0]) is None
+
+
 def test_launcher_suggest_poll_unknown_token(api):
     assert api.launcher_suggest_poll("nope") is None
