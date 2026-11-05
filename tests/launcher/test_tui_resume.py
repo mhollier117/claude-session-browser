@@ -275,7 +275,8 @@ def test_cli_resume_records_wrapper(fake_env, capsys):
 @pytest.mark.parametrize("result", [None, FOCUSED, NEW])
 def test_cli_prints_nothing_without_launch(fake_env, capsys, result):
     idx = _two_sessions(fake_env)
-    assert cli.main([], env=fake_env, index=idx, app=lambda env, index: result) == 0
+    assert cli.main([], env=fake_env, index=idx, app=lambda env, index: result,
+                    new_app=lambda env, index, name: None) == 0  # NEW: the new-session walk, quit at once
     assert capsys.readouterr().out == ""
 
 

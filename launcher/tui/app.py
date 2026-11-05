@@ -7,9 +7,11 @@ the process's standard output handle (prompt_toolkit's Windows output queries th
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.document import Document
@@ -26,6 +28,10 @@ from ..index import Index
 from ..paths import Env
 from .preview import FOOTER as PREVIEW_FOOTER
 from .resume import FOCUSED, NEW, Resume, ResumeState, render_rows, scroll_top
+
+if TYPE_CHECKING:  # imported where used, so the resume list does not pay for the new-session modules
+    from ..launch import Launch
+    from .new import NewFlow
 
 STYLE = Style.from_dict({
     "header": "#a3abb8", "rule": "#343a46", "dim": "#a3abb8", "name": "#e3e7ec",
@@ -237,3 +243,93 @@ def run_resume(env: Env, index: Index):
     """Show the resume list until the user chooses; returns a `Resume`, `NEW`, `FOCUSED` or None (quit)."""
     with console_output() as output:
         return build_app(env, index, output=output).run()
+
+
+# ---- the new-session walk ----------------------------------------------------------------------------------------
+
+POLL_S = 0.25  # how often the picker looks for the model's suggestion
+
+
+def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Application:
+    """Draw `render_new(flow)` and route keys to it; a 250 ms timer applies the model's suggestion via `flow.poll`
+    (it never blocks: `Pending.wait(0)`). Exits with the flow's `Launch`, or None on q / ctrl-c."""
+    from .new import render_new
+    kb = KeyBindings()
+    texty = Condition(lambda: flow.step in ("name", "folder_name"))
+
+    def fragments():
+        s = app.output.get_size()
+        return render_new(flow, s.columns, s.rows)
+
+    def after(event) -> None:
+        if flow.step == "done":
+            event.app.exit(result=flow.result())
+
+    @kb.add("c-c")
+    def _quit(event) -> None:
+        event.app.exit(result=None)
+
+    @kb.add("enter")
+    def _enter(event) -> None:
+        flow.enter()
+        after(event)
+
+    @kb.add("escape", eager=True)
+    def _escape(event) -> None:
+        flow.esc()
+
+    @kb.add("up", filter=~texty)
+    def _up(event) -> None:
+        flow.move(-1)
+
+    @kb.add("down", filter=~texty)
+    def _down(event) -> None:
+        flow.move(1)
+
+    @kb.add("backspace")
+    def _backspace(event) -> None:
+        if flow.step in ("name", "folder_name"):
+            flow.text = flow.text[:-1]
+            flow.error = ""
+        elif flow.step == "picker":
+            flow.backspace()
+
+    @kb.add("<any>")
+    def _typed(event) -> None:
+        ch = event.data
+        if len(ch) != 1 or not ch.isprintable():
+            return
+        if flow.step in ("name", "folder_name"):
+            flow.text += ch
+            flow.error = ""
+        elif ch == "q" and not (flow.step == "picker" and flow.filter):
+            event.app.exit(result=None)
+        elif flow.step == "picker":
+            flow.type_filter(flow.filter + ch)
+
+    window = Window(FormattedTextControl(fragments, focusable=True, show_cursor=False), wrap_lines=False)
+    app = Application(layout=Layout(window), key_bindings=kb, style=STYLE, full_screen=True, mouse_support=False,
+                      output=output, input=input)
+    app.ttimeoutlen = 0.05
+    return app
+
+
+async def _poll_suggestion(app: Application, flow: NewFlow) -> None:
+    """Every `POLL_S`: apply the model's answer if it has come (`flow.poll` never waits) and redraw, which also
+    keeps the "asking the model" line current. Cancelled when the app exits."""
+    while True:
+        await asyncio.sleep(POLL_S)
+        flow.poll()
+        app.invalidate()
+
+
+def run_new(env: Env, index: Index, name: str | None) -> Launch | None:
+    """The new-session walk on the console; `name` (from `cc new <name>`) skips the name prompt."""
+    from ..scaffold import Runner
+    from .new import NewFlow
+    flow = NewFlow(env, index, Runner())
+    if name:
+        flow.start(name)
+    with console_output() as output:
+        app = build_new_app(flow, output=output)
+        return app.run(pre_run=lambda: app.create_background_task(_poll_suggestion(app, flow)))

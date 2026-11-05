@@ -124,6 +124,33 @@ def _str(value) -> str:
     return value if isinstance(value, str) else ""
 
 
+LAUNCHED_FILE = "launched.json"
+
+
+def _write_launched(data_dir: Path, entries: dict[str, str]) -> None:
+    path = Path(data_dir) / LAUNCHED_FILE
+    if not entries:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_launched(data_dir: Path) -> dict[str, str]:
+    return {k: v for k, v in _read_json(Path(data_dir) / LAUNCHED_FILE).items()
+            if isinstance(k, str) and isinstance(v, str) and v}
+
+
+def remember_launch(data_dir: Path, store: str, sid: str, wrapper: str) -> None:
+    """Note the wrapper a new session was started with. Its transcript does not exist yet, so the next
+    `Index.refresh` that finds the row records it (see `_apply_launched`)."""
+    entries = _read_launched(data_dir)
+    entries[f"{store}:{sid}"] = wrapper
+    _write_launched(data_dir, entries)
+
+
 def _parts(path: str | Path) -> tuple[str, ...]:
     return tuple(p.lower() for p in Path(path).parts)
 
@@ -199,7 +226,30 @@ class Index:
             for key in old.keys() - files.keys():
                 self._db.execute("DELETE FROM sessions WHERE store = ? AND sid = ?", key)
                 touched += 1
+        self._apply_launched()
         return touched
+
+    def _apply_launched(self) -> None:
+        """Consume `launched.json`: an entry whose row now exists sets that row's wrapper when none is recorded
+        yet, and is dropped either way; entries for sessions not indexed yet are kept for the next refresh."""
+        entries = _read_launched(self.env.data_dir)
+        if not entries and not (self.env.data_dir / LAUNCHED_FILE).exists():
+            return
+        keep: dict[str, str] = {}
+        with self._db:
+            for key, wrapper in entries.items():
+                store, _, sid = key.partition(":")
+                cur = self._db.execute(
+                    "UPDATE sessions SET wrapper = ? WHERE store = ? AND sid = ? AND wrapper IS NULL",
+                    (wrapper, store, sid))
+                if cur.rowcount == 0 and not self._db.execute(
+                        "SELECT 1 FROM sessions WHERE store = ? AND sid = ?", (store, sid)).fetchone():
+                    keep[key] = wrapper
+        if keep != entries or not entries:
+            try:
+                _write_launched(self.env.data_dir, keep)
+            except OSError:
+                pass  # retried on the next refresh
 
     def _index_file(self, store: str, path: Path, prev, live, titles) -> None:
         facts = getattr(stores, f"read_{store}")(path, count=False)
