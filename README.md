@@ -217,8 +217,9 @@ is a complete example.
 
 `cc` resumes or starts a Claude Code or Qwen session in the terminal tab you are
 already in: one list of every Claude and Qwen session, and a short walk for a new one.
-The installer puts `cc.exe` and `cc.ps1` next to `ClaudeSessionBrowser.exe`. Add one
-line to your PowerShell profile (`notepad $PROFILE`):
+The installer puts `cc.ps1` next to `ClaudeSessionBrowser.exe` and the launcher itself in
+the `cc` folder beside it (`cc\cc.exe`). Add one line to your PowerShell profile
+(`notepad $PROFILE`):
 
 ```powershell
 . "$env:LOCALAPPDATA\Programs\ClaudeSessionBrowser\cc.ps1"
@@ -226,7 +227,8 @@ line to your PowerShell profile (`notepad $PROFILE`):
 
 That is the default install folder; if you installed elsewhere, use `. "<app dir>\cc.ps1"`.
 Then type `cc`. The function changes to the session's folder and runs the wrapper in
-that tab; `cc.ps1` prefers the `cc.exe` beside it.
+that tab; `cc.ps1` runs `cc\cc.exe` beside it, else a `cc.exe` beside it, else the
+launcher from the repository's `.venv`, else `python -m launcher.cli`.
 
 - `cc`: the resume list. `cc new [name]`: start a new session. `cc index`: refresh the
   index only. `cc --json`: print every session as JSON.

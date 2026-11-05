@@ -8,9 +8,11 @@
 
 function cc {
     $repo = Split-Path -Parent $PSScriptRoot
-    $exe = Join-Path $PSScriptRoot 'cc.exe'
+    # the installed onedir build ({app}\cc\cc.exe), then a cc.exe beside this script (older single-file layout)
+    $exe = @((Join-Path $PSScriptRoot 'cc\cc.exe'), (Join-Path $PSScriptRoot 'cc.exe')) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
     $venvPy = Join-Path $repo '.venv\Scripts\python.exe'
-    if (Test-Path -LiteralPath $exe) {
+    if ($exe) {
         $cmd = $exe; $pre = @()
     } elseif (Test-Path -LiteralPath $venvPy) {
         $cmd = $venvPy; $pre = @('-m', 'launcher.cli')

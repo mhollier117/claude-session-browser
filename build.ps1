@@ -70,10 +70,12 @@ Step "3/6 App (PyInstaller, onedir)"
     claude_sessions.py
 Check "PyInstaller (app)"
 
-Step "4/6 cc launcher (cc.exe, PyInstaller onefile console)"
+Step "4/6 cc launcher (dist\cc\cc.exe, PyInstaller onedir console)"
 # Entry is cc_main.py: launcher\cli.py uses relative imports and cannot be the top-level script.
+# onedir, not onefile: a onefile exe unpacks itself to %TEMP% on every start (seconds); cc is started many times a
+# day, so it must start at once. The installer copies dist\cc\ (cc.exe + _internal) to {app}\cc.
 & $py -m PyInstaller --noconfirm --clean --log-level WARN `
-    --onefile --console --name cc --icon claude_sessions.ico `
+    --onedir --console --name cc --icon claude_sessions.ico `
     --add-data "launcher\templates\plan.md;launcher\templates" `
     --add-data "launcher\templates\CLAUDE.client.md;launcher\templates" `
     --hidden-import sessions_live --hidden-import termfocus --hidden-import psutil `
