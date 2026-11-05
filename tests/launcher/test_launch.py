@@ -35,13 +35,13 @@ def test_default_wrapper_elsewhere_is_clauded(fake_env):
 
 def test_resume_uses_recorded_wrapper(tmp_path):
     row = make_row(cwd=str(tmp_path), wrapper="claude6")
-    launch_ = resume_command(row, None)
+    launch_ = resume_command(row, None, root=tmp_path)
     assert launch_.argv == ["claude6", "-r", "s1"]
     assert launch_.cwd == tmp_path and launch_.warnings == []
 
 
 def test_resume_override_beats_recorded_wrapper(tmp_path):
-    assert resume_command(make_row(cwd=str(tmp_path), wrapper="claude6"), "claudeb").argv == ["claudeb", "-r", "s1"]
+    assert resume_command(make_row(cwd=str(tmp_path), wrapper="claude6"), "claudeb", root=tmp_path).argv == ["claudeb", "-r", "s1"]
 
 
 def test_resume_falls_back_to_default_wrapper(fake_env):
@@ -49,13 +49,14 @@ def test_resume_falls_back_to_default_wrapper(fake_env):
     elsewhere = make_row(cwd=str(fake_env.root / "work" / "net"))
     assert resume_command(in_cc, None, root=fake_env.root).argv[0] == "claude"
     assert resume_command(elsewhere, None, root=fake_env.root).argv[0] == "clauded"
-    assert resume_command(elsewhere, None).argv[0] == "clauded"  # no root: the general default
+    # a cc-area row with no recorded wrapper resumes with `claude`
+    assert resume_command(make_row(cwd=str(fake_env.root / "cc")), None, root=fake_env.root).argv == ["claude", "-r", "s1"]
 
 
 def test_resume_qwen(tmp_path):
     row = make_row(store="qwen", sid="q1", cwd=str(tmp_path))
-    assert resume_command(row, None).argv == ["qwen", "-r", "q1"]
-    assert resume_command(row, "claude").argv == ["qwen", "-r", "q1"]  # a Qwen session is never resumed by Claude
+    assert resume_command(row, None, root=tmp_path).argv == ["qwen", "-r", "q1"]
+    assert resume_command(row, "claude", root=tmp_path).argv == ["qwen", "-r", "q1"]  # a Qwen session is never resumed by Claude
 
 
 def test_new_command_keeps_name_verbatim(tmp_path):
@@ -71,7 +72,7 @@ def test_new_command_with_session_id(tmp_path):
 
 def test_missing_cwd_adds_warning_and_still_returns_command(tmp_path):
     gone = tmp_path / "gone"
-    launch_ = resume_command(make_row(cwd=str(gone), cwd_exists=False), "clauded")
+    launch_ = resume_command(make_row(cwd=str(gone), cwd_exists=False), "clauded", root=tmp_path)
     assert launch_.warnings == [f"folder no longer exists: {gone}"]
     assert launch_.argv == ["clauded", "-r", "s1"]
 
@@ -94,3 +95,14 @@ def test_focus_live_without_pid_does_not_call_termfocus(monkeypatch):
     monkeypatch.setattr(termfocus, "focus_session", lambda *a, **k: pytest.fail("must not be called"))
     result = focus_live(make_row(live_pid=None))
     assert result["ok"] is False and result["error"]
+
+
+def test_default_wrapper_outside_root_is_clauded(fake_env, tmp_path):
+    assert default_wrapper(fake_env.root, tmp_path / "elsewhere" / "cc") == "clauded"
+
+
+def test_resume_without_recorded_folder_warns_and_uses_dot(tmp_path):
+    launch_ = resume_command(make_row(cwd=None), None, root=tmp_path)
+    assert launch_.cwd == Path(".")
+    assert launch_.warnings == ["session has no recorded folder"]
+    assert launch_.argv == ["clauded", "-r", "s1"]
