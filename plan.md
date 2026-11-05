@@ -13,7 +13,7 @@ No GitHub Actions workflows in this repo: pushes cost no CI minutes.
   the two templates. `setup.iss` installs `cc.exe` and `cc.ps1` next to `ClaudeSessionBrowser.exe`. README has a "cc launcher" section.
   `*.spec` is gitignored and `ClaudeSessionBrowser.spec` is not used by `build.ps1`, so there is no `cc.spec`.
 - Remains: (1) the user cuts the release after the controller merges `launcher` into `main` (fast-forward):
-  `.elease.ps1 -Version 1.7.0.0 -Notes "cc launcher: unified Claude+Qwen list, New session, terminal cc" -Publish`;
+  `.\release.ps1 -Version 1.7.0.0 -Notes "cc launcher: unified Claude+Qwen list, New session, terminal cc" -Publish`;
   (2) Qwen prompt-size tuning (see `suggest.log`: latency and prompt size per attempt); (3) deferred minors, listed in the
   review ledger summary the controller adds at merge.
 
