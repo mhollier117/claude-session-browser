@@ -144,7 +144,27 @@ def test_name_is_required(fake_env, index):
 
 # ---- new folder kinds --------------------------------------------------------------------------------------------
 
-def test_new_folder_under_work_bucket_is_organisational(fake_env, index):
+def test_new_folder_inside_a_work_bucket_asks_project_or_container(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("pxe boot")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "new")
+    flow.enter()
+    assert flow.step == "kind"
+    assert [v for v, _label, _hint in flow.options()] == ["project", "container"]
+
+
+def test_new_folder_at_root_is_organisational(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("lab")
+    flow.esc()
+    _pick(flow, "new")
+    flow.enter()  # organisational only: created at once, the walk goes on inside it
+    assert flow.step == "picker" and flow.folder == fake_env.root / "lab"
+    assert flow.new_name is None and flow.result() is None
+
+
+def test_new_folder_under_work_is_an_organisational_bucket(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("Zebra Things")
     _go(flow, fake_env.root / "work")
