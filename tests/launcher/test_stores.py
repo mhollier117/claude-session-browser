@@ -63,6 +63,30 @@ def test_tail_read_grows_when_last_reply_is_large(fake_env):
     assert full_last_reply(p, "claude") == big
 
 
+_MB = 1024 * 1024
+
+
+def _long_tool_run(env, sid="big"):
+    """A 20 MB transcript: the last typed ask is 18 MB from the end (18 one-MB assistant blocks after it)."""
+    recs = [_u("first"), _a("x" * (2 * _MB - 200)), _u("the last typed ask")] + \
+        [_a(f"{i} " + "z" * (_MB - 100)) for i in range(18)] + [_a("final reply")]
+    return write_claude_session(env, env.root / "cc", sid, recs)
+
+
+def test_tail_read_stops_at_the_cap(fake_env, monkeypatch):
+    import launcher.stores as stores
+    p = _long_tool_run(fake_env)
+    assert p.stat().st_size > 19 * _MB
+    reads = []
+    real = stores._tail_lines
+    monkeypatch.setattr(stores, "_tail_lines", lambda path, size, n: reads.append(n) or real(path, size, n))
+    f = read_claude(p, count=False)
+    assert f.last_reply == "final reply"
+    assert f.last_ask == ""  # not within the last 16 MB: unknown, not read whole
+    assert f.first_ask == "first"
+    assert max(reads) == stores.TAIL_MAX_BYTES == 16 * _MB
+
+
 def test_tail_skips_partial_first_line(fake_env):
     recs = [_u("q1"), _a("r1")] + [_u(f"filler {i}" * 50) for i in range(40)] + [_u("final q"), _a("final r")]
     p = write_claude_session(fake_env, fake_env.root / "cc", "s7", recs)

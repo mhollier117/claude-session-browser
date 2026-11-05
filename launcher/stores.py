@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _HEAD_START = 65_536
+TAIL_MAX_BYTES = 16 * 1024 * 1024  # the backwards read for the last ask/reply never grows past this
 _TAGS = ("local-command-caveat", "local-command-stdout", "system-reminder",
          "command-name", "command-message", "command-args", "command-contents")
 _TYPE_RE = re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"')
@@ -141,8 +142,11 @@ def _head(path: Path, size: int, parser) -> tuple[str | None, str]:
 
 
 def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True) -> tuple[str, str]:
-    """(last cleaned ask, last whole reply), growing backwards by doubling until both are found or BOF."""
-    n = max(tail_bytes, 1)
+    """(last cleaned ask, last whole reply), growing backwards by doubling until both are found, BOF, or the last
+    `TAIL_MAX_BYTES` have been read: then whatever was found is returned ("" for the other), so a transcript whose
+    last typed ask lies far back (long tool output since) is never read whole."""
+    cap = max(TAIL_MAX_BYTES, 1)
+    n = min(max(tail_bytes, 1), cap)
     while True:
         ask = reply = ""
         for line in reversed(_tail_lines(path, size, n)):
@@ -156,9 +160,9 @@ def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True)
                 ask = clean_user_text(text)
             if reply and (ask or not want_ask):
                 break
-        if (reply and (ask or not want_ask)) or n >= size:
+        if (reply and (ask or not want_ask)) or n >= size or n >= cap:
             return ask, reply
-        n *= 2
+        n = min(n * 2, cap)
 
 
 def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, int, int, str | None, str | None]:
