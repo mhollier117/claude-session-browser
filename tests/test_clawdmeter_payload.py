@@ -188,6 +188,66 @@ def test_only_changed_session_messages_are_resent_and_t_trims():
     assert sent_extras(lk) == [{"k": "se", "t": 0}]
 
 
+# -- sessions keep flowing when the usage poll fails --------------------------
+
+def _failing_poll(monkeypatch, *, token):
+    """No usage numbers: either no token at all, or the API call fails."""
+    monkeypatch.setattr(cm, "read_token", lambda: token)
+    monkeypatch.setattr(cm, "poll_usage_meta", lambda _tok: (None, {}))
+
+
+def _send_with_failed_poll(lk):
+    import asyncio
+    client = FakeClient()
+    asyncio.run(lk._send_once(client, poll=True))
+    return client.writes
+
+
+def test_sessions_still_sent_when_there_is_no_token(monkeypatch):
+    _failing_poll(monkeypatch, token=None)
+    lk = link({"se": [{"n": "Fix login", "a": "allow", "s": "n"}]})
+    writes = _send_with_failed_poll(lk)
+    assert writes == [{"k": "se", "i": 0, "t": 1, "n": "Fix login", "a": "allow", "s": "n"}]
+    assert lk.status()["last_error"]                       # the error is still shown
+    assert lk._last_payload is None                        # no usage numbers invented
+
+
+def test_sessions_still_sent_when_the_api_call_fails(monkeypatch):
+    _failing_poll(monkeypatch, token="tok")
+    rows = [{"n": "A", "a": "work coding", "s": "w"}]
+    lk = link({"se": rows})
+    assert [m["n"] for m in _send_with_failed_poll(lk)] == ["A"]
+    # The next failed poll only sends what changed.
+    assert _send_with_failed_poll(lk) == []
+    rows[0]["s"] = "n"
+    assert [(m["n"], m["s"]) for m in _send_with_failed_poll(lk)] == [("A", "n")]
+
+
+def test_failed_poll_sends_nothing_to_old_firmware_or_when_another_pc_is_shown(monkeypatch):
+    _failing_poll(monkeypatch, token=None)
+    ex = {"se": [{"n": "A", "a": "done", "s": "d"}]}
+    assert _send_with_failed_poll(link(ex, proto=1)) == []
+    lk = link(ex)
+    lk._set(shown=False)
+    assert _send_with_failed_poll(lk) == []
+
+
+def test_session_changes_are_noticed_before_any_usage_numbers_arrived():
+    rows = [{"n": "A", "a": "work coding", "s": "w"}]
+    lk = link({"se": rows})
+    assert lk._last_payload is None
+    assert not lk._anim_changed()                  # usage path: nothing to add to
+    assert lk._extras_changed()                    # sessions path: first list due
+    sent_extras(lk)
+    assert not lk._extras_changed()
+    rows[0]["s"] = "n"
+    assert lk._extras_changed()
+    assert not link({"se": rows}, proto=1)._extras_changed()
+    inactive = link({"se": rows})
+    inactive._set(shown=False)
+    assert not inactive._extras_changed()
+
+
 # -- requests from the device on REQ (0x01 refresh, 0x02 switch account) ------
 
 def test_parse_request():

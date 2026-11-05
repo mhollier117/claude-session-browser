@@ -839,6 +839,10 @@ class ClawdmeterLink:
                             # einen echten Request kosten.
                             if self._anim_changed():
                                 await self._send_once(client, poll=False)
+                            elif self._extras_changed():
+                                # Noch keine Nutzungszahlen (Abfrage
+                                # gescheitert): die Sessions trotzdem.
+                                await self._send_extras(client)
                             await self._maybe_send_system(client)
             finally:
                 self._live = None
@@ -967,6 +971,23 @@ class ClawdmeterLink:
                     or (self._proto >= 2 and self._extras_messages() != self._last_extras))
         except Exception:
             return False
+
+    def _extras_changed(self) -> bool:
+        """Sessions- oder Kontenliste geaendert, unabhaengig von den
+        Nutzungszahlen. Die Sessions kommen aus der lokalen Registry, nicht
+        aus der API: scheitert die Nutzungsabfrage (kein Token, API weg),
+        muessen sie trotzdem aktuell bleiben."""
+        if self._proto < 2 or not self._active():
+            return False
+        try:
+            return self._extras_messages() != self._last_extras
+        except Exception:
+            return False
+
+    async def _send_extras_without_usage(self, client) -> None:
+        """Nutzungsabfrage gescheitert: die Listen trotzdem schicken."""
+        if self._proto >= 2 and self._active():
+            await self._send_extras(client)
 
     def _extras_messages(self) -> dict:
         """Zusatzmeldungen fuer Protokoll 2, je Schluessel ein fertiger
@@ -1102,10 +1123,12 @@ class ClawdmeterLink:
             else:
                 token = read_token()
                 if not token:
+                    await self._send_extras_without_usage(client)
                     self._set(last_error=t("Kein Claude-Token gefunden"))
                     return
                 payload, meta = await asyncio.to_thread(poll_usage_meta, token)
             if not payload:
+                await self._send_extras_without_usage(client)
                 self._set(last_error=t("API-Abfrage fehlgeschlagen"))
                 return
             self._last_payload = payload
