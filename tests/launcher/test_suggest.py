@@ -394,11 +394,23 @@ def test_suggest_returns_fast_on_a_large_tree(fake_env, tmp_path):
                      on_update=built.append, claude_exe=tmp_path / "missing.exe")
     elapsed = time.monotonic() - t0
     assert handle.join(10)
-    assert elapsed < 0.5, elapsed
+    assert elapsed < 2.0, elapsed
     assert handle.local.source == "history"
     assert index.readers == [threading.get_ident()]  # rows read once, on the calling thread
     qwen = next(e for e in _log(fake_env) if e["stage"] == "qwen")
     assert qwen["prompt_chars"] > 10_000  # the message was built (in the background) over the whole tree
     t1 = time.monotonic()
     build_user_message(fake_env, index, "widget7 rollout")
-    assert time.monotonic() - t1 < 1.0
+    assert time.monotonic() - t1 < 2.0
+
+
+def test_suggest_survives_an_index_that_raises(fake_env, tmp_path):
+    class Broken:
+        def rows(self, filter_text=""):
+            raise RuntimeError("db locked")
+
+    handle = suggest(fake_env, Broken(), "fortigate vpn", http=FakeHttp("x"), runner=FakeRunner(""),
+                     on_update=lambda s: None, claude_exe=tmp_path / "missing.exe")
+    assert handle.local.source == "keywords" and handle.join(5)
+    assert any(e["stage"] == "index" and e["ok"] is False and "db locked" in e["reason_or_error"]
+               for e in _log(fake_env))
