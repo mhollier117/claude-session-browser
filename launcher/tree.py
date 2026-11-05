@@ -91,4 +91,4 @@ def resolve_fragment(env: Env, folder: Path, fragment: str) -> list[Path]:
 
 
 def slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return re.sub(r"[^a-z0-9._-]+", "_", name.lower()).strip("_")

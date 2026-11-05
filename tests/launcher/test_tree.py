@@ -44,6 +44,21 @@ def test_resolve_fragment_cl_ba_bi(fake_env):
 
 def test_slug():
     assert slug("Stackjack rip, phase 2!") == "stackjack_rip_phase_2"
+    assert slug("v1.2-Final") == "v1.2-final"
+    assert slug("-x_") == "-x"
+
+
+def test_children_counts_whole_components_case_insensitively(fake_env):
+    r = fake_env.root
+    (r / "work" / "network").mkdir()
+    network, net_upper = r / "work" / "network", str(r) + r"\WORK\Net"
+    write_claude_session(fake_env, network, "w1", [_u("network one", network)])
+    write_claude_session(fake_env, r / "work" / "net", "w2", [_u("net upper", net_upper)])
+    idx = _index(fake_env)
+    idx.refresh()
+    by = {c.name: c.stats for c in children(fake_env, idx, r / "work")}
+    assert by["network"].sessions == 1 and by["network"].names == ["network one"]
+    assert by["net"].sessions == 1 and by["net"].names == ["net upper"]
 
 
 def test_children_filters_dirs_and_kinds(fake_env):
