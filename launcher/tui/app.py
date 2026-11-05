@@ -114,7 +114,8 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
                            height=s.rows, status=state.footer_status())
 
     list_window = Window(FormattedTextControl(list_fragments, focusable=True, show_cursor=False))
-    preview = TextArea(read_only=True, scrollbar=True, wrap_lines=False, lexer=_PreviewLexer(), focusable=True)
+    preview = TextArea(read_only=True, scrollbar=True, wrap_lines=False,  # render_preview wraps by cells
+                        lexer=_PreviewLexer(), focusable=True)
     preview.window.always_hide_cursor = Condition(lambda: True)
 
     kb = KeyBindings()
@@ -178,8 +179,7 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
 
     @kb.add("escape", filter=in_list, eager=True)  # eager: arrows are decoded before this, so no wait
     def _escape(event) -> None:
-        if not state.escape():
-            event.app.exit(result=None)
+        state.escape()  # clears an active filter; only q and ctrl-c quit
 
     @kb.add("<any>", filter=in_list)
     def _typed(event) -> None:

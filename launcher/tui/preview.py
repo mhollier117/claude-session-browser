@@ -1,8 +1,9 @@
 """The full-screen preview: a pure renderer from an index row (plus its whole last reply) to wrapped text."""
 from __future__ import annotations
 
-import textwrap
 from datetime import datetime
+
+from prompt_toolkit.utils import get_cwidth
 
 from ..index import Row
 from ..launch import Launch
@@ -22,15 +23,47 @@ def human_size(size: int) -> str:
     return f"{size / 1024 ** 3:.1f} GB"
 
 
+def _chunks(word: str, room: int) -> list[str]:
+    """`word` cut into pieces of at most `room` terminal cells (a wide character is never split)."""
+    out, cur, used = [], "", 0
+    for ch in word:
+        w = get_cwidth(ch)
+        if cur and used + w > room:
+            out.append(cur)
+            cur, used = "", 0
+        cur += ch
+        used += w
+    return out + [cur] if cur else out
+
+
+def _wrap_para(para: str, width: int, indent: str) -> list[str]:
+    """Greedy word wrap counted in terminal cells, so wide (CJK, emoji) text never runs past `width`."""
+    room = max(1, width - get_cwidth(indent))
+    words = [c for w in para.split() for c in (_chunks(w, room) if get_cwidth(w) > room else [w])]
+    lines, cur, used = [], "", 0
+    for word in words:
+        ww = get_cwidth(word)
+        if cur and used + 1 + ww > room:
+            lines.append(cur)
+            cur, used = word, ww
+        elif cur:
+            cur, used = cur + " " + word, used + 1 + ww
+        else:
+            cur, used = word, ww
+    if cur:
+        lines.append(cur)
+    return [indent + line for line in lines]
+
+
 def _wrap(text: str, width: int, indent: str = _INDENT) -> list[str]:
-    """`text` wrapped to `width` columns (indent included), keeping its own line breaks and blank lines."""
+    """`text` wrapped to `width` cells (indent included), keeping its own line breaks and blank lines."""
     out: list[str] = []
-    for para in (text or "").replace("\r\n", "\n").replace("\t", "    ").split("\n"):
+    for para in "".join(ch if ch.isprintable() or ch == "\n" else " "
+                        for ch in (text or "").replace("\r\n", "\n").replace("\t", "    ")).split("\n"):
         if not para.strip():
             out.append("")
             continue
-        out += textwrap.wrap(para, max(10, width), initial_indent=indent, subsequent_indent=indent,
-                             break_long_words=True, break_on_hyphens=False, drop_whitespace=True) or [""]
+        out += _wrap_para(para, max(10, width), indent) or [""]
     while out and not out[-1]:
         out.pop()
     while out and not out[0]:
@@ -60,7 +93,7 @@ def render_preview(row: Row, full_reply: str, width: int, *, launch: Launch | No
     stamp = datetime.fromtimestamp(row.last_activity).strftime("%Y-%m-%d %H:%M") if row.last_activity else "—"
     meta = f"{row.store} · {stamp} · {row.user_msgs + row.assistant_msgs} messages · {human_size(row.size)}"
     name = " ".join((row.display_name or "").split())
-    if len(name) + 3 + len(meta) <= w:
+    if get_cwidth(name) + 3 + get_cwidth(meta) <= w:
         lines = [f"{name}   {meta}"]
     else:
         lines = _wrap(name, w, "") + _wrap(meta, w, "")
