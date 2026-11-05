@@ -9401,6 +9401,8 @@ function lnOnName(){
     const f=document.getElementById('ln-nf-name'); if(f) f.value=LN.nf.name;
   }
   if(LN.msg && LN.msg.kind==='err') lnClearMsg();
+  LN.seq++; clearTimeout(LN.pollT);   // an answer for the previous name must not land meanwhile
+  if(LN.suggWaiting){ LN.suggWaiting=false; lnRenderSugg(); }
   clearTimeout(LN.debT);
   LN.debT=setTimeout(()=>lnSuggest(name), 400);
 }
@@ -9423,7 +9425,10 @@ async function lnSuggest(name){
     try{ s=await api.launcher_suggest_poll(r.token); }catch(e){ s={ok:false}; }
     if(my!==LN.seq || !lnIsOpen()) return;
     if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }   // keep the local answer
-    if(s && typeof s.path==='string'){ LN.sugg=s; LN.suggWaiting=false; lnRenderSugg(); return; }
+    if(s && typeof s.path==='string'){   // a model answer replaces the local one; anything else keeps it
+      if(s.source==='qwen' || s.source==='claude') LN.sugg=s;
+      LN.suggWaiting=false; lnRenderSugg(); return;
+    }
     if(Date.now()-started>=20000){ LN.suggWaiting=false; lnRenderSugg(); return; }
     LN.pollT=setTimeout(tick, 500);
   };
@@ -9461,7 +9466,8 @@ function lnApplyDefaultWrapper(){
   const c=LN.nf ? LN.cols.find(x=>x.rel===LN.nf.rel) : lnCur();
   if(c && c.default_wrapper) LN.wrapper=c.default_wrapper;
 }
-function lnSetWrapper(w){ LN.wrapper=w; LN.wrapperSet=true; lnRenderWrappers(); }
+function lnWrapperList(){ return LN_WRAPPERS.length ? LN_WRAPPERS : (LN.wrapper ? [LN.wrapper] : []); }
+function lnSetWrapperAt(i){ const w=lnWrapperList()[i]; if(w){ LN.wrapper=w; LN.wrapperSet=true; lnRenderWrappers(); } }
 // whether the main button starts a session (and the wrapper matters)
 function lnLaunches(){
   if(LN.nf) return LN.nf.kind==='project';
@@ -9490,7 +9496,8 @@ function lnOpenNewFolder(i){
 }
 function lnBackFromNf(){ LN.nf=null; lnClearMsg(); lnApplyDefaultWrapper(); lnRender(); }
 function lnNfName(v){ if(LN.nf){ LN.nf.name=v; LN.nf.touched=true; } }
-function lnSetKind(k){ if(LN.nf){ LN.nf.kind=k; lnRender(); } }
+function lnNfKinds(){ const c=LN.nf && LN.cols.find(x=>x.rel===LN.nf.rel); return (c && c.kind_options) || []; }
+function lnSetKindAt(i){ const k=lnNfKinds()[i]; if(LN.nf && k){ LN.nf.kind=k; lnRender(); } }
 function lnSetGithub(g){ if(LN.nf){ LN.nf.github=g; lnRenderNf(); } }
 
 // ---- create / start
@@ -9520,29 +9527,36 @@ async function lnSubmit(payload){
   let r;
   try{ r=await api.launcher_new(payload); }catch(e){ r={ok:false, error:String(e)}; }
   const notes=(r && r.warnings) || [];
-  if(openId!==LN.openId){   // the dialog was closed meanwhile
-    if(r && r.ok && r.launched) toast(t('Session gestartet ✓'));
+  const started=()=>{
+    if(notes.length) toast(t('Session gestartet – Hinweise: {hinweise}', {hinweise: notes.join('; ')}), 9000);
+    else toast(t('Session gestartet ✓'));
+  };
+  if(openId!==LN.openId){   // the dialog was closed meanwhile: only report the outcome
+    if(r && r.ok!==false && r.launched) started();
+    else if(r && r.ok===false) toast(r.error || t('Das hat nicht geklappt.'), 9000);
     return;
   }
   LN.busy=false;
-  if(!r || r.ok===false){
+  const failed=!r || r.ok===false;
+  if(failed && !(r && r.created)){
     lnSetMsg((r && r.error) || t('Das hat nicht geklappt.'), 'err');
     lnRenderActions();
     return;
   }
-  if(r.launched){
+  if(!failed && r.launched){
     lnClose();
-    if(notes.length) toast(t('Session gestartet – Hinweise: {hinweise}', {hinweise: notes.join('; ')}), 9000);
-    else toast(t('Session gestartet ✓'));
+    started();
     return;
   }
-  // A grouping folder was created: walk into it (the parent column is
-  // fetched again so the new folder shows there too).
+  // The folder exists now: a grouping folder, or a project whose session did
+  // not start. Walk into it (the parent column is fetched again so the new
+  // folder shows there too); "Start here" is then one click away.
   LN.nf=null;
   const parent=LN.cols.findIndex(c=>lnSame(c.rel, payload.rel));
   LN.cols=LN.cols.slice(0, Math.max(0, parent));
   lnSetMsg(t('Ordner angelegt: {ordner}', {ordner: lnPathText(r.rel)})
-           + (notes.length ? '\n' + t('Hinweise: {hinweise}', {hinweise: notes.join('; ')}) : ''), 'ok');
+           + (failed ? '\n' + (r.error || t('Das hat nicht geklappt.')) : '')
+           + (notes.length ? '\n' + t('Hinweise: {hinweise}', {hinweise: notes.join('; ')}) : ''), failed ? 'err' : 'ok');
   await lnGoto(r.rel);
 }
 
@@ -9581,7 +9595,7 @@ function lnRenderCrumb(){
   const ch=parent && (parent.children||[]).find(x=>lnSame(x.rel, c.rel));
   const n=ch ? ch.sessions : 0;
   let html=esc(t('Ausgewählt:')) + ' <b>' + esc(lnPathText(c.rel)) + '</b> · '
-    + esc(n ? t('{n} Sessions', {n}) : t('noch keine Sessions'));
+    + esc(n===1 ? t('{n} Session', {n}) : n ? t('{n} Sessions', {n}) : t('noch keine Sessions'));
   if(ch && ch.last_activity) html+=' · ' + esc(t('zuletzt aktiv {wann}', {wann: lnAge(ch.last_activity)}));
   el.innerHTML=html;
 }
@@ -9589,12 +9603,11 @@ function lnRenderNf(){
   const el=document.getElementById('ln-nf'), nf=LN.nf;
   el.hidden=!nf;
   if(!nf){ el.innerHTML=''; return; }
-  const col=LN.cols.find(c=>c.rel===nf.rel);
-  const kinds=(col && col.kind_options) || [];
+  const kinds=lnNfKinds();
   const kindHtml=(kinds.length===1 && kinds[0]==='organisational')
     ? `<div class="ln-note">${esc(lnKindHint('organisational'))}</div>`
-    : kinds.map(k=>`<label class="ln-kind"><input type="radio" name="ln-kind" ${k===nf.kind?'checked':''}
-        onchange="lnSetKind('${k}')"><span>${esc(lnKindLabel(k))}</span><span class="h">${esc(lnKindHint(k))}</span></label>`).join('');
+    : kinds.map((k,i)=>`<label class="ln-kind"><input type="radio" name="ln-kind" ${k===nf.kind?'checked':''}
+        onchange="lnSetKindAt(${i})"><span>${esc(lnKindLabel(k))}</span><span class="h">${esc(lnKindHint(k))}</span></label>`).join('');
   const github=nf.kind!=='project' ? '' :
     `<div class="ln-field"><div class="ln-lbl">${esc(t('GitHub-Repo'))}</div><div class="ln-chips">`
     + [['personal', t('persönlich')], ['work', t('Arbeit')]].map(([g,label])=>
@@ -9608,9 +9621,8 @@ function lnRenderNf(){
 }
 function lnRenderWrappers(){
   document.getElementById('ln-wrap-field').hidden=!lnLaunches();
-  const list=LN_WRAPPERS.length ? LN_WRAPPERS : (LN.wrapper ? [LN.wrapper] : []);
-  document.getElementById('ln-wrappers').innerHTML=list.map(w=>
-    `<button class="ln-chip${w===LN.wrapper?' on':''}" onclick="lnSetWrapper('${w}')">${esc(w)}</button>`).join('');
+  document.getElementById('ln-wrappers').innerHTML=lnWrapperList().map((w,i)=>
+    `<button class="ln-chip${w===LN.wrapper?' on':''}" onclick="lnSetWrapperAt(${i})">${esc(w)}</button>`).join('');
 }
 function lnRenderActions(){
   const el=document.getElementById('ln-actions'), c=lnCur();
