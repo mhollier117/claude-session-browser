@@ -213,6 +213,50 @@ its manifest, and the store shows what it asks for. Starting the app with
 Writing one is described in [docs/plugins.md](docs/plugins.md); `plugins/ssd-health/`
 is a complete example.
 
+## cc launcher
+
+`cc` resumes or starts a Claude Code or Qwen session in the terminal tab you are
+already in: one list of every Claude and Qwen session, and a short walk for a new one.
+The installer puts `cc.exe` and `cc.ps1` next to `ClaudeSessionBrowser.exe`. Add one
+line to your PowerShell profile (`notepad $PROFILE`):
+
+```powershell
+. "$env:LOCALAPPDATA\Programs\ClaudeSessionBrowser\cc.ps1"
+```
+
+That is the default install folder; if you installed elsewhere, use `. "<app dir>\cc.ps1"`.
+Then type `cc`. The function changes to the session's folder and runs the wrapper in
+that tab; `cc.ps1` prefers the `cc.exe` beside it.
+
+- `cc`: the resume list. `cc new [name]`: start a new session. `cc index`: refresh the
+  index only. `cc --json`: print every session as JSON.
+- **List keys:** ↑↓ move · type to filter · space preview · enter resume · `o` open
+  folder · `w` change wrapper · `n` new · `q` quit. `n`, `o`, `w` and `q` are commands
+  while you are not typing a filter, so a filter that begins with one of those letters
+  starts with `/` (`/n`, `/queue`). Esc clears the filter.
+- **New session walk:** name, then a destination picker, then the wrapper. enter
+  confirms or chooses, esc goes back, ctrl-c quits.
+
+**How the destination suggestion works.** Local answers (your history, then keywords,
+then the root folder) appear at once and the picker never waits. In the background the
+self-hosted Qwen endpoint is asked first (only reachable on the VPN, 6 seconds in
+total); Claude Code (Haiku) runs alongside, using the Claude session you are already
+signed in with (20 seconds). The first valid model answer is offered once. Every attempt
+is appended to `%LOCALAPPDATA%\cc-launcher\suggest.log` (stage, name, latency, outcome
+and prompt size; never the API key).
+
+**Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index.sqlite`.
+Each location can be overridden with an environment variable:
+
+| Variable | Default | What it is |
+|---|---|---|
+| `CC_LAUNCHER_ROOT` | `C:\claude-code` | project tree the picker browses |
+| `CC_LAUNCHER_DATA` | `%LOCALAPPDATA%\cc-launcher` | index, `suggest.log`, remembered wrappers |
+| `CC_LAUNCHER_QWEN_HOME` | `~\.qwen` | Qwen's session store |
+| `CLAUDE_CONFIG_DIR` | `~\.claude` | Claude's session store |
+
+The session browser's **New session** dialog uses the same launcher.
+
 ## Settings
 
 1. Open the **Settings** tab
