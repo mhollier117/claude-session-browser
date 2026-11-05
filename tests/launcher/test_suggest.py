@@ -7,10 +7,10 @@ import pytest
 
 from launcher.index import Index
 from launcher.scaffold import Result
-from launcher.suggest import (KEYWORDS, Suggestion, stage_claude, stage_history, stage_keywords, stage_qwen,
-                              stage_root, suggest, validate)
-from launcher.suggest_prompt import SYSTEM_PROMPT
-from launcher_helpers import write_claude_session
+from launcher.suggest import (KEYWORDS, Suggestion, default_http, stage_claude, stage_history, stage_keywords,
+                              stage_qwen, stage_root, suggest, validate)
+from launcher.suggest_prompt import SYSTEM_PROMPT, build_user_message
+from launcher_helpers import make_row, write_claude_session
 
 _KEY = "sk-test-SECRET-123"
 _ENV_KEY = "QWEN_KEY_TEST"
@@ -63,8 +63,8 @@ class FakeRunner:
     def __init__(self, stdout="", code=0, before=None):
         self.calls, self.stdout, self.code, self.before = [], stdout, code, before
 
-    def run(self, args, cwd, env=None, timeout=60):
-        self.calls.append({"args": args, "cwd": cwd, "timeout": timeout})
+    def run(self, args, cwd, env=None, timeout=60, input=None):
+        self.calls.append({"args": args, "cwd": cwd, "timeout": timeout, "env": env, "input": input})
         if self.before:
             self.before()
         return Result(self.code, self.stdout, "")
@@ -96,6 +96,8 @@ def test_validate_rejects_missing_path_and_bad_slug(fake_env):
     assert validate(fake_env, {"path": ".", "new_folder": "x"}) is None  # the root itself
     assert validate(fake_env, {"path": r"..\outside"}) is None
     assert validate(fake_env, {"path": None}) is None
+    for null in ("null", " NULL ", "None", "none"):
+        assert validate(fake_env, {"path": r"work\vendors", "new_folder": null}).new_folder is None, null
     assert validate(fake_env, ["not", "a", "dict"]) is None
 
 
@@ -169,7 +171,10 @@ def test_qwen_stage_skips_without_settings_and_on_errors(fake_env, index):
 
 # ---- claude --------------------------------------------------------------------------------------------------------
 
-def test_claude_stage_parses_result_json(fake_env, index, tmp_path):
+def test_claude_stage_parses_result_json(fake_env, index, tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-leak")
+    monkeypatch.setenv("X_KEEP", "kept")
     exe = tmp_path / "claude.exe"
     exe.write_text("")
     runner = FakeRunner(_claude_out(_answer(r"home\ai", "ollama_bench", "medium", "local models")))
@@ -179,8 +184,11 @@ def test_claude_stage_parses_result_json(fake_env, index, tmp_path):
     assert call["cwd"] == fake_env.data_dir / "suggest-cwd" and call["cwd"].is_dir()
     assert call["timeout"] <= 20
     args = call["args"]
-    assert args[0] == str(exe) and args[1] == "-p" and args[2].startswith("Session name: ollama bench\n")
-    assert args[3:] == ["--model", "haiku", "--output-format", "json", "--system-prompt", SYSTEM_PROMPT,
+    assert call["input"].startswith("Session name: ollama bench\n")  # the user message goes on stdin ...
+    assert not any("Session name" in a for a in args)  # ... never into argv
+    assert call["env"]["X_KEEP"] == "kept"
+    assert "ANTHROPIC_API_KEY" not in call["env"] and "ANTHROPIC_AUTH_TOKEN" not in call["env"]
+    assert args == [str(exe), "-p", "--model", "haiku", "--output-format", "json", "--system-prompt", SYSTEM_PROMPT,
                         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "",
                         "--no-session-persistence"]
     assert _log(fake_env)[-1]["stage"] == "claude" and _log(fake_env)[-1]["ok"] is True
@@ -195,9 +203,9 @@ def test_claude_stage_skips_on_error_exit_or_missing_exe(fake_env, index, tmp_pa
     assert stage_claude(FakeRunner("not json"), exe=exe)(fake_env, index, "x", _soon()) is None
     runner = FakeRunner(_claude_out(good))
     assert stage_claude(runner, exe=tmp_path / "missing.exe")(fake_env, index, "x", _soon()) is None
-    assert stage_claude(runner, exe=exe, message="x" * 40_000)(fake_env, index, "x", _soon()) is None
     assert runner.calls == []
-    assert "Windows limit" in _log(fake_env)[-1]["reason_or_error"]
+    big = stage_claude(runner, exe=exe, message="Session name: x\n" + "y" * 60_000)(fake_env, index, "x", _soon())
+    assert big is not None and len(runner.calls[0]["input"]) > 60_000  # no command-line limit on stdin
 
 
 # ---- local stages ---------------------------------------------------------------------------------------------------
@@ -229,6 +237,8 @@ def test_keywords_stage_bucket_only(fake_env, index):
     assert s.path == fake_env.root / "work" / "net" and s.new_folder is None and s.source == "keywords"
     assert stage_keywords(fake_env, index, "something unrelated", _soon()) is None
     assert stage_keywords(fake_env, index, "rewst jinja", _soon()) is None  # bucket missing on disk
+    assert stage_keywords(fake_env, index, "concert tickets", _soon()) is None  # whole words only
+    assert stage_keywords(fake_env, index, "Cert renewal", _soon()).path == fake_env.root / "work" / "net"
     assert KEYWORDS["work\\net"][:3] == ("forti", "fortigate", "fortios")
 
 
@@ -297,3 +307,98 @@ def test_suggest_survives_raising_on_update(fake_env, index, tmp_path):
     assert handle.wait(5).source == "qwen"
     assert handle.join(5) and len(seen) == 1
     assert any(e["stage"] == "on_update" and e["ok"] is False for e in _log(fake_env))
+
+
+def test_qwen_stage_falls_back_to_model_name_when_models_call_fails(fake_env, index):
+    _qwen_settings(fake_env)
+    inner = FakeHttp(_answer(r"work\net"))
+
+    def http(method, url, headers, body, timeout):
+        if url.endswith("/models"):
+            raise OSError("models endpoint down")
+        return inner(method, url, headers, body, timeout)
+
+    s = stage_qwen(http)(fake_env, index, "vpn", _soon())
+    assert s is not None and inner.calls[0]["body"]["model"] == "qwen3-vl-huihui"
+
+
+def test_default_http_does_not_follow_redirects():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen = []
+
+    class Quiet(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    class Target(Quiet):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+
+    class Redirect(Quiet):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/stolen")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    redirect = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    servers = [target, redirect]
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
+    for t in threads:
+        t.start()
+    try:
+        status, _ = default_http("GET", f"http://127.0.0.1:{redirect.server_port}/v1/models",
+                                 {"Authorization": "Bearer secret"}, None, 5)
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+        for t in threads:
+            t.join(5)
+    assert status == 302 and seen == []  # the key never reached the redirect target
+
+
+class _ListIndex:
+    """An index stand-in serving a fixed row list; records which threads read it."""
+
+    def __init__(self, rows):
+        self._rows, self.readers = rows, []
+
+    def rows(self, filter_text=""):
+        self.readers.append(threading.get_ident())
+        return self._rows
+
+
+def test_suggest_returns_fast_on_a_large_tree(fake_env, tmp_path):
+    _qwen_settings(fake_env)
+    r = fake_env.root
+    folders = []
+    for c in range(30):
+        for p in range(9):
+            folder = r / "work" / "clients" / f"client{c:02d}" / f"proj{p}"
+            folder.mkdir(parents=True)
+            folders.append(folder)
+    rows = [make_row(folders[i % len(folders)], f"session {i} about widget{i % 50}", 1_699_000_000.0 + i, f"s{i}")
+            for i in range(2000)]
+    index = _ListIndex(rows)
+    built = []
+    t0 = time.monotonic()
+    handle = suggest(fake_env, index, "widget7 rollout", http=FakeHttp("not json"), runner=FakeRunner(""),
+                     on_update=built.append, claude_exe=tmp_path / "missing.exe")
+    elapsed = time.monotonic() - t0
+    assert handle.join(10)
+    assert elapsed < 0.5, elapsed
+    assert handle.local.source == "history"
+    assert index.readers == [threading.get_ident()]  # rows read once, on the calling thread
+    qwen = next(e for e in _log(fake_env) if e["stage"] == "qwen")
+    assert qwen["prompt_chars"] > 10_000  # the message was built (in the background) over the whole tree
+    t1 = time.monotonic()
+    build_user_message(fake_env, index, "widget7 rollout")
+    assert time.monotonic() - t1 < 1.0

@@ -43,18 +43,25 @@ class Result:
 @dataclass
 class Runner:
     """Runs a command without a shell or console input. `env`, when given, is the complete environment for this
-    one call (default: the current environment); git is never allowed to prompt for credentials."""
+    one call (default: the current environment); git is never allowed to prompt for credentials. `input`, when
+    given, is written to the command's stdin as exact UTF-8 bytes (no newline translation); otherwise stdin is
+    empty. Output is decoded as UTF-8 with CRLF read as LF."""
 
-    def run(self, args: list[str], cwd: Path, env: dict | None = None, timeout: float = 60) -> Result:
+    def run(self, args: list[str], cwd: Path, env: dict | None = None, timeout: float = 60,
+            input: str | None = None) -> Result:
         full = {**(os.environ if env is None else env), "GIT_TERMINAL_PROMPT": "0"}
+        stdin = {"input": input.encode("utf-8")} if input is not None else {"stdin": subprocess.DEVNULL}
         try:
-            p = subprocess.run(args, cwd=cwd, env=full, stdin=subprocess.DEVNULL, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace", timeout=timeout)
+            p = subprocess.run(args, cwd=cwd, env=full, **stdin, capture_output=True, timeout=timeout)
         except FileNotFoundError as e:
             return Result(127, "", str(e))
         except subprocess.TimeoutExpired:
             return Result(124, "", f"timed out after {timeout}s: {args[0]}")
-        return Result(p.returncode, p.stdout or "", p.stderr or "")
+        return Result(p.returncode, _text(p.stdout), _text(p.stderr))
+
+
+def _text(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace").replace("\r\n", "\n")
 
 
 @dataclass

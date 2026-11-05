@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .index import FolderStats, Index
+from .index import FolderStats, Index, Row
 from .paths import Env
 
 Kind = Literal["area", "bucket", "client", "project", "container", "root"]
@@ -63,18 +63,38 @@ def _listed(folder: Path) -> list[Path]:
                   key=lambda p: p.name.lower())
 
 
-def children(env: Env, index: Index, folder: Path) -> list[Child]:
-    """Sub-folders of `folder` with their session stats. The index is read once for all children; a session counts
-    for a child when its cwd is that folder or beneath it (case-insensitive, whole path components)."""
-    rows = index.rows()
+_EMPTY = FolderStats(sessions=0, last_activity=None, names=[])
+
+
+def folder_stats_map(rows: list[Row]) -> dict[tuple[str, ...], FolderStats]:
+    """Stats for every folder that holds a session at or below it, keyed by its lower-cased path parts, in one pass
+    over `rows` (rows × depth): each session counts for its cwd and every ancestor. Same semantics as
+    `Index.folder_stats` (recursive, case-insensitive, whole components, names = 3 most recent)."""
+    out: dict[tuple[str, ...], FolderStats] = {}
+    for r in sorted((r for r in rows if r.cwd), key=lambda r: -r.last_activity):
+        parts = tuple(p.lower() for p in Path(r.cwd).parts)
+        for i in range(1, len(parts) + 1):
+            st = out.get(parts[:i])
+            if st is None:  # rows come newest first, so the first row seen sets last_activity
+                out[parts[:i]] = FolderStats(1, r.last_activity, [r.display_name])
+            else:
+                st.sessions += 1
+                if len(st.names) < 3:
+                    st.names.append(r.display_name)
+    return out
+
+
+def children(env: Env, index: Index, folder: Path,
+             stats: dict[tuple[str, ...], FolderStats] | None = None) -> list[Child]:
+    """Sub-folders of `folder` with their session stats. A session counts for a child when its cwd is that folder or
+    beneath it (case-insensitive, whole path components). Pass `stats` (from `folder_stats_map`) when listing many
+    folders, so the index is read and grouped once; otherwise it is built here from one `index.rows()`."""
+    stats = folder_stats_map(index.rows()) if stats is None else stats
     out = []
     for path in _listed(folder):
-        want = tuple(p.lower() for p in path.parts)
-        hits = sorted((r for r in rows if r.cwd and tuple(p.lower() for p in Path(r.cwd).parts)[:len(want)] == want),
-                      key=lambda r: -r.last_activity)
-        stats = FolderStats(sessions=len(hits), last_activity=max((r.last_activity for r in hits), default=None),
-                            names=[r.display_name for r in hits[:3]])
-        out.append(Child(path.name, path, level_kind(env.root, path), stats))
+        st = stats.get(tuple(p.lower() for p in path.parts), _EMPTY)
+        out.append(Child(path.name, path, level_kind(env.root, path),
+                         FolderStats(st.sessions, st.last_activity, list(st.names))))
     return out
 
 

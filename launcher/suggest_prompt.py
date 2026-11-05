@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .display import age, rel_or_abs
-from .index import Index, Row
+from .index import Index
 from .paths import Env
-from .tree import children
+from .tree import children, folder_stats_map
 
 # Copied verbatim from the spec, "Prompt (stages 1 and 2, same content)" (the "Decide in this order" version).
 SYSTEM_PROMPT = r"""You place a new coding-assistant session into an existing folder tree. Reply with JSON only.
@@ -31,17 +31,6 @@ Output JSON: {"path": "<relative to C:\claude-code, existing folder>", "new_fold
 
 _AREA_DEPTH = {"work": 4, "home": 4, "cc": 2}  # levels listed below each area
 _RECENT = 15
-_DASH = "—"
-
-
-class _Snapshot:
-    """One `index.rows()` result served to `tree.children` for every folder, so the index is read once."""
-
-    def __init__(self, rows: list[Row]):
-        self._rows = rows
-
-    def rows(self, filter_text: str = "") -> list[Row]:
-        return self._rows
 
 
 @dataclass
@@ -52,7 +41,7 @@ class _Line:
     last_activity: float | None
 
 
-def _tree(env: Env, snap: _Snapshot) -> list[_Line]:
+def _tree(env: Env, index: Index, stats: dict) -> list[_Line]:
     now = env.now()
     out: list[_Line] = []
 
@@ -63,10 +52,10 @@ def _tree(env: Env, snap: _Snapshot) -> list[_Line]:
             text += " · " + ", ".join(json.dumps(n, ensure_ascii=False) for n in st.names)
         out.append(_Line(depth, text, st.sessions, st.last_activity))
         if depth < limit:
-            for grandchild in children(env, snap, child.path):
+            for grandchild in children(env, index, child.path, stats):
                 add(grandchild, depth + 1, limit)
 
-    for area in children(env, snap, env.root):
+    for area in children(env, index, env.root, stats):
         limit = _AREA_DEPTH.get(area.name.lower())
         if limit is not None:
             add(area, 0, limit)
@@ -87,10 +76,10 @@ def _fit(lines: list[_Line], max_lines: int) -> list[_Line]:
 
 def build_user_message(env: Env, index: Index, session_name: str, max_lines: int = 400) -> str:
     """The user message: session name, the tree (depth 4 under work and home, 2 under cc, empty folders included as
-    `path · 0 · —`), then the most recent sessions overall. Reads the index once."""
+    `path · 0 · —`), then the most recent sessions overall. Reads `index.rows()` once and groups the rows into
+    folder stats in one pass; `index` can be any object with that method."""
     rows = index.rows()
-    snap = _Snapshot(rows)
-    tree = _fit(_tree(env, snap), max_lines)
+    tree = _fit(_tree(env, index, folder_stats_map(rows)), max_lines)
     recent = [r for r in rows if r.cwd][:_RECENT]
     name = " ".join(session_name.split())
     parts = [

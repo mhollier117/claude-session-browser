@@ -245,6 +245,13 @@ def test_default_runner_has_no_stdin_and_no_git_prompt(tmp_path, monkeypatch):
     assert scaffold.Runner().run(["definitely-not-a-command-xyz"], tmp_path).code == 127
 
 
+def test_default_runner_pipes_input(tmp_path):
+    code = ("import sys; data = sys.stdin.buffer.read().decode('utf-8'); "
+            "print(len(data), data.startswith('Session name: x'), data.endswith('\\u00e9' * 3))")
+    r = scaffold.Runner().run([sys.executable, "-c", code], tmp_path, input="Session name: x\n" + "é" * 50_000)
+    assert r.code == 0 and r.out.split() == ["50016", "True", "True"]
+
+
 def test_work_account_not_signed_in_warns(fake_env, work_template):
     runner = _work_runner(**{"gh auth token --user mhollierBPT": (1, "", "no oauth token found for mhollierBPT")})
     c = create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", runner, "work")
