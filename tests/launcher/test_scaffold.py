@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,7 @@ def test_project_scaffold_personal(fake_env):
 def test_project_scaffold_runs_git_in_order(fake_env):
     runner = FakeRunner({"git rev-parse HEAD": (0, _SHA + "\n", "")})
     c = create_folder(fake_env.root / "cc", "tool", "project", "Tool", runner, "personal")
-    assert runner.calls[:3] == [["git", "init"], ["git", "add", "-A"], ["git", "commit", "-m", "chore: scaffold"]]
+    assert runner.calls[:3] == [["git", "init", "-b", "main"], ["git", "add", "-A"], ["git", "commit", "-m", "chore: scaffold"]]
     assert runner.calls.index(["gh", "repo", "create", "tool", "--private", "--source", ".", "--push"]) == 3
     assert json.loads((c.path / ".claude-project").read_text())["lastCommit"] == _SHA
 
@@ -107,7 +109,8 @@ def test_organisational_and_container_make_folder_only(fake_env, kind):
     assert runner.calls == [] and c.repo is None and c.warnings == []
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", ".hidden", "a/b", "a\\b", "../escape"])
+@pytest.mark.parametrize("name", ["", ".", "..", ".hidden", "a/b", "a\\b", "../escape", "D:evil", "C:evil",
+                                  "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b"])
 def test_bad_names_rejected_before_touching_disk(fake_env, name):
     parent = fake_env.root / "cc"
     before = sorted(p.name for p in parent.iterdir())
@@ -155,7 +158,7 @@ def test_work_account_sequence(fake_env, work_template):
     runner = _work_runner()
     c = create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", runner, "work")
     calls = [" ".join(a) for a in runner.calls]
-    assert calls[0] == "git init"
+    assert calls[0] == "git init -b main"
     i_cfg = calls.index("git config --local user.email mhollier@bastionpoint.com")
     assert i_cfg < calls.index("git commit -m chore: scaffold")
     assert "git config --local credential.https://github.com.helper " in calls
@@ -182,13 +185,64 @@ def test_work_account_never_writes_token(fake_env, work_template):
         assert not any(_TOKEN in a for a in args)
         if env and "GH_TOKEN" in env:
             assert args[0] == "gh" and args[1:3] in (["repo", "create"], ["repo", "view"])
-            assert env == {"GH_TOKEN": _TOKEN}
+            assert env["GH_TOKEN"] == _TOKEN
         else:
             assert not env or _TOKEN not in json.dumps(env)
-    assert any(env == {"GH_TOKEN": _TOKEN} for env in runner.envs)
+    assert sum(1 for env in runner.envs if env and env.get("GH_TOKEN") == _TOKEN) == 2
     assert all(_TOKEN not in w for w in c.warnings)
     for f in _files_under(fake_env.root.parent):
         assert _TOKEN not in f.read_text(encoding="utf-8", errors="ignore"), f
+
+
+def test_inherited_github_tokens_never_reach_gh_or_push(fake_env, work_template, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "gho_INHERITED")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_INHERITED")
+    personal = FakeRunner({"git rev-parse HEAD": (0, _SHA + "\n", "")})
+    create_folder(fake_env.root / "cc", "p", "project", "P", personal, "personal")
+    work = _work_runner()
+    create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", work, "work")
+    for runner in (personal, work):
+        for args, env in zip(runner.calls, runner.envs):
+            if args[0] == "gh" or args[:2] == ["git", "push"]:
+                assert env is not None, args
+                assert "GITHUB_TOKEN" not in env and env.get("GH_TOKEN") in (None, _TOKEN), args
+    gh_create = personal.envs[personal.calls.index(["gh", "repo", "create", "p", "--private", "--source", ".",
+                                                     "--push"])]
+    assert "GH_TOKEN" not in gh_create and gh_create.get("PATH") == os.environ.get("PATH")
+
+
+@pytest.mark.parametrize("victim", [".claude-project", "CLAUDE.local.md", "exclude"])
+def test_write_errors_after_push_become_warnings(fake_env, work_template, monkeypatch, victim):
+    real_write = Path.write_text
+
+    def failing_write(self, *a, **k):
+        if self.name == victim:
+            raise PermissionError(13, "denied", str(self))
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", failing_write)
+    c = create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", _work_runner(), "work")
+    assert c.repo == "mhollierBPT/wproj"
+    assert len(c.warnings) == 1 and "denied" in c.warnings[0]
+
+
+def test_token_call_output_never_reaches_warning(fake_env, work_template):
+    runner = _work_runner(**{"gh auth token --user mhollierBPT": (1, "gho_LEAKY", "gho_LEAKY")})
+    c = create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", runner, "work")
+    assert len(c.warnings) == 1 and "LEAKY" not in c.warnings[0]
+
+
+def test_default_runner_has_no_stdin_and_no_git_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("X_INHERITED", "yes")
+    code = ("import os, sys; data = sys.stdin.read(); "
+            "print(repr(data), os.environ.get('GIT_TERMINAL_PROMPT'), os.environ.get('X_ONLY'))")
+    env = {"X_ONLY": "1", "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+    r = scaffold.Runner().run([sys.executable, "-c", code], tmp_path, env=env)
+    assert r.code == 0 and r.out.split() == ["''", "0", "1"]
+    probe = "import os; print(os.environ.get('GIT_TERMINAL_PROMPT'), os.environ.get('X_INHERITED'))"
+    assert scaffold.Runner().run([sys.executable, "-c", probe], tmp_path).out.split() == ["0", "yes"]
+    assert scaffold.Runner().run(["definitely-not-a-command-xyz"], tmp_path).code == 127
 
 
 def test_work_account_not_signed_in_warns(fake_env, work_template):
@@ -210,7 +264,7 @@ def test_work_template_missing_falls_back_to_git_only(fake_env, tmp_path, monkey
     monkeypatch.setattr(scaffold, "WORK_TEMPLATE", tmp_path / "nope" / "missing.md")
     runner = _work_runner()
     c = create_folder(fake_env.root / "work" / "net", "wproj", "project", "W", runner, "work")
-    assert [" ".join(a) for a in runner.calls] == ["git init", "git add -A", "git commit -m chore: scaffold"]
+    assert [" ".join(a) for a in runner.calls] == ["git init -b main", "git add -A", "git commit -m chore: scaffold"]
     assert len(c.warnings) == 1 and "template" in c.warnings[0].lower()
     assert c.repo is None and not (c.path / ".claude-project").exists()
     assert not (c.path / "CLAUDE.local.md").exists()

@@ -42,12 +42,13 @@ class Result:
 
 @dataclass
 class Runner:
-    """Runs a command without a shell. `env` holds extra variables layered over the current environment for this
-    one call only."""
+    """Runs a command without a shell or console input. `env`, when given, is the complete environment for this
+    one call (default: the current environment); git is never allowed to prompt for credentials."""
 
     def run(self, args: list[str], cwd: Path, env: dict | None = None, timeout: float = 60) -> Result:
+        full = {**(os.environ if env is None else env), "GIT_TERMINAL_PROMPT": "0"}
         try:
-            p = subprocess.run(args, cwd=cwd, env={**os.environ, **env} if env else None, capture_output=True,
+            p = subprocess.run(args, cwd=cwd, env=full, stdin=subprocess.DEVNULL, capture_output=True,
                                text=True, encoding="utf-8", errors="replace", timeout=timeout)
         except FileNotFoundError as e:
             return Result(127, "", str(e))
@@ -67,11 +68,22 @@ class _Failed(Exception):
     pass
 
 
+_BAD_CHARS = set('/\\:<>"|?*')
+
+
 def _check_name(name: str) -> None:
     if not name or name in (".", "..") or name.startswith("."):
         raise ValueError(f"invalid folder name: {name!r}")
-    if any(sep in name for sep in ("/", "\\", os.sep, os.altsep or "/")):
-        raise ValueError(f"folder name must not contain a path separator: {name!r}")
+    if _BAD_CHARS & set(name):
+        raise ValueError(f"folder name must not contain a path separator or {''.join(sorted(_BAD_CHARS))}: {name!r}")
+
+
+def _clean_env(**extra: str) -> dict:
+    """The current environment without any inherited GitHub token (so a token left in the launcher's shell can't
+    redirect gh or git push to another account), plus `extra` for this one call."""
+    env = {k: v for k, v in os.environ.items() if k.upper() not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    env.update(extra)
+    return env
 
 
 def create_folder(parent: Path, name: str, kind: str, session_name: str, runner: Runner | None = None,
@@ -84,6 +96,8 @@ def create_folder(parent: Path, name: str, kind: str, session_name: str, runner:
         raise ValueError(f"unknown github account: {github!r}")
     runner = runner or Runner()
     path = Path(parent) / name
+    if path.parent != Path(parent):
+        raise ValueError(f"folder name escapes its parent: {name!r}")
     path.mkdir()
     created = Created(path)
     if kind == "client":
@@ -118,7 +132,7 @@ def _scaffold_project(created: Created, repo_name: str, runner: Runner, github: 
             created.warnings.append(f"work GitHub template unreadable ({WORK_TEMPLATE}): {e}; left a local repo only")
             github = None
     try:
-        run(["git", "init"], "git init")
+        run(["git", "init", "-b", "main"], "git init")
         if github == "work":  # before the first commit, so it carries the work identity
             for cfg in _WORK_CONFIG:
                 run(["git", "config", "--local", *cfg], "git config")
@@ -131,7 +145,8 @@ def _scaffold_project(created: Created, repo_name: str, runner: Runner, github: 
         return
     try:
         if github == "personal":
-            run(["gh", "repo", "create", repo_name, "--private", "--source", ".", "--push"], "gh repo create")
+            run(["gh", "repo", "create", repo_name, "--private", "--source", ".", "--push"], "gh repo create",
+                env=_clean_env())
             repo = f"{PERSONAL_OWNER}/{repo_name}"
         else:
             repo = _create_work_repo(path, repo_name, run, work_template)
@@ -139,24 +154,30 @@ def _scaffold_project(created: Created, repo_name: str, runner: Runner, github: 
     except _Failed as e:
         created.warnings.append(f"{e}; left a local repo only")
         return
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    (path / ".claude-project").write_text(json.dumps({"repo": repo, "lastCommit": sha, "lastSynced": stamp}),
-                                          encoding="utf-8")
     created.repo = repo
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        (path / ".claude-project").write_text(json.dumps({"repo": repo, "lastCommit": sha, "lastSynced": stamp}),
+                                              encoding="utf-8")
+    except OSError as e:
+        created.warnings.append(f"pushed to {repo} but could not write .claude-project: {e}")
     if github == "work":
-        created.warnings.extend(_work_local_files(path, repo, work_template))
+        try:
+            created.warnings.extend(_work_local_files(path, repo, work_template))
+        except OSError as e:
+            created.warnings.append(f"pushed to {repo} but could not write CLAUDE.local.md / .git/info/exclude: {e}")
 
 
 def _work_token(run) -> dict:
     """WORK-GITHUB.md: the token is fetched per command and lives only in that command's environment. Failure
     means mhollierBPT isn't signed in to gh; signing in is interactive, so it's left to the user."""
     try:
-        token = run(["gh", "auth", "token", "--user", WORK_USER], "gh auth token").strip()
-    except _Failed as e:
-        raise _Failed(f"{WORK_USER} is not signed in to gh (sign in per WORK-GITHUB.md step 1): {e}") from None
+        token = run(["gh", "auth", "token", "--user", WORK_USER], "gh auth token", env=_clean_env()).strip()
+    except _Failed:
+        token = ""  # nothing from the token call may reach a warning
     if not token:
         raise _Failed(f"{WORK_USER} is not signed in to gh (sign in per WORK-GITHUB.md step 1)")
-    return {"GH_TOKEN": token}
+    return _clean_env(GH_TOKEN=token)
 
 
 def _create_work_repo(path: Path, repo_name: str, run, template: str) -> str:
@@ -168,7 +189,7 @@ def _create_work_repo(path: Path, repo_name: str, run, template: str) -> str:
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", owner_name):
         raise _Failed(f"gh repo view returned an unexpected name: {owner_name!r}")
     run(["git", "remote", "add", "origin", f"https://github.com/{owner_name}.git"], "git remote add")
-    run(["git", "push", "-u", "origin", "HEAD"], "git push")
+    run(["git", "push", "-u", "origin", "HEAD"], "git push", env=_clean_env())
     return owner_name
 
 
