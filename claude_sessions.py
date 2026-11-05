@@ -4528,11 +4528,18 @@ class Api:
             return int(round((at - now) / 60.0)) if at > now else 0
 
         sessions = []
-        # Hoechstens 8 (clawdmeter.SE_MAX): je Session eine eigene Meldung.
-        for sess in (self._live_sessions() or [])[:8]:
-            item = {"n": sess["name"],
+        # Hoechstens SE_MAX, je Session eine eigene Meldung, in der Reihenfolge
+        # der Geraete-Ansicht (sessions_live.gadget_view). "s" ist der Zustand
+        # fuer das Geraet: eine Rueckfrage zaehlt erst nach WAIT_ARM_S.
+        # "ws" = seit wann sie wartet, Ortszeit in Sekunden wie "t" im
+        # Nutzungs-Payload; fehlt, wenn die Session nicht wartet.
+        for sess in self._clawd_gadget_sessions():
+            item = {"n": sess["gname"],
                     "a": BUDDY_STATE_MAP.get(_LIVE_ACT.get(sess["state"], "idle"), ""),
-                    "s": _CLAWD_STATE.get(sess["state"], "i")}
+                    "s": _CLAWD_STATE.get(sess["gstate"], "i")}
+            if sess["wait_since"] is not None:
+                ws = sess["wait_since"]
+                item["ws"] = int(ws) + time.localtime(ws).tm_gmtoff
             item.update(_clawd_context(sess, "c", "w"))
             sessions.append(item)
         accounts = []
@@ -4553,6 +4560,18 @@ class Api:
                 item["x"] = max(0, int((a["relogin_by"] - now) // 86400))
             accounts.append(item)
         return {"se": sessions, "ac": accounts}
+
+    def _clawd_gadget_sessions(self):
+        """Die offenen Sessions so, wie das Clawdmeter sie sieht
+        (sessions_live.gadget_view): Reihenfolge, Zustand mit Entprellung und
+        eindeutige Namen. _clawd_extras und _clawd_resolve_session muessen
+        dieselbe Liste nehmen, sonst zeigen Index und Name auf verschiedene
+        Sessions."""
+        from clawdmeter import SE_MAX, SE_NAME_MAX, _ascii
+        from sessions_live import gadget_view
+        return gadget_view(self._live_sessions() or [], time.time(),
+                           form=lambda n: _ascii(n, SE_NAME_MAX),
+                           name_max=SE_NAME_MAX, limit=SE_MAX)
 
     def _clawd_session(self):
         """Name + Hinweis fuer das Clawdmeter: welche Session die Animation
@@ -4689,20 +4708,20 @@ class Api:
         """Welche offene Session das Geraet meint: (Session, None) oder
         (None, Grund).
 
-        Index und Reihenfolge wie in _clawd_extras ("se", hoechstens SE_MAX).
-        Der Name kommt so zurueck, wie er geschickt wurde - ASCII, hoechstens
-        SE_NAME_MAX Zeichen, bei knapper MTU weiter gekuerzt - deshalb zaehlt
-        auch ein Anfang. Passt der Eintrag am Index nicht (die Liste hat sich
-        inzwischen umsortiert), wird der Name unter allen offenen Sessions
-        gesucht; nur ein eindeutiger Treffer gilt."""
-        from clawdmeter import SE_MAX, SE_NAME_MAX, _ascii
+        Index, Reihenfolge und Namen wie in _clawd_extras
+        (_clawd_gadget_sessions, hoechstens SE_MAX, Namen eindeutig). Der Name
+        kommt so zurueck, wie er geschickt wurde, bei knapper MTU weiter
+        gekuerzt - deshalb zaehlt auch ein Anfang. Passt der Eintrag am Index
+        nicht (die Liste hat sich inzwischen umsortiert), wird der Name in der
+        Liste gesucht; nur ein eindeutiger Treffer gilt."""
+        from clawdmeter import SE_MAX
         want = str(name or "").rstrip()
         if not want:
             return None, "no name"
-        liste = list(self._live_sessions() or [])
+        liste = list(self._clawd_gadget_sessions())
 
         def form(s):
-            return _ascii(s.get("name"), SE_NAME_MAX).rstrip()
+            return s["gname"]
 
         def passt(s):
             return form(s).startswith(want)

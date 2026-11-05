@@ -316,10 +316,13 @@ def test_app_bridge_sends_context_and_state():
     pytest.importorskip("webview")
     import claude_sessions as cs
 
+    import time as _time
+    waited_since = _time.time() - 60          # open for a minute: counts as waiting
+
     class FakeService:
         def latest(self):
             return [{"state": "needs_you", "name": "Fix login bug", "ctx_pct": 33,
-                     "ctx_window": 1_000_000},
+                     "ctx_window": 1_000_000, "since": waited_since},
                     {"state": "thinking", "name": "Other", "ctx_pct": 7, "ctx_window": 200_000},
                     {"state": "done", "name": "New", "ctx_pct": None, "ctx_window": None},
                     {"state": "sleep", "name": "Old"}]
@@ -333,9 +336,78 @@ def test_app_bridge_sends_context_and_state():
     assert [(x["s"], x.get("c"), x.get("w")) for x in ss] == [
         ("n", 33, "1M"), ("w", 7, "200K"), ("d", None, None), ("z", None, None)]
     assert "c" not in ss[2] and "w" not in ss[2]
+    # Wait start in local seconds, like "t" in the usage payload; only on waits.
+    assert ss[0]["ws"] == int(waited_since) + _time.localtime(waited_since).tm_gmtoff
+    assert all("ws" not in x for x in ss[1:])
     api._sessions_service = type("S", (), {"latest": lambda self: [
         {"state": "working", "name": "Fresh", "ctx_pct": None, "ctx_window": None}]})()
     assert api._clawd_session() == {"n": "Fresh", "h": ""}
     api._sessions_service = type("S", (), {"latest": lambda self: [
-        {"state": "working", "name": f"S{i}"} for i in range(11)]})()
+        {"state": "working", "name": f"S{i}", "started": i} for i in range(11)]})()
     assert [x["n"] for x in api._clawd_extras()["se"]] == [f"S{i}" for i in range(8)]
+
+
+def test_gadget_view_debounces_waits_and_orders_stably():
+    from sessions_live import gadget_view, WAIT_ARM_S
+    now = 10_000.0
+
+    def s(sid, state, since=now - 600, started=0.0, name=None):
+        return {"session_id": sid, "state": state, "since": since, "started": started,
+                "name": name or sid}
+
+    snap = [s("fresh-q", "needs_you", since=now - 2, started=5),    # just opened
+            s("old-q", "needs_you", since=now - 300, started=9),
+            s("new-q", "needs_you", since=now - 30, started=1),
+            s("idle", "idle", started=2),
+            s("busy-b", "working", since=now - 1, started=4),       # newest change
+            s("busy-a", "thinking", since=now - 500, started=3),
+            s("zz", "sleep", started=0)]
+    view = gadget_view(snap, now)
+    assert [e["session_id"] for e in view] == [
+        "old-q", "new-q",                 # counted waits, longest-waiting first
+        "busy-a", "busy-b", "fresh-q",    # working group by start, debounced wait inside
+        "idle", "zz"]
+    by = {e["session_id"]: e for e in view}
+    assert by["fresh-q"]["gstate"] == "working" and by["fresh-q"]["wait_since"] is None
+    assert by["old-q"]["gstate"] == "needs_you" and by["old-q"]["wait_since"] == now - 300
+    assert by["fresh-q"]["state"] == "needs_you"            # the raw state stays for the Buddy
+    # Exactly at the threshold it counts; a status flip doesn't reorder the rest.
+    assert gadget_view([s("q", "needs_you", since=now - WAIT_ARM_S)], now)[0]["gstate"] == "needs_you"
+    snap[4]["since"] = now                                  # busy-b flips busy <-> shell
+    assert [e["session_id"] for e in gadget_view(snap, now)] == [e["session_id"] for e in view]
+    # A wait without a known start can't be timed, so it doesn't count.
+    assert gadget_view([s("q", "needs_you", since=0)], now)[0]["gstate"] == "working"
+
+
+def test_gadget_view_limit_and_unique_names():
+    from sessions_live import gadget_view
+    snap = [{"session_id": str(i), "state": "working", "since": 0, "started": i,
+             "name": "clawdmeter" if i < 3 else f"s{i}"} for i in range(10)]
+    snap.append({"session_id": "x", "state": "sleep", "since": 0, "started": -1, "name": "zz"})
+    view = gadget_view(snap, 100.0, limit=8)
+    assert len(view) == 8 and "zz" not in [e["name"] for e in view]     # least urgent dropped
+    assert [e["gname"] for e in view[:3]] == ["clawdmeter", "clawdmeter~2", "clawdmeter~3"]
+    # The suffix fits inside the length the gadget gets.
+    long = [{"session_id": str(i), "state": "working", "since": 0, "started": i,
+             "name": "A very long session name"} for i in range(2)]
+    names = [e["gname"] for e in gadget_view(long, 0, form=lambda n: n[:20], name_max=20)]
+    assert names == ["A very long session", "A very long sessio~2"]
+    assert all(len(n) <= 20 for n in names) and len(set(names)) == 2
+
+
+def test_app_focus_request_resolves_the_unique_gadget_name():
+    pytest.importorskip("webview")
+    import claude_sessions as cs
+    rows = [{"session_id": "a", "state": "working", "since": 0, "started": 1,
+             "name": "clawdmeter", "pid": 11},
+            {"session_id": "b", "state": "working", "since": 0, "started": 2,
+             "name": "clawdmeter", "pid": 22}]
+    api = cs.Api.__new__(cs.Api)
+    api.settings = {"clawdmeter_buddy": True}
+    api._sessions_service = type("S", (), {"latest": lambda self: rows})()
+    api._accounts_mgr = lambda: type("M", (), {"accounts": lambda self: []})()
+    assert [x["n"] for x in api._clawd_extras()["se"]] == ["clawdmeter", "clawdmeter~2"]
+    assert api._clawd_resolve_session(1, "clawdmeter~2")[0]["pid"] == 22
+    assert api._clawd_resolve_session(0, "clawdmeter")[0]["pid"] == 11
+    # Index stale (list changed): the unique name still finds the right one.
+    assert api._clawd_resolve_session(0, "clawdmeter~2")[0]["pid"] == 22

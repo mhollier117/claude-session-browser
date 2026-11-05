@@ -422,6 +422,7 @@ class LiveSessions:
             "waiting_for": rec.get("waitingFor") or "",
             "state": state,
             "since": since,
+            "started": float(rec.get("startedAt") or 0) / 1000.0,
             "ctx_tokens": t.ctx_tokens if t else None,
             "ctx_window": ctx_window,         # tokens, None = unknown
             "ctx_pct": ctx_pct,               # 0-100, None = unknown
@@ -465,6 +466,60 @@ class SessionsService:
                 self._latest = None
                 self._log(f"sessions: snapshot failed: {e}")
             self._stop.wait(self.INTERVAL)
+
+
+WAIT_ARM_S = 5.0          # a prompt must stay open this long to count as waiting
+
+
+def gadget_view(sessions: list[dict], now: float, form=None, name_max: int = NAME_MAX,
+                limit: int = 8) -> list[dict]:
+    """The session list as the Clawdmeter should see it (its auto-rotation).
+
+    Each entry is a copy of the snapshot entry with three extra keys:
+
+    * ``gstate``: the state the gadget shows. A prompt open for less than
+      WAIT_ARM_S counts as WORKING, so approvals answered at the keyboard
+      within a few seconds never take over the gadget. The end of a wait is
+      immediate (the registry is already back to busy).
+    * ``wait_since``: epoch seconds the wait began, only for counted waits.
+      Constant for the whole wait, so it costs one resend per wait; the gadget
+      works out the age itself.
+    * ``gname``: the display name, ``form(name)`` (e.g. ASCII, cut to
+      ``name_max``), made unique within the list ("api~2"), so the gadget's
+      name-keyed rotation, pop-up and focus requests can't mix sessions up.
+
+    Order: counted waits first, longest-waiting first; then by gadget state
+    urgency; inside a state by when the session started. Not by the newest
+    status change (the snapshot's order), which reshuffles the list, and so
+    every message index, whenever a session flips between busy and shell.
+    At most ``limit`` entries; the least urgent are dropped."""
+    form = form or (lambda n: n)
+    view = []
+    for s in sessions:
+        e = dict(s)
+        waiting = s["state"] == NEEDS_YOU
+        armed = waiting and bool(s.get("since")) and now - s["since"] >= WAIT_ARM_S
+        e["gstate"] = WORKING if waiting and not armed else s["state"]
+        e["wait_since"] = s["since"] if armed else None
+        view.append(e)
+    view.sort(key=lambda e: (
+        0 if e["wait_since"] is not None else 1,
+        e["wait_since"] or 0.0,
+        URGENCY[e["gstate"]],
+        e.get("started") or 0.0,
+        str(e.get("session_id") or "")))
+    view = view[:limit]
+    taken = set()
+    for e in view:
+        base = str(form(e.get("name") or "")).rstrip()
+        name, n = base, 1
+        while name in taken:
+            n += 1
+            suffix = f"~{n}"
+            name = base[:max(0, name_max - len(suffix))].rstrip() + suffix
+        taken.add(name)
+        e["gname"] = name
+    return view
 
 
 def hint(sessions: list[dict]) -> str:
