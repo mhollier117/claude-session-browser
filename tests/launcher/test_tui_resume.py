@@ -289,7 +289,49 @@ def test_cli_index_reports_to_stderr(fake_env, capsys):
     assert "1 session" in captured.err
 
 
-# ---- fix round 1 ---------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("argv", [["index"], [], ["--json"], ["new", "x"]])
+def test_cli_index_busy_exits_2_with_empty_stdout(fake_env, capsys, argv):
+    import sqlite3
+    idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False, timeout=0.05)
+    assert idx._db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    write_claude_session(fake_env, fake_env.root / "cc", "ccc", [_u("hello", fake_env.root / "cc"), _a("hi")])
+    other = sqlite3.connect(idx.db_path, timeout=0)  # another cc (or the browser) in the middle of its refresh
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        assert cli.main(argv, env=fake_env, index=idx, app=lambda e, i: pytest.fail("app ran"),
+                        new_app=lambda e, i, n: pytest.fail("new app ran")) == 2
+    finally:
+        other.rollback()
+        other.close()
+        idx.close()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "index busy (another cc or the browser is indexing), try again in a moment" in captured.err
+
+
+def test_cli_index_busy_while_opening_exits_2(fake_env, capsys, monkeypatch):
+    import sqlite3
+    import launcher.index as index_mod
+
+    def locked(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(index_mod.Index, "__init__", locked)
+    assert cli.main(["index"], env=fake_env) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "index busy" in captured.err
+
+
+def test_cli_index_busy_in_the_app_exits_2(fake_env, capsys):
+    import sqlite3
+    idx = _two_sessions(fake_env)
+
+    def app(env, index):
+        raise sqlite3.OperationalError("database is locked")  # e.g. record_launch while another cc refreshes
+    assert cli.main([], env=fake_env, index=idx, app=app) == 2
+    assert capsys.readouterr().out == ""
+
+
+# ---- fix round 1---------------------------------------------------------------------------------------------
 
 def test_render_preview_wraps_wide_text_by_cells(fake_env):
     from prompt_toolkit.utils import get_cwidth

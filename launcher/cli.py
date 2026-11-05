@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
@@ -24,6 +25,7 @@ from .tui.resume import NEW, Resume
 
 AppFn = Callable[[Env, Index], object]
 NewAppFn = Callable[[Env, Index, "str | None"], "Launch | None"]
+INDEX_BUSY = "index busy (another cc or the browser is indexing), try again in a moment"
 
 
 def _utf8_stdout() -> None:
@@ -114,8 +116,8 @@ def main(argv: list[str] | None = None, *, env: Env | None = None, index: Index 
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     env = env or default_env()
     own_index = index is None
-    index = index or Index(env)
     try:
+        index = index or Index(env)
         if args.command == "new":
             index.refresh(progress=_progress())  # stats and history for the picker; records pending wrappers
             return _run_new(env, index, " ".join(args.name).strip() or None, new_app)
@@ -123,8 +125,11 @@ def main(argv: list[str] | None = None, *, env: Env | None = None, index: Index 
     except KeyboardInterrupt:  # ctrl-c during the refresh (the app itself maps ctrl-c to a quiet quit)
         sys.stderr.write("\n")
         return 130
+    except sqlite3.OperationalError:  # the shared index stayed locked past the timeout: nothing ran, stdout empty
+        sys.stderr.write(f"\r{INDEX_BUSY}\n")  # \r: over a half-written `indexing… N/M` line
+        return 2
     finally:
-        if own_index:
+        if own_index and index is not None:
             index.close()
 
 
