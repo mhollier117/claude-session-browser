@@ -1,6 +1,6 @@
 import json
 
-from launcher.stores import SessionFacts, clean_user_text, full_last_reply, is_top_level_claude, read_claude, read_qwen
+from launcher.stores import SessionFacts, clean_user_text, count_messages, full_last_reply, is_top_level_claude, read_claude, read_qwen
 from launcher_helpers import write_claude_session, write_qwen_session
 
 
@@ -144,6 +144,39 @@ def test_tail_window_inside_multibyte_character(fake_env):
     for tail_bytes in range(4096, 4102):
         f = read_claude(path, tail_bytes=tail_bytes)
         assert (f.last_ask, f.last_reply) == ("qé…", reply)
+
+
+def test_read_with_count_false_skips_the_full_pass(fake_env, monkeypatch):
+    import launcher.stores as stores
+    p = write_claude_session(fake_env, fake_env.root / "cc", "c0", [_u("q1"), {"type": "ai-title", "aiTitle": "T"},
+                                                                    _a("r1")])
+    monkeypatch.setattr(stores, "_count", lambda *a: (_ for _ in ()).throw(AssertionError("full pass")))
+    f = read_claude(p, count=False)
+    assert (f.first_ask, f.last_reply, f.user_msgs, f.assistant_msgs, f.name) == ("q1", "r1", 0, 0, None)
+
+
+def test_count_messages_whole_and_incremental(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "cc", "c1", [
+        _u("q1"), {"type": "custom-title", "customTitle": "Mine"}, _a("r1"), {"type": "ai-title", "aiTitle": "A1"}])
+    u, a, end, custom, ai = count_messages(p, "claude")
+    assert (u, a, end, custom, ai) == (1, 1, p.stat().st_size, "Mine", "A1")
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(_u("q2")) + "\n" + json.dumps(_a("r2")) + "\n")
+    assert count_messages(p, "claude", end) == (1, 1, p.stat().st_size, None, None)
+
+
+def test_count_messages_stops_before_a_partial_last_line(fake_env):
+    p = write_claude_session(fake_env, fake_env.root / "cc", "c2", [_u("q1")])
+    whole = p.stat().st_size
+    with open(p, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(_a("half"))[:20])  # still being written
+    assert count_messages(p, "claude") == (1, 0, whole, None, None)
+
+
+def test_count_messages_qwen(fake_env):
+    p = write_qwen_session(fake_env, fake_env.root / "home" / "ai", "c3", [
+        _q_user("a", "x"), _q_user("inj", "x", provenance="system"), _q_asst({"text": "b"})])
+    assert count_messages(p, "qwen")[:2] == (1, 1)
 
 
 def test_clean_user_text():

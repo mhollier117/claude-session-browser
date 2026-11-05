@@ -161,12 +161,19 @@ def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True)
         n *= 2
 
 
-def _count(path: Path, parser) -> tuple[int, int, str | None]:
-    """(user asks, assistant replies, name) over the whole file; only lines naming a relevant type are parsed."""
+def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, int, int, str | None, str | None]:
+    """(user asks, assistant replies, end offset, last custom-title, last ai-title) from byte `start` on.
+    Only lines naming a relevant type are parsed. With `whole_lines_only`, a last line without its newline (still
+    being written) is left out and `end` stops before it, so the next incremental scan picks it up whole."""
     users = assistants = 0
     custom = ai = None
+    end = start
     with open(path, "rb") as fh:
+        fh.seek(start)
         for line in fh:
+            if whole_lines_only and not line.endswith(b"\n"):
+                break
+            end += len(line)
             if not _TYPE_RE.search(line):
                 continue
             got = _parse(line, parser)
@@ -181,26 +188,39 @@ def _count(path: Path, parser) -> tuple[int, int, str | None]:
                 custom = text
             elif kind == "ai-title":
                 ai = text
+    return users, assistants, end, custom, ai
+
+
+def _count(path: Path, parser) -> tuple[int, int, str | None]:
+    """(user asks, assistant replies, name) over the whole file."""
+    users, assistants, _, custom, ai = _scan(path, parser, 0, whole_lines_only=False)
     return users, assistants, custom or ai
 
 
-def _facts(store: str, path: Path, tail_bytes: int) -> SessionFacts:
+def count_messages(path: Path, store: str, start: int = 0) -> tuple[int, int, int, str | None, str | None]:
+    """(user asks, assistant replies, end offset, last custom-title, last ai-title) in the complete lines from byte
+    `start` on. Pass the previous `end` back as `start` to count only what was appended since."""
+    return _scan(Path(path), _PARSERS[store], start, whole_lines_only=True)
+
+
+def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> SessionFacts:
+    """With `count=False` only the bounded head/tail reads run: counts are 0 and `name` is None."""
     path = Path(path)
     st = path.stat()
     parser = _PARSERS[store]
     cwd, first = _head(path, st.st_size, parser)
     last_ask, last_reply = _tail(path, st.st_size, parser, tail_bytes)
-    users, assistants, name = _count(path, parser)
+    users, assistants, name = _count(path, parser) if count else (0, 0, None)
     return SessionFacts(store, path.stem, path, cwd, name, first, last_ask, last_reply,
                         users, assistants, st.st_size, st.st_mtime)
 
 
-def read_claude(path: Path, tail_bytes: int = 262_144) -> SessionFacts:
-    return _facts("claude", path, tail_bytes)
+def read_claude(path: Path, tail_bytes: int = 262_144, count: bool = True) -> SessionFacts:
+    return _facts("claude", path, tail_bytes, count)
 
 
-def read_qwen(path: Path, tail_bytes: int = 262_144) -> SessionFacts:
-    facts = _facts("qwen", path, tail_bytes)
+def read_qwen(path: Path, tail_bytes: int = 262_144, count: bool = True) -> SessionFacts:
+    facts = _facts("qwen", path, tail_bytes, count)
     try:
         work_dir = json.loads(Path(path).with_suffix(".runtime.json").read_text(encoding="utf-8")).get("work_dir")
     except (OSError, ValueError, AttributeError):
