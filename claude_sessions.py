@@ -1374,6 +1374,44 @@ def resume_session(session_id, cwd, settings, project=""):
 
 
 # --------------------------------------------------------------------------- #
+#  Session launcher (launcher/, the `cc` core) in the browser
+# --------------------------------------------------------------------------- #
+# Test hooks: the runner for scaffold and suggestion commands, and the HTTP
+# client for the Qwen suggestion stage. None means the real ones.
+_LAUNCHER_RUNNER = None
+_LAUNCHER_HTTP = None
+_LAUNCHER_INIT_LOCK = threading.Lock()
+
+
+def _launcher_log(msg):
+    """Launcher failures in the browser, in csb_launcher.log in the temp folder (like _clawd_log)."""
+    line = " ".join(str(msg).split())[:800]
+    try:
+        path = os.path.join(tempfile.gettempdir(), "csb_launcher.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
+    except Exception:
+        pass
+
+
+def launch_in_terminal(cwd, argv):
+    """Run `argv` (a wrapper from launcher.launch.WRAPPERS, then its arguments) in `cwd`: a new Windows Terminal
+    tab running PowerShell with the user's profile, where the wrappers are defined; without wt a new console
+    window. argv lists only, never shell=True; the quoting is launcher.bridge.ps_command."""
+    from launcher import bridge
+    shell = bridge.pick_shell()
+    try:
+        try:
+            subprocess.Popen(bridge.wt_argv(cwd, argv, shell))
+        except FileNotFoundError:
+            subprocess.Popen(bridge.console_argv(argv, shell), cwd=str(cwd),
+                             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
 #  Buddy-Controller (Tkinter-Fenster in eigenem Daemon-Thread)
 # --------------------------------------------------------------------------- #
 _IS_WIN = sys.platform == "win32"
@@ -4294,7 +4332,55 @@ class Api:
             s["display_title"] = self.overrides.get(s["id"], s["auto_title"])
             s["color"] = colors.get(s["id"], "")
             s["when"] = fmt_time(s["mtime"])
-        return self._cache
+            s["tool"] = "claude"
+        return self._cache + self._qwen_sessions(force)
+
+    # -- Session launcher (launcher/bridge.py); pywebview calls every js_api
+    # method on a thread of its own, so all Index use holds _launcher_lock --
+    def _launcher_state(self):
+        """The lock that serialises launcher use; creates the launcher state on first use."""
+        with _LAUNCHER_INIT_LOCK:
+            if getattr(self, "_launcher_lock", None) is None:
+                from launcher.bridge import PendingSuggestions
+                from launcher.paths import default_env
+                self._launcher_env = default_env()
+                self._launcher_index = None
+                self._launcher_qwen = None
+                self._launcher_suggestions = PendingSuggestions()
+                self._launcher_lock = threading.RLock()
+        return self._launcher_lock
+
+    def _launcher_idx(self, refresh=False):
+        """The launcher Index (caller holds the lock). A new one is refreshed once; `refresh` refreshes an
+        existing one."""
+        if self._launcher_index is None:
+            from launcher.index import Index
+            index = Index(self._launcher_env, check_same_thread=False)
+            try:
+                index.refresh()
+            except Exception:
+                index.close()
+                raise
+            self._launcher_index = index
+        elif refresh:
+            self._launcher_index.refresh()
+        return self._launcher_index
+
+    def _qwen_sessions(self, force=False):
+        """Qwen Code sessions from the launcher index in the session-list shape. The index is refreshed only on
+        a forced reload (or when first created); any failure is logged and yields no Qwen rows, so the Claude list
+        never depends on the launcher."""
+        try:
+            from launcher import bridge
+            with self._launcher_state():
+                if force or self._launcher_qwen is None:
+                    self._launcher_qwen = [r for r in self._launcher_idx(refresh=force).rows()
+                                           if r.store == "qwen"]
+                rows = self._launcher_qwen
+            return bridge.qwen_session_dicts(rows, fmt_time)
+        except Exception as e:
+            _launcher_log(f"no Qwen sessions: {type(e).__name__}: {e}")
+            return []
 
     def _state(self, force=False):
         pdir = self._projects_dir()
@@ -4320,8 +4406,74 @@ class Api:
     def refresh(self):
         return self._state(force=True)
 
-    def resume(self, sid, cwd, project=""):
+    def resume(self, sid, cwd, project="", tool="claude"):
+        if tool == "qwen":
+            sid = str(sid or "")
+            if not _SESSION_ID_RE.match(sid):
+                return {"ok": False, "error": t("Ungültige Session-ID.")}
+            return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
         return resume_session(sid, cwd, self.settings, project)
+
+    def launcher_rows(self):
+        """Every launcher Index row (Claude and Qwen) as a dict with `tool`."""
+        from launcher import bridge
+        with self._launcher_state():
+            return [bridge.row_dict(r) for r in self._launcher_idx().rows()]
+
+    def launcher_children(self, rel=""):
+        """One column of the New session dialog (see bridge.children_listing), or {ok: False, error}."""
+        from launcher import bridge
+        with self._launcher_state():
+            env = self._launcher_env
+            try:
+                folder = bridge.resolve_rel(env.root, rel)
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            return bridge.children_listing(env, self._launcher_idx(), folder)
+
+    def launcher_kind_options(self, rel=""):
+        """Kinds a new folder under `rel` can take, default first ([] for an unknown folder)."""
+        from launcher import bridge
+        from launcher.tree import new_folder_kind_options
+        self._launcher_state()
+        root = self._launcher_env.root
+        try:
+            return new_folder_kind_options(root, bridge.resolve_rel(root, rel))
+        except ValueError:
+            return []
+
+    def launcher_suggest(self, name):
+        """The local suggestion for session `name` at once; the model stages keep running in the background and
+        their first answer is fetched with launcher_suggest_poll(token)."""
+        from launcher import bridge
+        from launcher.suggest import default_http, suggest
+        with self._launcher_state():
+            env = self._launcher_env
+            pending = suggest(env, self._launcher_idx(), str(name or "").strip(),
+                              http=_LAUNCHER_HTTP or default_http, runner=_LAUNCHER_RUNNER,
+                              on_update=lambda s: None)
+        token = self._launcher_suggestions.add(pending)
+        return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token}
+
+    def launcher_suggest_poll(self, token):
+        """The model's suggestion once it has answered (handed out once), else None."""
+        from launcher import bridge
+        self._launcher_state()
+        s = self._launcher_suggestions.poll(str(token or ""))
+        return None if s is None else bridge.suggestion_dict(self._launcher_env.root, s)
+
+    def launcher_new(self, payload):
+        """Create the new folder if any and start the session in a new terminal tab (bridge.prepare_new)."""
+        from launcher import bridge
+        lock = self._launcher_state()
+        result, launch = bridge.prepare_new(self._launcher_env, payload, runner=_LAUNCHER_RUNNER,
+                                            index_lock=lock)
+        if launch is None:
+            return result
+        started = launch_in_terminal(launch.cwd, launch.argv)
+        if not started["ok"]:
+            return {**result, "ok": False, "launched": False, "error": started["error"]}
+        return result
 
     def rename(self, sid, title):
         title = (title or "").strip()
