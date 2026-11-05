@@ -1,5 +1,6 @@
 """The browser's launcher API (`claude_sessions.Api`): Qwen rows in the session list, resume and new-session launches,
 suggestions. Popen, the scaffold runner and the suggestion HTTP client are all faked; pywebview is never started."""
+import base64
 import json
 import sys
 import threading
@@ -27,6 +28,19 @@ class FakeRunner:
     def run(self, args, cwd, env=None, timeout=60, input=None):
         self.calls.append(list(args))
         return Result(1, "", "not run in tests")
+
+
+def _enc(argv):
+    return bridge.encoded_command(bridge.ps_command(argv))
+
+
+def _settled(api, force=False):
+    """`_sessions()` once the background index builder it started has finished (its rows show on the next call)."""
+    api._sessions(force)
+    thread = getattr(api, "_launcher_thread", None)
+    if thread is not None:
+        thread.join(10)
+    return api._sessions()
 
 
 def _q_user(text):
@@ -61,7 +75,8 @@ def api(fake_env, monkeypatch):
 def test_sessions_include_qwen_rows_with_tool(fake_env, api):
     ai = fake_env.root / "home" / "ai"
     write_qwen_session(fake_env, ai, "q1", [_q_user("hello qwen")])
-    rows = api._sessions()
+    assert [r["id"] for r in api._sessions()] == ["c1"]  # the first call never waits for the index build
+    rows = _settled(api)
     assert [(r["id"], r["tool"]) for r in rows] == [("c1", "claude"), ("q1", "qwen")]
     q = rows[1]
     assert q["display_title"] == "hello qwen" and q["cwd"] == str(ai) and q["project"] == "ai"
@@ -75,13 +90,41 @@ def test_sessions_refresh_the_index_only_when_forced(fake_env, api, monkeypatch)
     refreshes = []
     real = Index.refresh
     monkeypatch.setattr(Index, "refresh", lambda self, *a, **k: refreshes.append(1) or real(self, *a, **k))
-    api._sessions()
+    _settled(api)
     api._sessions()
     assert len(refreshes) == 1  # created and refreshed once
+    assert api._launcher_thread is None
     write_qwen_session(fake_env, fake_env.root / "cc", "q2", [_q_user("new one")])
     assert "q2" not in [r["id"] for r in api._sessions()]
-    assert "q2" in [r["id"] for r in api._sessions(force=True)]
+    assert "q2" in [r["id"] for r in _settled(api, force=True)]
     assert len(refreshes) == 2
+
+
+def test_sessions_do_not_wait_for_a_busy_launcher(fake_env, api):
+    """Another thread holds the launcher lock (a long build, or cc holding the sqlite file): the Claude rows and
+    the cached Qwen rows come back at once, and the refresh lands once the lock is free."""
+    write_qwen_session(fake_env, fake_env.root / "cc", "q1", [_q_user("x")])
+    _settled(api)
+    write_qwen_session(fake_env, fake_env.root / "cc", "q2", [_q_user("y")])
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with api._launcher_lock:
+            held.set()
+            release.wait(10)
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    t0 = time.monotonic()
+    rows = api._sessions(force=True)
+    assert time.monotonic() - t0 < 1.0
+    assert [r["id"] for r in rows] == ["c1", "q1"]
+    release.set()
+    holder.join()
+    thread = api._launcher_thread
+    if thread is not None:
+        thread.join(10)
+    assert sorted(r["id"] for r in api._sessions()) == ["c1", "q1", "q2"]
 
 
 def test_sessions_keep_the_claude_list_when_the_launcher_fails(api, monkeypatch):
@@ -90,14 +133,42 @@ def test_sessions_keep_the_claude_list_when_the_launcher_fails(api, monkeypatch)
     monkeypatch.setattr(Index, "refresh", broken)
     logged = []
     monkeypatch.setattr(cs, "_launcher_log", logged.append)
-    assert [r["id"] for r in api._sessions()] == ["c1"]
+    assert [r["id"] for r in _settled(api)] == ["c1"]
     assert logged and "index exploded" in logged[0]
+
+
+def test_failed_index_build_is_retried_at_most_once_a_minute(api, monkeypatch):
+    builds = []
+
+    def broken(self, *a, **k):
+        builds.append(1)
+        raise RuntimeError("no index")
+    monkeypatch.setattr(Index, "refresh", broken)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    _settled(api)
+    _settled(api, force=True)
+    assert api.launcher_rows()["ok"] is False
+    assert len(builds) == 1
+    api._launcher_failed_at -= cs.Api._LAUNCHER_RETRY_S
+    _settled(api)
+    assert len(builds) == 2
+
+
+def test_refresh_error_keeps_the_cached_qwen_rows(fake_env, api, monkeypatch):
+    write_qwen_session(fake_env, fake_env.root / "cc", "q1", [_q_user("x")])
+    _settled(api)
+
+    def broken(*a, **k):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(Index, "refresh", broken)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    assert [r["id"] for r in _settled(api, force=True)] == ["c1", "q1"]
 
 
 def test_index_is_usable_from_another_thread(fake_env, api):
     """pywebview calls every js_api method on a thread of its own."""
     write_qwen_session(fake_env, fake_env.root / "cc", "q1", [_q_user("x")])
-    api._sessions()
+    _settled(api)
     out, errors = [], []
 
     def other():
@@ -111,13 +182,32 @@ def test_index_is_usable_from_another_thread(fake_env, api):
     assert not errors and [r["sid"] for r in out] == ["q1"]
 
 
+def test_plugin_sessions_stay_claude_only(fake_env, api):
+    write_qwen_session(fake_env, fake_env.root / "cc", "q1", [_q_user("x")])
+    _settled(api)
+    host = cs.PluginHost(api, {"id": "p", "version": "1", "permissions": ["sessions"]})
+    assert [s["id"] for s in host.sessions()] == ["c1"]
+
+
+def test_launcher_methods_answer_errors_instead_of_raising(api, monkeypatch):
+    def broken(self, *a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(cs.Api, "_launcher_state", broken)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    for call in (lambda: api.launcher_rows(), lambda: api.launcher_children("x"),
+                 lambda: api.launcher_kind_options("x"), lambda: api.launcher_suggest("x"),
+                 lambda: api.launcher_suggest_poll("t"), lambda: api.launcher_new({})):
+        assert call() == {"ok": False, "error": "RuntimeError: boom"}
+
+
 # ---- resume -------------------------------------------------------------------------------------------------------
 
 def test_resume_qwen_row_uses_qwen_r(fake_env, api):
     cwd = fake_env.root / "home" / "ai"
     assert api.resume("q1", str(cwd), "", "qwen") == {"ok": True}
     [(argv, _kw)] = api.popens
-    assert argv == ["wt", "-w", "0", "nt", "-d", str(cwd), "pwsh", "-NoExit", "-Command", "& 'qwen' '-r' 'q1'"]
+    assert argv == ["wt", "-w", "0", "nt", "-d", str(cwd), "pwsh", "-NoExit", "-EncodedCommand",
+                    _enc(["qwen", "-r", "q1"])]
 
 
 def test_resume_qwen_rejects_a_bad_session_id(api):
@@ -144,7 +234,7 @@ def test_launch_falls_back_to_a_console_without_wt(fake_env, api, monkeypatch):
     cwd = fake_env.root / "cc"
     assert api.resume("q1", str(cwd), "", "qwen") == {"ok": True}
     argv, kw = calls[1]
-    assert argv == ["pwsh", "-NoExit", "-Command", "& 'qwen' '-r' 'q1'"]
+    assert argv == ["pwsh", "-NoExit", "-EncodedCommand", _enc(["qwen", "-r", "q1"])]
     assert kw["cwd"] == str(cwd) and kw["creationflags"] == cs.subprocess.CREATE_NEW_CONSOLE
 
 
@@ -158,9 +248,9 @@ def test_launcher_new_launches_wt_with_name_argv(fake_env, api):
     assert res == {"ok": True, "path": str(net), "rel": "work/net", "created": False, "warnings": [],
                    "launched": True}
     [(argv, _kw)] = api.popens
-    assert argv[:9] == ["wt", "-w", "0", "nt", "-d", str(net), "pwsh", "-NoExit", "-Command"]
-    command = argv[9]
-    assert command.startswith("& 'clauded' '-n' 'it''s a \"test\" $x\\; `y' '--session-id' '")
+    assert argv[:9] == ["wt", "-w", "0", "nt", "-d", str(net), "pwsh", "-NoExit", "-EncodedCommand"]
+    command = base64.b64decode(argv[9]).decode("utf-16-le")
+    assert command.startswith("& 'clauded' '-n' 'it''s a \"test\" $x; `y' '--session-id' '")
     sid = command.rsplit("'", 2)[1]
     launched = json.loads((fake_env.data_dir / LAUNCHED_FILE).read_text(encoding="utf-8"))
     assert launched == {f"claude:{sid}": "clauded"}

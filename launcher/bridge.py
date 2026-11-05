@@ -4,11 +4,13 @@ Everything here is pure or takes its side effects as arguments (runner, clock, w
 pywebview; the `Api` methods only hold the Index and a lock, and call `Popen` with the argv built here.
 
 Launching from the browser: the wrappers (`clauded`, `claude6`, ...) are PowerShell functions from the user's
-profile, so a launch runs `pwsh -NoExit -Command "& 'wrapper' 'arg' ..."` in a new Windows Terminal tab.
-`ps_command` is the one place anything is quoted.
+profile, so a launch runs `pwsh -NoExit -EncodedCommand <base64>` of `& 'wrapper' 'arg' ...` in a new Windows
+Terminal tab. `ps_command` is the one place anything is quoted; the base64 form then passes through wt's own command
+line parsing (which splits at `;` and re-quotes) untouched.
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import re
 import shutil
@@ -47,9 +49,9 @@ def ps_command(argv: list[str]) -> str:
     return "& " + " ".join(ps_quote(str(a)) for a in argv)
 
 
-def _wt_escape(value: str) -> str:
-    """wt splits its command line at every `;` (even inside one argument) unless it is written `\\;`."""
-    return value.replace(";", "\\;")
+def encoded_command(cmd: str) -> str:
+    """`cmd` as PowerShell's `-EncodedCommand` value: base64 of its UTF-16LE bytes (no `;`, `"`, spaces or backslashes)."""
+    return base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
 
 
 def pick_shell(which=shutil.which) -> str:
@@ -59,13 +61,13 @@ def pick_shell(which=shutil.which) -> str:
 
 def wt_argv(cwd: Path, argv: list[str], shell: str) -> list[str]:
     """A new tab in the most recent Windows Terminal window, in `cwd`, running `argv` through `shell`."""
-    return ["wt", "-w", "0", "nt", "-d", _wt_escape(str(cwd)), shell, "-NoExit", "-Command",
-            _wt_escape(ps_command(argv))]
+    return ["wt", "-w", "0", "nt", "-d", str(cwd), *console_argv(argv, shell)]
 
 
 def console_argv(argv: list[str], shell: str) -> list[str]:
-    """The same command for a new console window (when Windows Terminal is not installed); run it with cwd set."""
-    return [shell, "-NoExit", "-Command", ps_command(argv)]
+    """`shell` running `argv` and staying open; also the whole command for a new console window (when Windows
+    Terminal is not installed), run with cwd set."""
+    return [shell, "-NoExit", "-EncodedCommand", encoded_command(ps_command(argv))]
 
 
 # ---- paths ----------------------------------------------------------------------------------------------------------

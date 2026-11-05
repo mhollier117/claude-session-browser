@@ -22,6 +22,7 @@ import queue
 import shutil
 import base64
 import ctypes
+import functools
 import logging
 import tempfile
 import threading
@@ -1392,6 +1393,19 @@ def _launcher_log(msg):
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + line + "\n")
     except Exception:
         pass
+
+
+def _launcher_api(method):
+    """A js_api launcher method that answers {ok: False, error} on any exception instead of rejecting the
+    JS promise (the failure is logged)."""
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as e:
+            _launcher_log(f"{method.__name__} failed: {type(e).__name__}: {e}")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return call
 
 
 def launch_in_terminal(cwd, argv):
@@ -3911,7 +3925,8 @@ class PluginHost:
     def sessions(self):
         """Die Sessionliste, wie sie die Tabelle zeigt. Braucht "sessions"."""
         self._darf("sessions")
-        return [dict(s) for s in self._api._sessions()]
+        # Claude sessions only, as before the launcher added Qwen rows to the list.
+        return [dict(s) for s in self._api._sessions() if s.get("tool") != "qwen"]
 
 
 class PluginManager:
@@ -4337,6 +4352,8 @@ class Api:
 
     # -- Session launcher (launcher/bridge.py); pywebview calls every js_api
     # method on a thread of its own, so all Index use holds _launcher_lock --
+    _LAUNCHER_RETRY_S = 60.0  # a failed Index build is retried at most this often
+
     def _launcher_state(self):
         """The lock that serialises launcher use; creates the launcher state on first use."""
         with _LAUNCHER_INIT_LOCK:
@@ -4345,39 +4362,64 @@ class Api:
                 from launcher.paths import default_env
                 self._launcher_env = default_env()
                 self._launcher_index = None
+                self._launcher_failed_at = None
                 self._launcher_qwen = None
+                self._launcher_thread = None
                 self._launcher_suggestions = PendingSuggestions()
                 self._launcher_lock = threading.RLock()
         return self._launcher_lock
 
     def _launcher_idx(self, refresh=False):
         """The launcher Index (caller holds the lock). A new one is refreshed once; `refresh` refreshes an
-        existing one."""
+        existing one. After a failed build the next attempt waits _LAUNCHER_RETRY_S."""
         if self._launcher_index is None:
+            failed = self._launcher_failed_at
+            if failed is not None and time.monotonic() - failed < self._LAUNCHER_RETRY_S:
+                raise RuntimeError("the launcher index is unavailable (retried shortly)")
             from launcher.index import Index
-            index = Index(self._launcher_env, check_same_thread=False)
+            index = None
             try:
+                index = Index(self._launcher_env, check_same_thread=False)
                 index.refresh()
             except Exception:
-                index.close()
+                self._launcher_failed_at = time.monotonic()
+                if index is not None:
+                    index.close()
                 raise
-            self._launcher_index = index
+            self._launcher_index, self._launcher_failed_at = index, None
         elif refresh:
             self._launcher_index.refresh()
         return self._launcher_index
 
+    def _launcher_build(self, force):
+        """Background thread: build or refresh the Index and cache its Qwen rows. On a failure the previous rows
+        stay."""
+        try:
+            with self._launcher_lock:
+                rows = self._launcher_idx(refresh=force).rows()
+                self._launcher_qwen = [r for r in rows if r.store == "qwen"]
+        except Exception as e:
+            _launcher_log(f"Qwen sessions not refreshed: {type(e).__name__}: {e}")
+        finally:
+            with _LAUNCHER_INIT_LOCK:
+                self._launcher_thread = None
+
     def _qwen_sessions(self, force=False):
-        """Qwen Code sessions from the launcher index in the session-list shape. The index is refreshed only on
-        a forced reload (or when first created); any failure is logged and yields no Qwen rows, so the Claude list
-        never depends on the launcher."""
+        """Qwen Code sessions in the session-list shape, never waiting on the launcher: returns the cached rows
+        ([] at first) and, when forced or nothing is cached yet, starts the single background builder; its rows
+        show on the next call. Any failure is logged and yields the cached rows."""
         try:
             from launcher import bridge
-            with self._launcher_state():
-                if force or self._launcher_qwen is None:
-                    self._launcher_qwen = [r for r in self._launcher_idx(refresh=force).rows()
-                                           if r.store == "qwen"]
-                rows = self._launcher_qwen
-            return bridge.qwen_session_dicts(rows, fmt_time)
+            self._launcher_state()
+            if force or self._launcher_qwen is None:
+                with _LAUNCHER_INIT_LOCK:
+                    retry_wait = (self._launcher_index is None and self._launcher_failed_at is not None
+                                  and time.monotonic() - self._launcher_failed_at < self._LAUNCHER_RETRY_S)
+                    if self._launcher_thread is None and not retry_wait:
+                        self._launcher_thread = threading.Thread(
+                            target=self._launcher_build, args=(force,), daemon=True, name="launcher-index")
+                        self._launcher_thread.start()
+            return bridge.qwen_session_dicts(self._launcher_qwen or [], fmt_time)
         except Exception as e:
             _launcher_log(f"no Qwen sessions: {type(e).__name__}: {e}")
             return []
@@ -4414,12 +4456,14 @@ class Api:
             return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
         return resume_session(sid, cwd, self.settings, project)
 
+    @_launcher_api
     def launcher_rows(self):
         """Every launcher Index row (Claude and Qwen) as a dict with `tool`."""
         from launcher import bridge
         with self._launcher_state():
             return [bridge.row_dict(r) for r in self._launcher_idx().rows()]
 
+    @_launcher_api
     def launcher_children(self, rel=""):
         """One column of the New session dialog (see bridge.children_listing), or {ok: False, error}."""
         from launcher import bridge
@@ -4431,6 +4475,7 @@ class Api:
                 return {"ok": False, "error": str(e)}
             return bridge.children_listing(env, self._launcher_idx(), folder)
 
+    @_launcher_api
     def launcher_kind_options(self, rel=""):
         """Kinds a new folder under `rel` can take, default first ([] for an unknown folder)."""
         from launcher import bridge
@@ -4442,6 +4487,7 @@ class Api:
         except ValueError:
             return []
 
+    @_launcher_api
     def launcher_suggest(self, name):
         """The local suggestion for session `name` at once; the model stages keep running in the background and
         their first answer is fetched with launcher_suggest_poll(token)."""
@@ -4455,6 +4501,7 @@ class Api:
         token = self._launcher_suggestions.add(pending)
         return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token}
 
+    @_launcher_api
     def launcher_suggest_poll(self, token):
         """The model's suggestion once it has answered (handed out once), else None."""
         from launcher import bridge
@@ -4462,6 +4509,7 @@ class Api:
         s = self._launcher_suggestions.poll(str(token or ""))
         return None if s is None else bridge.suggestion_dict(self._launcher_env.root, s)
 
+    @_launcher_api
     def launcher_new(self, payload):
         """Create the new folder if any and start the session in a new terminal tab (bridge.prepare_new)."""
         from launcher import bridge
