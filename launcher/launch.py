@@ -33,9 +33,9 @@ def default_wrapper(root: Path, cwd: Path) -> str:
     return "claude" if area == [_CC_AREA] else _DEFAULT
 
 
-def resume_command(row: Row, wrapper: str | None, *, root: Path | None = None) -> Launch:
+def resume_command(row: Row, wrapper: str | None, *, root: Path) -> Launch:
     """Resume `row`. A Qwen session always resumes with `qwen`; otherwise the explicit `wrapper`, then the one
-    that last launched it, then the folder's default (the general default when no `root` is given)."""
+    that last launched it, then the folder's default for `root`."""
     warnings: list[str] = []
     if row.cwd:
         cwd = Path(row.cwd)
@@ -47,7 +47,7 @@ def resume_command(row: Row, wrapper: str | None, *, root: Path | None = None) -
     if row.store == "qwen":
         chosen = "qwen"
     else:
-        chosen = wrapper or row.wrapper or (default_wrapper(root, cwd) if root else _DEFAULT)
+        chosen = wrapper or row.wrapper or default_wrapper(root, cwd)
     return Launch(cwd, [chosen, "-r", row.sid], warnings)
 
 
