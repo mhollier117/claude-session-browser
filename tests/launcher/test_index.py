@@ -42,6 +42,13 @@ def _append(path, *records):
         fh.write("".join(json.dumps(r) + "\n" for r in records))
 
 
+def _register(env, pid, sid, cwd, name=None):
+    rec = {"pid": pid, "sessionId": sid, "cwd": str(cwd), "kind": "interactive"}
+    if name:
+        rec["name"] = name
+    (env.claude_home / "sessions" / f"{pid}.json").write_text(json.dumps(rec), encoding="utf-8")
+
+
 def _index(env, claude_live=None, qwen_alive=lambda pid: False):
     return Index(env, claude_live=claude_live or (lambda: []), pid_exists=qwen_alive)
 
@@ -131,14 +138,18 @@ def test_display_name_live_registry_names(fake_env):
     write_claude_session(fake_env, cwd, "n2", [_u("ask", cwd), {"type": "ai-title", "aiTitle": "AI"}])
     write_claude_session(fake_env, cwd, "n3", [_u("ask", cwd)])
     write_claude_session(fake_env, cwd, "n4", [_u("ask", cwd), {"type": "custom-title", "customTitle": "Custom"}])
-    live = [{"session_id": "n1", "pid": 11, "name": "Named live", "named": True, "cwd": str(cwd)},
-            {"session_id": "n2", "pid": 12, "name": "Reg name", "named": False, "cwd": str(cwd)},
-            {"session_id": "n3", "pid": 13, "name": "Reg three", "named": False, "cwd": str(cwd)},
-            {"session_id": "n4", "pid": 14, "name": "Named live", "named": True, "cwd": str(cwd)}]
+    write_claude_session(fake_env, cwd, "n5", [_u("first ask five", cwd)])
+    regs = {"n1": (11, "Named live", True), "n2": (12, "Reg name", False), "n3": (13, "Reg three", False),
+            "n4": (14, "Named live", True), "n5": (15, None, False)}
+    live = []
+    for sid, (pid, name, named) in regs.items():
+        _register(fake_env, pid, sid, cwd, name)
+        # the snapshot's own name falls back to the folder ("cc"); the index must not use it
+        live.append({"session_id": sid, "pid": pid, "name": name or "cc", "named": named, "cwd": str(cwd)})
     idx = _index(fake_env, claude_live=lambda: live)
     idx.refresh()
     names = {r.sid: r.display_name for r in idx.rows()}
-    assert names == {"n1": "Named live", "n2": "AI", "n3": "Reg three", "n4": "Custom"}
+    assert names == {"n1": "Named live", "n2": "AI", "n3": "Reg three", "n4": "Custom", "n5": "first ask five"}
 
 
 def test_rows_filter_matches_name_path_and_first_ask(fake_env):
@@ -160,6 +171,55 @@ def test_two_sessions_same_name_both_listed(fake_env):
     idx = _index(fake_env)
     idx.refresh()
     assert sorted(r.sid for r in idx.rows("Same")) == ["d1", "d2"]
+
+
+def test_same_sid_in_two_folders_newest_wins_and_is_stable(fake_env):
+    a, b = fake_env.root / "work" / "net", fake_env.root / "work" / "halo"
+    older = write_claude_session(fake_env, a, "dup", [_u("old copy", a)])
+    newer = write_claude_session(fake_env, b, "dup", [_u("new copy", b)])
+    _touch(older, T0 - 600)
+    _touch(newer, T0 - 60)
+    idx = _index(fake_env)
+    assert idx.refresh() == 1
+    assert idx.row("claude", "dup").first_ask == "new copy"
+    assert idx.refresh() == 0
+    assert idx.row("claude", "dup").cwd == str(b)
+
+
+def test_old_schema_version_is_rebuilt(fake_env):
+    import sqlite3
+    db = fake_env.data_dir / "index.sqlite"
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE sessions (store TEXT, sid TEXT, path TEXT, PRIMARY KEY(store, sid))")
+    con.execute("INSERT INTO sessions VALUES ('claude', 'stale', 'x')")
+    con.commit()
+    con.close()
+    cwd = fake_env.root / "cc"
+    write_claude_session(fake_env, cwd, "s1", [_u("ask", cwd)])
+    idx = _index(fake_env)
+    assert idx.refresh() == 1 and [r.sid for r in idx.rows()] == ["s1"]
+    assert idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION
+
+
+def test_refresh_error_rolls_back(fake_env, monkeypatch):
+    cwd = fake_env.root / "cc"
+    for sid in ("r1", "r2"):
+        write_claude_session(fake_env, cwd, sid, [_u("ask", cwd)])
+    idx = _index(fake_env)
+    real = idx._index_file
+    calls = []
+
+    def flaky(store, path, *rest):
+        calls.append(path.stem)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real(store, path, *rest)
+
+    monkeypatch.setattr(idx, "_index_file", flaky)
+    with pytest.raises(RuntimeError):
+        idx.refresh()
+    assert idx.rows() == []  # the first file's insert was rolled back too
 
 
 def test_cwd_missing_flags_row(fake_env):
@@ -186,17 +246,23 @@ def test_live_pid_from_registry(fake_env, monkeypatch):
     cwd = fake_env.root / "cc"
     write_claude_session(fake_env, cwd, "l1", [_u("ask", cwd)])
     write_claude_session(fake_env, cwd, "l2", [_u("ask", cwd)])
+    write_claude_session(fake_env, cwd, "l3", [_u("untitled live ask", cwd)])
+    (fake_env.claude_home / "sessions" / "6666.json").write_text(json.dumps({
+        "pid": 6666, "sessionId": "l3", "cwd": str(cwd), "kind": "interactive", "procStart": "88"}), encoding="utf-8")
     (fake_env.claude_home / "sessions" / "4242.json").write_text(json.dumps({
         "pid": 4242, "sessionId": "l1", "cwd": str(cwd), "kind": "interactive", "procStart": "77",
         "name": "Live one", "nameSource": "user", "status": "idle"}), encoding="utf-8")
     (fake_env.claude_home / "sessions" / "5555.json").write_text(json.dumps({
         "pid": 5555, "sessionId": "l2", "cwd": str(cwd), "kind": "interactive", "procStart": "1"}), encoding="utf-8")
     monkeypatch.setattr(index_mod, "LiveSessions", functools.partial(
-        sessions_live.LiveSessions, proc_start=lambda pid: 77 if pid == 4242 else None))
+        sessions_live.LiveSessions, proc_start={4242: 77, 6666: 88}.get))
     idx = Index(fake_env, pid_exists=lambda pid: False)
     idx.refresh()
     assert idx.row("claude", "l1").live_pid == 4242 and idx.row("claude", "l1").display_name == "Live one"
-    assert idx.row("claude", "l2").live_pid is None
+    assert idx.row("claude", "l2").live_pid is None and idx.row("claude", "l2").display_name == "ask"
+    # live without any name: the first ask, not the folder name the snapshot falls back to
+    l3 = idx.row("claude", "l3")
+    assert l3.live_pid == 6666 and l3.display_name == "untitled live ask"
 
 
 def test_qwen_live_pid_from_registry(fake_env):

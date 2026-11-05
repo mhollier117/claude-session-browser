@@ -8,6 +8,7 @@ transcript is never rescanned whole. Liveness and display names are worked out w
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Callable
@@ -23,6 +24,7 @@ _LAST_REPLY_CHARS = 400
 _FIRST_ASK_NAME_CHARS = 60
 _UNTITLED = "(untitled)"
 
+_SCHEMA_VERSION = 1  # bump when the columns change: an older cache is dropped and rebuilt
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     store TEXT NOT NULL, sid TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT, name TEXT, display_name TEXT,
@@ -79,6 +81,19 @@ def _default_pid_exists(pid: int) -> bool:
     return psutil.pid_exists(pid)
 
 
+def _read_json(path: Path) -> dict:
+    """The JSON object in `path`, or {} when it is missing, mid-write or not an object."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _str(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _parts(path: str | Path) -> tuple[str, ...]:
     return tuple(p.lower() for p in Path(path).parts)
 
@@ -97,14 +112,19 @@ class Index:
         self._pid_exists = pid_exists or _default_pid_exists
         self._db = sqlite3.connect(self.db_path)
         self._db.row_factory = sqlite3.Row
-        self._db.execute(_SCHEMA)
-        self._db.commit()
+        with self._db:
+            if self._db.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
+                self._db.execute("DROP TABLE IF EXISTS sessions")  # only a cache: rebuilt by the next refresh
+                self._db.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            self._db.execute(_SCHEMA)
 
     # ---- refresh -----------------------------------------------------------------------------------------------
 
-    def _transcripts(self) -> list[tuple[str, Path]]:
+    def _transcripts(self) -> dict[tuple[str, str], tuple[Path, os.stat_result]]:
+        """(store, sid) -> (path, stat) of every transcript; when one sid sits in several project folders, the
+        newest file wins, so the row does not flip between them from one refresh to the next."""
         skip = claude_folder_name(self.env.data_dir / "suggest-cwd").lower()
-        found: list[tuple[str, Path]] = []
+        found: dict[tuple[str, str], tuple[Path, os.stat_result]] = {}
         for store, home, pattern in (("claude", self.env.claude_home, "*.jsonl"),
                                      ("qwen", self.env.qwen_home, "chats/*.jsonl")):
             projects = home / "projects"
@@ -114,38 +134,41 @@ class Index:
                 if not folder.is_dir() or folder.name.lower() == skip:
                     continue
                 for path in sorted(folder.glob(pattern)):
-                    if store == "qwen" or stores.is_top_level_claude(path):
-                        found.append((store, path))
+                    if store == "claude" and not stores.is_top_level_claude(path):
+                        continue
+                    try:
+                        st = path.stat()
+                    except OSError:
+                        continue  # vanished mid-listing
+                    key = (store, path.stem)
+                    if key not in found or st.st_mtime > found[key][1].st_mtime:
+                        found[key] = (path, st)
         return found
 
     def refresh(self, progress: Callable[[int, int], None] | None = None) -> int:
         """Bring the index in line with the transcripts on disk; returns rows inserted, updated or deleted."""
-        old = {(r["store"], r["sid"]): r for r in self._db.execute(
-            "SELECT store, sid, path, size, mtime, counted_to, user_msgs, assistant_msgs, custom_title, ai_title "
-            "FROM sessions")}
         files = self._transcripts()
         live = self._live()
         titles = self._titles()
-        seen: set[tuple[str, str]] = set()
         touched = 0
-        for done, (store, path) in enumerate(files, 1):
-            key = (store, path.stem)
-            seen.add(key)
-            try:
-                st = path.stat()
+        with self._db:  # one transaction: an unexpected error rolls the whole refresh back
+            old = {(r["store"], r["sid"]): r for r in self._db.execute(
+                "SELECT store, sid, path, size, mtime, counted_to, user_msgs, assistant_msgs, custom_title, ai_title "
+                "FROM sessions")}
+            for done, (key, (path, st)) in enumerate(files.items(), 1):
                 prev = old.get(key)
                 if not (prev and prev["path"] == str(path) and prev["size"] == st.st_size
                         and prev["mtime"] == st.st_mtime):
-                    self._index_file(store, path, prev, live, titles)
-                    touched += 1
-            except OSError:
-                pass  # vanished or locked mid-refresh: the next refresh sees it again
-            if progress:
-                progress(done, len(files))
-        for key in old.keys() - seen:
-            self._db.execute("DELETE FROM sessions WHERE store = ? AND sid = ?", key)
-            touched += 1
-        self._db.commit()
+                    try:
+                        self._index_file(key[0], path, prev, live, titles)
+                        touched += 1
+                    except OSError:
+                        pass  # vanished or locked mid-refresh: the next refresh sees it again
+                if progress:
+                    progress(done, len(files))
+            for key in old.keys() - files.keys():
+                self._db.execute("DELETE FROM sessions WHERE store = ? AND sid = ?", key)
+                touched += 1
         return touched
 
     def _index_file(self, store: str, path: Path, prev, live, titles) -> None:
@@ -181,21 +204,20 @@ class Index:
         return {k: v for k, v in data.items() if isinstance(v, str) and v} if isinstance(data, dict) else {}
 
     def _live(self) -> dict[tuple[str, str], _Live]:
+        """Live sessions with their raw registry `name`. The snapshot's own `name` is not used: it falls back to
+        the folder name, which would hide the first ask and change when the process exits."""
         out: dict[tuple[str, str], _Live] = {}
         for s in self._claude_live() or []:
-            if isinstance(s.get("pid"), int) and s.get("session_id"):
-                out[("claude", s["session_id"])] = _Live(s["pid"], str(s.get("name") or ""), bool(s.get("named")))
+            pid = s.get("pid")
+            if isinstance(pid, int) and s.get("session_id"):
+                rec = _read_json(self.env.claude_home / "sessions" / f"{pid}.json")
+                out[("claude", s["session_id"])] = _Live(pid, _str(rec.get("name")), bool(s.get("named")))
         for entry in sorted((self.env.qwen_home / "sessions").glob("*.json")):
-            try:
-                rec = json.loads(entry.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if not isinstance(rec, dict):
-                continue
+            rec = _read_json(entry)
             pid, sid = rec.get("pid"), rec.get("sessionId")
             if isinstance(pid, int) and not isinstance(pid, bool) and isinstance(sid, str) and sid \
                     and self._pid_exists(pid):
-                out[("qwen", sid)] = _Live(pid, str(rec.get("name") or ""), False)
+                out[("qwen", sid)] = _Live(pid, _str(rec.get("name")), False)
         return out
 
     @staticmethod
