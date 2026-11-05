@@ -406,19 +406,58 @@ def stage_root(env: Env, index: Index, name: str, deadline: float) -> Suggestion
 
 class Pending:
     """The result of `suggest()`: `.local` at once; `.wait()` for the first valid model answer; `.join()` for the
-    background work to finish."""
+    background work to finish. With `defer_models` the model stages start only once `release_models()` is called
+    (directly or by `release_after`); `cancel()` drops the answer and keeps stages that have not started from
+    starting."""
 
-    def __init__(self, local: Suggestion):
+    def __init__(self, local: Suggestion, defer_models: bool = False):
         self.local = local
         self._answer: Suggestion | None = None
         self._lock = threading.Lock()
-        self._settled = threading.Event()  # first model answer delivered, or every model stage finished
+        self._settled = threading.Event()  # first model answer delivered, every model stage finished, or cancelled
+        self._release = threading.Event()  # the coordinator may start the model stages
+        self._cancelled = False
+        self._timer: threading.Timer | None = None
         self._thread: threading.Thread | None = None
+        if not defer_models:
+            self._release.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def release_models(self) -> None:
+        """Let the coordinator start the model stages (no effect once cancelled or already released)."""
+        self._release.set()
+
+    def release_after(self, delay: float) -> None:
+        """Release the model stages in `delay` seconds unless `cancel()` comes first."""
+        with self._lock:
+            if self._cancelled:
+                return
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(delay, self.release_models)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def cancel(self) -> None:
+        """Discard any model answer (no `on_update`; `wait()` returns None) and do not start the model stages if
+        they have not started yet. Stages already running finish in the background; their answer is dropped."""
+        with self._lock:
+            self._cancelled = True
+            self._answer = None
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+        self._release.set()  # wake a waiting coordinator, which sees the flag and stops
+        self._settled.set()
 
     def wait(self, timeout: float | None = None) -> Suggestion | None:
-        """The first valid model answer, or None if none came (yet) within `timeout`."""
+        """The first valid model answer, or None if none came (yet) within `timeout`, or after `cancel()`."""
         self._settled.wait(timeout)
-        return self._answer
+        with self._lock:
+            return None if self._cancelled else self._answer
 
     def join(self, timeout: float | None = None) -> bool:
         """Wait for every model stage to end; True when they have."""
@@ -433,8 +472,8 @@ def _offer(env: Env, name: str, pending: Pending, s: Suggestion | None,
     if s is None:
         return
     with pending._lock:
-        if pending._answer is not None:
-            return  # a second model answer is discarded
+        if pending._answer is not None or pending._cancelled:
+            return  # a second model answer, or any answer after cancel(), is discarded
         pending._answer = s
     try:
         on_update(s)
@@ -457,11 +496,16 @@ class _Rows:
 
 def _fan_out(env: Env, rows: _Rows, name: str, http: Http, runner: Runner | None, claude_exe: Path | None,
              pending: Pending, on_update: Callable[[Suggestion], None]) -> None:
-    """Background thread: build the prompt from the row snapshot, then run Qwen and Claude concurrently."""
+    """Background thread: wait until the model stages are released (at once unless deferred), then build the prompt
+    from the row snapshot and run Qwen and Claude concurrently. A cancelled request starts nothing."""
     def failed(stage: str, e: Exception) -> None:
         _log(env, {"ts": env.now(), "stage": stage, "name": name, "latency_ms": 0, "ok": False,
                    "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
 
+    pending._release.wait()
+    if pending.cancelled:
+        pending._settled.set()
+        return
     try:
         message = build_user_message(env, rows, name)
     except Exception as e:  # noqa: BLE001
@@ -487,11 +531,13 @@ def _fan_out(env: Env, rows: _Rows, name: str, http: Http, runner: Runner | None
 
 
 def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, runner: Runner | None = None,
-            on_update: Callable[[Suggestion], None], claude_exe: Path | None = None) -> Pending:
+            on_update: Callable[[Suggestion], None], claude_exe: Path | None = None,
+            defer_models: bool = False) -> Pending:
     """Return at once with the best local answer (history, then keywords, then root) and start one daemon thread
     that builds the prompt and runs Qwen and Claude concurrently; `on_update` gets the first valid model answer,
     once, from that thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection
-    is single-threaded); everything else works from that list."""
+    is single-threaded); everything else works from that list. `defer_models`: the thread waits for
+    `Pending.release_models()` (or `cancel()`) before starting the model stages."""
     try:
         rows = _Rows(index.rows())
     except Exception as e:  # noqa: BLE001 - suggest() never raises: carry on with no history
@@ -500,7 +546,7 @@ def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, run
         rows = _Rows([])
     local = (stage_history(env, rows, name, 0.0) or stage_keywords(env, rows, name, 0.0)
              or stage_root(env, rows, name, 0.0))
-    pending = Pending(local)
+    pending = Pending(local, defer_models=defer_models)
     pending._thread = threading.Thread(
         target=_fan_out, args=(env, rows, name, http, runner, claude_exe, pending, on_update),
         name="suggest", daemon=True)

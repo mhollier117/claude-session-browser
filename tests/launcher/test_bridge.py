@@ -343,3 +343,58 @@ def test_pending_suggestions_expire():
 
 def test_pending_suggestions_unknown_token():
     assert bridge.PendingSuggestions().poll("nope") is None
+
+
+def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp_path):
+    """Three names typed in quick succession (the dialog's 400 ms debounce fired three times): each call returns
+    its local answer, but only the last one's model stages run, once the name has been idle."""
+    import threading
+    import time
+    from launcher.suggest import suggest
+    (fake_env.qwen_home / "settings.json").write_text(json.dumps({
+        "model": {"name": "m", "baseUrl": "http://qwen.test:8000/v1"},
+        "modelProviders": {"openai": [{"id": "m", "envKey": "K"}]}, "env": {"K": "secret"}}), encoding="utf-8")
+    exe = tmp_path / "claude.exe"
+    exe.write_text("")
+    lock, posts = threading.Lock(), []
+
+    def http(method, url, headers, body, timeout):
+        if method == "POST":
+            with lock:
+                posts.append(body["messages"][1]["content"])
+            return 200, {"choices": [{"message": {"content": json.dumps({"path": "work/halo"})}}]}
+        return 200, {"data": [{"id": "m-current"}]}
+
+    class Runner:
+        def __init__(self):
+            self.inputs = []
+
+        def run(self, args, cwd, env=None, timeout=60, input=None):
+            with lock:
+                self.inputs.append(input)
+            return Result(1, "", "not run in tests")
+
+    runner, idx, store = Runner(), _index(fake_env), bridge.PendingSuggestions()
+    try:
+        handles, tokens = [], []
+        for name in ("fix", "fix the", "fix the vpn tunnel"):
+            p = suggest(fake_env, idx, name, http=http, runner=runner, claude_exe=exe, on_update=lambda s: None,
+                        defer_models=True)
+            handles.append(p)
+            tokens.append(store.supersede(p, idle=0.3))
+        assert handles[2].local.source == "keywords"
+        time.sleep(0.1)
+        assert posts == [] and runner.inputs == []  # still within the idle time: no model call yet
+        deadline = time.monotonic() + 5
+        while store.poll(tokens[2]) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        for h in handles:
+            assert h.join(5)
+        assert handles[0].cancelled and handles[1].cancelled and not handles[2].cancelled
+        assert len(posts) == 1 and "fix the vpn tunnel" in posts[0]
+        assert len(runner.inputs) == 1 and "fix the vpn tunnel" in runner.inputs[0]
+        assert store.poll(tokens[0]) is None and store.poll(tokens[1]) is None
+    finally:
+        for h in handles:
+            h.cancel()
+        idx.close()

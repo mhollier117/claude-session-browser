@@ -28,6 +28,7 @@ from .suggest import Pending, Suggestion, _resolve
 from .tree import children, new_folder_kind_options
 
 SUGGEST_TTL_S = 60.0
+MODEL_IDLE_S = 1.5  # the browser starts the model stages only once the name has been left alone this long
 GITHUB_ACCOUNTS = (None, "personal", "work")
 _PS_QUOTES = "'‘’‚‛"  # PowerShell treats the typographic single quotes as `'` too
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -228,6 +229,7 @@ class PendingSuggestions:
         self._ttl = ttl
         self._clock = clock
         self._items: dict[str, tuple[float, Pending]] = {}
+        self._current: Pending | None = None  # the request `supersede` issued last
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -244,6 +246,18 @@ class PendingSuggestions:
             self._purge()
             self._items[token] = (self._clock(), pending)
         return token
+
+    def supersede(self, pending: Pending, idle: float | None = None) -> str:
+        """Add `pending` (made with `defer_models=True`) as the dialog's current request: the one issued before it
+        is cancelled (its model stages never start if they had not), and `pending`'s model stages are released
+        after `idle` seconds unless a newer request supersedes it first. So typing runs the models once, for the
+        name the user paused on."""
+        with self._lock:
+            previous, self._current = self._current, pending
+        if previous is not None:
+            previous.cancel()
+        pending.release_after(MODEL_IDLE_S if idle is None else idle)
+        return self.add(pending)
 
     def poll(self, token: str) -> Suggestion | None:
         """The model's answer once it is there (then the entry is dropped); None while waiting, or for an unknown or
