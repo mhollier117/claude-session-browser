@@ -158,16 +158,18 @@ def _parts(path: str | Path) -> tuple[str, ...]:
 class Index:
     def __init__(self, env: Env, db_path: Path | None = None,
                  claude_live: Callable[[], list[dict] | None] | None = None,
-                 pid_exists: Callable[[int], bool] | None = None):
+                 pid_exists: Callable[[int], bool] | None = None, check_same_thread: bool = True):
         """`claude_live` (a `LiveSessions.snapshot`-shaped callable: dicts with session_id, pid, named) and
         `pid_exists` (Qwen registry check) are injectable for tests; by default the Claude registry is read
-        directly (`claude_registry_live`) and Qwen pids are checked with `psutil.pid_exists`."""
+        directly (`claude_registry_live`) and Qwen pids are checked with `psutil.pid_exists`.
+        `check_same_thread=False` lets other threads use the connection; the caller must then serialise every use
+        (the session browser holds a lock, since pywebview calls each js_api method on a thread of its own)."""
         self.env = env
         self.db_path = Path(db_path) if db_path else env.data_dir / "index.sqlite"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
         self._pid_exists = pid_exists or _default_pid_exists
-        self._db = sqlite3.connect(self.db_path)
+        self._db = sqlite3.connect(self.db_path, check_same_thread=check_same_thread)
         self._db.row_factory = sqlite3.Row
         with self._db:
             if self._db.execute("PRAGMA user_version").fetchone()[0] != _SCHEMA_VERSION:
