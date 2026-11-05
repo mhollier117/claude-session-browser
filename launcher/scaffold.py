@@ -75,7 +75,7 @@ class _Failed(Exception):
     pass
 
 
-_BAD_CHARS = set('/\\:<>"|?*')
+_BAD_CHARS = set('/\\:<>"|?*;')  # ';': Windows Terminal's `-d` and command lines split at it
 
 
 def check_name(name: str) -> None:
