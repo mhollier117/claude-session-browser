@@ -78,7 +78,8 @@ class _Failed(Exception):
 _BAD_CHARS = set('/\\:<>"|?*')
 
 
-def _check_name(name: str) -> None:
+def check_name(name: str) -> None:
+    """Raise ValueError unless `name` is safe to create as one folder (the rule `create_folder` applies)."""
     if not name or name in (".", "..") or name.startswith("."):
         raise ValueError(f"invalid folder name: {name!r}")
     if _BAD_CHARS & set(name):
@@ -96,7 +97,7 @@ def _clean_env(**extra: str) -> dict:
 def create_folder(parent: Path, name: str, kind: str, session_name: str, runner: Runner | None = None,
                   github: str | None = None) -> Created:
     """Make `parent/name` as `kind`. Validates before touching the disk; git/GitHub problems become warnings."""
-    _check_name(name)
+    check_name(name)
     if kind not in KINDS:
         raise ValueError(f"unknown folder kind: {kind!r}")
     if github not in (None, "personal", "work"):

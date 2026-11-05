@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .index import Index
 from .paths import Env
-from .scaffold import Runner, _check_name
+from .scaffold import Runner, check_name
 from .suggest_prompt import SYSTEM_PROMPT, build_user_message
 from .tree import slug
 
@@ -151,7 +151,7 @@ def validate(env: Env, raw, source: str = "") -> Suggestion | None:
         if not isinstance(new_folder, str) or slug(new_folder) != new_folder:
             return None
         try:
-            _check_name(new_folder)
+            check_name(new_folder)
         except ValueError:
             return None
     confidence = raw.get("confidence") if raw.get("confidence") in _CONFIDENCE else "low"
