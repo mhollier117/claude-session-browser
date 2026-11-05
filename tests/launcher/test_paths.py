@@ -14,3 +14,12 @@ def test_default_env_honours_overrides(monkeypatch, tmp_path):
 def test_fake_env_layout(fake_env):
     assert (fake_env.root / "work" / "clients" / "bast" / "bifrost").is_dir()
     assert (fake_env.claude_home / "projects").is_dir() and (fake_env.qwen_home / "projects").is_dir()
+
+
+def test_session_helpers_write_lf_only(fake_env):
+    from launcher_helpers import write_claude_session, write_qwen_session
+    cwd = fake_env.root / "work" / "net"
+    c = write_claude_session(fake_env, cwd, "s1", [{"a": 1}, {"b": 2}])
+    q = write_qwen_session(fake_env, cwd, "s2", [{"a": 1}])
+    assert b"\r" not in c.read_bytes() and b"\r" not in q.read_bytes()
+    assert q.with_name("s2.runtime.json").is_file()
