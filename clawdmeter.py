@@ -740,6 +740,31 @@ class ClawdmeterLink:
                 wait = RETRY_BACKOFF[min(fails - 1, len(RETRY_BACKOFF) - 1)]
                 await self._sleep(wait)
 
+    def _client_options(self) -> dict:
+        """Zusaetzliche BleakClient-Argumente. Nach einem Versuch ohne
+        Clawdmeter-Dienst liest Windows die Service-Liste beim naechsten Mal
+        direkt vom Geraet statt aus seinem Cache."""
+        if sys.platform == "win32" and getattr(self, "_uncached_next", False):
+            return {"winrt": {"use_cached_services": False}}
+        return {}
+
+    def _service_missing(self, address: str) -> float:
+        """Die Verbindung steht, aber der Clawdmeter-Dienst fehlt in der
+        Liste. Gibt zurueck, wie lange vor dem naechsten Versuch gewartet
+        wird. Beim ersten Mal ist es meist Windows' veralteter Cache: sofort
+        noch einmal, ohne Cache, und noch ohne Fehlermeldung. Fehlt er auch
+        frisch gelesen, ist es wirklich das falsche oder ein belegtes Geraet."""
+        if not getattr(self, "_uncached_next", False):
+            self._uncached_next = True
+            self._log(f"{address}: no Clawdmeter service in the cached list, "
+                      "retrying with a fresh one")
+            return 1.0
+        self._set(connected=False, last_error=t(
+            "Gerät meldet keinen Clawdmeter-Dienst — falsches Gerät, "
+            "oder es ist von einem anderen Programm belegt"))
+        self._log(f"{address}: no Clawdmeter service found")
+        return RETRY_INTERVAL
+
     async def _session(self, address: str) -> None:
         import asyncio
         from bleak import BleakClient
@@ -761,21 +786,21 @@ class ClawdmeterLink:
         with self._lock:
             erster = int(self._status.get("attempt") or 1) <= 1
         timeout = CONNECT_TIMEOUT_FIRST if erster else CONNECT_TIMEOUT
-        async with BleakClient(_ble_target(address), timeout=timeout) as client:
-            # Fehlt der Service, hat das zwei moegliche Gruende: falsches
-            # Geraet gewaehlt -- oder das Geraet haengt schon an einem anderen
-            # Programm, dann liefert Windows eine unvollstaendige Service-Liste.
-            # Beides ist kein Grund aufzugeben, aber ein Schreibversuch waere
-            # zwecklos. Also melden und es spaeter nochmal probieren.
+        extra = self._client_options()
+        async with BleakClient(_ble_target(address), timeout=timeout, **extra) as client:
+            # Fehlt der Service, gibt es drei moegliche Gruende: Windows hat
+            # eine veraltete Service-Liste aus seinem Cache geliefert (z.B.
+            # nach einem Neustart oder Flashen des Geraets), das Geraet haengt
+            # an einem anderen Programm, oder es ist das falsche Geraet. Der
+            # erste Fall ist der haeufigste: dann sofort noch einmal, diesmal
+            # mit frisch vom Geraet gelesener Liste (_service_missing).
             if not any(s.uuid.lower() == SERVICE_UUID
                        for s in client.services):
-                self._set(connected=False, last_error=t(
-                    "Gerät meldet keinen Clawdmeter-Dienst — falsches Gerät, "
-                    "oder es ist von einem anderen Programm belegt"))
-                self._log(f"{address}: no Clawdmeter service found")
-                await self._sleep(RETRY_INTERVAL)
+                wait = self._service_missing(address)
+                await self._sleep(wait)
                 return
 
+            self._uncached_next = False          # gefunden: wieder mit Cache
             self._set(connected=True, last_error=None)
             self._log(f"Clawdmeter connected ({address})")
             try:

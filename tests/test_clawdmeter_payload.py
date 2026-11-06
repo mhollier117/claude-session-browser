@@ -248,6 +248,30 @@ def test_session_changes_are_noticed_before_any_usage_numbers_arrived():
     assert not inactive._extras_changed()
 
 
+# -- a stale Windows service cache after the gadget restarts ------------------
+
+def test_missing_service_retries_at_once_with_a_fresh_service_list(monkeypatch):
+    monkeypatch.setattr(cm.sys, "platform", "win32")
+    logs = []
+    lk = cm.ClawdmeterLink(log=logs.append)
+    assert lk._client_options() == {}                       # normally: Windows' cache
+    # First miss: most likely the cache. Retry soon, uncached, no error shown.
+    assert lk._service_missing("AA:BB") <= 2
+    assert lk.status()["last_error"] is None
+    assert lk._client_options() == {"winrt": {"use_cached_services": False}}
+    # Still missing when read fresh: a real problem, shown, normal back-off.
+    assert lk._service_missing("AA:BB") == cm.RETRY_INTERVAL
+    assert "Clawdmeter" in (lk.status()["last_error"] or "")
+    assert lk._client_options() == {"winrt": {"use_cached_services": False}}
+
+
+def test_fresh_service_list_only_on_windows(monkeypatch):
+    monkeypatch.setattr(cm.sys, "platform", "linux")
+    lk = cm.ClawdmeterLink()
+    lk._service_missing("AA:BB")
+    assert lk._client_options() == {}
+
+
 # -- requests from the device on REQ (0x01 refresh, 0x02 switch account) ------
 
 def test_parse_request():
