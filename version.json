@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.8",
-  "notes": "Clawdmeter: session list keeps updating when the usage check fails; waiting prompts debounced (5 s), stable session order, unique session names, wait start time for the gadget",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.8",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.8/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "074c4663366fade0a88c3f3826e6be96e85234e32aa91d93da0160c19546bc19"
+  "version": "1.6.1.9",
+  "notes": "App reconnects by itself when Windows serves a stale Clawdmeter service list (after the gadget restarts); installer starts the app and the name-gate setup with the user's rights even when run as administrator (fixes PermissionError on account files)",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.9",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.9/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "3794f50a594852f07df11121ec507a7fdcf572f854b8dac29e830d208baeb196"
 }
