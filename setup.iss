@@ -102,15 +102,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     Flags: uninsdeletevalue; Tasks: startupicon
 
 [Run]
+; runasoriginaluser: auch wenn Setup als Administrator laeuft, starten App
+; und Namenspflicht-Einrichtung mit den Rechten des Nutzers. Sonst gehoeren
+; Dateien, die sie anlegen (Konten in ~/.claude-accounts, der Hook), den
+; Administratoren, und die normal gestartete App kann sie nicht mehr ersetzen
+; (PermissionError auf meta.json).
 ; Namenspflicht (UserPromptSubmit-Hook) einrichten bzw. das Skript nach einem
 ; Update auffrischen. "default" laesst sie aus, wenn der Nutzer sie in der App
 ; bewusst ausgeschaltet hat - Updates laufen still und sollen das respektieren.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--name-gate default";     Flags: runhidden waituntilterminated; Tasks: namegate
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--name-gate default";     Flags: runhidden waituntilterminated runasoriginaluser; Tasks: namegate
 ; Nach dem Install starten - WICHTIG: auch bei Silent-Install starten!
 ; Der alte Update-Batch (v1.1.2/v1.1.3) hatte einen Bug beim Relaunch.
 ; Indem der Installer selbst die App startet ist der Batch egal.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; \
-    Flags: nowait postinstall
+    Flags: nowait postinstall runasoriginaluser
 
 [UninstallRun]
 ; Alte Runner-Instanz beenden bevor Dateien geloescht werden (verhindert Lock)
