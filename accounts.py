@@ -226,13 +226,24 @@ def _read_json(path: Path):
     return json.loads(raw) if raw.strip() else {}
 
 
+def _private_mkdir(folder: Path) -> None:
+    """Create a store folder. On other systems 0700 is what keeps sign-ins
+    private. On Windows the user-profile ACLs plus DPAPI protect the store, so
+    the folder just inherits them: there mode=0o700 (Python 3.12.4+/3.13) sets
+    a protected DACL for SYSTEM, Administrators and OWNER RIGHTS only, and a
+    folder created by an elevated run is owned by Administrators - a normal
+    run then gets "Access is denied" on its own sign-ins."""
+    if os.name == "nt":
+        folder.mkdir(parents=True, exist_ok=True)
+    else:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     """Write via temp file + rename. Retries briefly because Windows refuses
     the rename while another program has the file open."""
-    # Owner-only from the start (0700 folders, 0600 files). On Windows these
-    # modes are mostly ignored; there the user-profile ACLs plus DPAPI protect
-    # the store. On other systems they're what keeps sign-ins private.
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Owner-only from the start (0700 folders, 0600 files; see _private_mkdir).
+    _private_mkdir(path.parent)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
     with os.fdopen(fd, "wb") as f:
@@ -265,7 +276,7 @@ class _FileLock:
         self.timeout = timeout
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _private_mkdir(self.path.parent)
         start = time.time()
         while True:
             try:

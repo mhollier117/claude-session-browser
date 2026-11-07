@@ -326,3 +326,21 @@ def test_fable_weekly_limit_is_parsed_but_never_marks_the_account_limited():
 def test_no_fable_entry_means_none():
     u = A.AccountManager.parse_usage({"five_hour": None, "seven_day": {"utilization": 5}}, NOW)
     assert u["f"] is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_store_folders_inherit_profile_acl(tmp_path):
+    # mkdir(mode=0o700) on Windows (Python 3.12.4+/3.13) sets a protected DACL
+    # granting only SYSTEM, Administrators and OWNER RIGHTS. A folder created by
+    # an elevated run is owned by Administrators, so a normal run then gets
+    # "Access is denied" on signin.bin. The store must inherit the profile ACL.
+    import subprocess
+    target = tmp_path / "store" / UA / "signin.bin"
+    A._atomic_write(target, b"x")
+    for folder in (target.parent.parent, target.parent):
+        acl = subprocess.run(["icacls", str(folder)], capture_output=True,
+                             text=True).stdout
+        # Every entry inherited = no folder-specific DACL. (pytest's own
+        # tmp_path is made with 0o700, so OWNER RIGHTS may arrive inherited.)
+        aces = [line for line in acl.splitlines() if ":(" in line]
+        assert aces and all("(I)" in line for line in aces), acl

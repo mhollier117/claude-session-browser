@@ -3,9 +3,11 @@
 Repo: `mhollier117/claude-session-browser` (public; keep it public). Upstream: `juppeee/claude-session-browser`.
 No GitHub Actions workflows in this repo: pushes cost no CI minutes.
 
-## Current state (2026-11-03)
-- Latest release: **1.6.1.7** (installer, install-here zip, portable zip). Installed on this PC via the
-  install-here zip at `C:\claude-code\ClaudeSessionBrowser` (Install.cmd next to it in `C:\claude-code`).
+## Current state (2026-11-06)
+- Latest release: **1.6.1.10** (installer, install-here zip, portable zip). Work happens on two PCs;
+  1.6.1.8 and 1.6.1.9 came from the other one. Always `git fetch` and fast-forward before releasing.
+- Account store folders on Windows inherit the profile ACL (`accounts._private_mkdir`); together with
+  1.6.1.9's `runasoriginaluser` installer change this closes the "PermissionError ... signin.bin" bug.
 - Build environment on this PC: `.venv` (Python 3.12, per-user) + Inno Setup 6 (per-user, winget).
   Release: `.\release.ps1 -Version <x.y.z.n> -Notes "..." -Publish` (runs i18n check, full tests, builds, commits, pushes, publishes).
 
