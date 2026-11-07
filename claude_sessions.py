@@ -47,7 +47,7 @@ except Exception:
 logging.getLogger("pywebview").setLevel(logging.CRITICAL)
 
 # ----- Version & Update ---------------------------------------------------- #
-VERSION = "1.6.1.9"
+VERSION = "1.6.1.10"
 # Wird beim GitHub-Setup auf dein echtes Repo gesetzt (OWNER/REPO):
 UPDATE_URL = "https://raw.githubusercontent.com/mhollier117/claude-session-browser/main/version.json"
 

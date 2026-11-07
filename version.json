@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.9",
-  "notes": "App reconnects by itself when Windows serves a stale Clawdmeter service list (after the gadget restarts); installer starts the app and the name-gate setup with the user's rights even when run as administrator (fixes PermissionError on account files)",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.9",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.9/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "3794f50a594852f07df11121ec507a7fdcf572f854b8dac29e830d208baeb196"
+  "version": "1.6.1.10",
+  "notes": "Combines both PCs' work: everything in 1.6.1.9 (Clawdmeter reconnect, installer runs the app as the original user) plus account store folders that inherit your profile's permissions on Windows, so running the app as administrator no longer breaks a normal run with 'PermissionError: Access is denied ... signin.bin'.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.10",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.10/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "c8920670e98d3c7c70aa8f0c3c1262926de5c4d5781e0480df835149e2cff1f6"
 }
