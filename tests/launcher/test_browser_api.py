@@ -313,20 +313,26 @@ def _qwen_settings(env):
         "env": {"K": "secret"}}), encoding="utf-8")
 
 
+def _choose(message, rel):
+    """The v2 answer picking candidate `rel` from the numbered user message."""
+    import re
+    n = int(re.search(rf"^(\d+)\. \w+\s+{re.escape(rel)}(?:  |$)", message, re.M).group(1))
+    return json.dumps({"choice": n, "new_folder": None, "confidence": "high", "reason": "tickets"})
+
+
 def test_launcher_suggest_returns_local_then_poll(fake_env, api, monkeypatch):
     _qwen_settings(fake_env)
-    answer = json.dumps({"path": "work/halo", "new_folder": None, "confidence": "high", "reason": "tickets"})
     http_calls = []
 
     def http(method, url, headers, body, timeout):
         http_calls.append((method, url))
         if method == "GET":
             return 200, {"data": [{"id": "m-current"}]}
-        return 200, {"choices": [{"message": {"content": answer}}]}
+        return 200, {"choices": [{"message": {"content": _choose(body["messages"][1]["content"], "work\\halo")}}]}
     monkeypatch.setattr(cs, "_LAUNCHER_HTTP", http)
     res = api.launcher_suggest("fix the vpn tunnel")
-    assert res["local"] == {"path": "work/net", "new_folder": None, "confidence": "low",
-                            "reason": "name mentions vpn", "source": "keywords"}
+    assert res["local"] == {"path": "", "new_folder": None, "confidence": "low",
+                            "reason": "no suggestion; start at the root", "source": "root"}  # no history yet
     token = res["token"]
     got, deadline = None, time.monotonic() + 10
     while got is None and time.monotonic() < deadline:
@@ -347,7 +353,7 @@ def test_launcher_suggest_runs_the_models_only_for_the_latest_name(fake_env, api
         if method == "GET":
             return 200, {"data": [{"id": "m-current"}]}
         posts.append(body["messages"][1]["content"])
-        return 200, {"choices": [{"message": {"content": json.dumps({"path": "work/halo"})}}]}
+        return 200, {"choices": [{"message": {"content": json.dumps({"choice": 1})}}]}
     monkeypatch.setattr(cs, "_LAUNCHER_HTTP", http)
     tokens = [api.launcher_suggest(n)["token"] for n in ("vpn", "vpn tun", "vpn tunnel")]
     assert posts == []  # nothing before the name has been idle

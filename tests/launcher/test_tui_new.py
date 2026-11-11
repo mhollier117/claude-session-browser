@@ -224,12 +224,13 @@ def test_bad_folder_name_is_shown_inline(fake_env, index):
 
 def test_local_suggestion_opens_picker_there(fake_env, index):
     r = fake_env.root
-    _session(fake_env, r / "home" / "homelab", "h1", "homelab pxe boot", fake_env.now() - 60)
+    (r / "home" / "homelab" / "pxe").mkdir()  # home\homelab itself is a place, never a project answer
+    _session(fake_env, r / "home" / "homelab" / "pxe", "h1", "homelab pxe boot", fake_env.now() - 60)
     index.refresh()
     flow = _flow(fake_env, index)
     flow.start("pxe boot rework")
-    assert flow.folder == r / "home" / "homelab"
-    assert flow.banner() == "suggested by history · 1 similar session lives here"
+    assert flow.folder == r / "home" / "homelab" / "pxe"
+    assert flow.banner() == "suggested by history · matches pxe, boot"
 
 
 def test_suggestion_jumps_when_user_has_not_moved(fake_env, index):
@@ -303,8 +304,9 @@ def test_slash_fragment_resolves_from_the_root(fake_env, index):
 
 def test_live_model_answer_arrives_through_poll(fake_env, index):
     _qwen_settings(fake_env)
-    http = FakeHttp(json.dumps({"path": "work\\halo", "new_folder": None, "confidence": "high",
-                                "reason": "halo work"}))
+    from launcher.suggest import prepare
+    halo = [c.rel for c in prepare(fake_env, index.rows(), "zzz qqq").choices].index("work\\halo") + 1
+    http = FakeHttp(json.dumps({"choice": halo, "new_folder": None, "confidence": "high", "reason": "halo work"}))
     flow = _flow(fake_env, index, http=http)
     flow.start("zzz qqq")
     assert flow.folder == fake_env.root

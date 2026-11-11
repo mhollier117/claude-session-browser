@@ -362,7 +362,7 @@ def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp
         if method == "POST":
             with lock:
                 posts.append(body["messages"][1]["content"])
-            return 200, {"choices": [{"message": {"content": json.dumps({"path": "work/halo"})}}]}
+            return 200, {"choices": [{"message": {"content": json.dumps({"choice": 1})}}]}
         return 200, {"data": [{"id": "m-current"}]}
 
     class Runner:
@@ -382,7 +382,7 @@ def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp
                         defer_models=True)
             handles.append(p)
             tokens.append(store.supersede(p, idle=0.3))
-        assert handles[2].local.source == "keywords"
+        assert handles[2].local.source == "root"  # nothing in the (empty) index matches
         time.sleep(0.1)
         assert posts == [] and runner.inputs == []  # still within the idle time: no model call yet
         deadline = time.monotonic() + 5
@@ -392,7 +392,7 @@ def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp
             assert h.join(5)
         assert handles[0].cancelled and handles[1].cancelled and not handles[2].cancelled
         assert len(posts) == 1 and "fix the vpn tunnel" in posts[0]
-        assert len(runner.inputs) == 1 and "fix the vpn tunnel" in runner.inputs[0]
+        assert runner.inputs == []  # Qwen answered: Claude only runs when Qwen fails
         assert store.poll(tokens[0]) is None and store.poll(tokens[1]) is None
     finally:
         for h in handles:

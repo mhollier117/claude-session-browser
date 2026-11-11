@@ -1,9 +1,15 @@
-"""Where should a new session live? Local answers (history, keywords, root) come back at once; the self-hosted Qwen
-endpoint and Claude Code (Haiku) run concurrently in the background and the first valid model answer is offered once.
+"""Where should a new session live? Retrieve, then choose by number.
 
-The picker never waits on the model stages: `suggest()` returns the local answer immediately; Qwen has 6 s in total
-(1 s TCP connect, 2 s for the model list) and Claude 20 s, each enforced inside its own stage. Every stage attempt is
-appended to `data_dir/suggest.log` (stage, name, latency, outcome, prompt size; never the API key or the prompt)."""
+`suggest()` ranks the existing folders against the name locally (`retrieve`) and returns the top one at once
+(source "history", with `strong` saying whether it is clear enough to act on without a model; source "root" when
+nothing scores). One background thread then asks the models, in order: the self-hosted Qwen endpoint first, and
+Claude Code (Haiku) only when Qwen was skipped or failed. Both get the v2 prompt, a short numbered list of PROJECT
+and PLACE candidates, and answer with a number.
+
+Qwen has 6 s in total (1 s TCP connect, 2 s for the model list) and Claude 20 s, each enforced inside its own stage.
+A failed connect or a model-list timeout is remembered in `data_dir/qwen-unreachable` and Qwen is skipped without a
+network call for the next 10 minutes. Every stage attempt is appended to `data_dir/suggest.log` (stage, name,
+latency, outcome, prompt size; never the API key or the prompt); `log_outcome` adds the folder finally chosen."""
 from __future__ import annotations
 
 import json
@@ -17,35 +23,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import retrieve
 from .index import Index
 from .paths import Env
 from .scaffold import Runner, check_name
-from .suggest_prompt import SYSTEM_PROMPT, build_user_message
+from .suggest_prompt import SYSTEM_PROMPT, Choice, build_user_message
 from .tree import slug
 
 QWEN_TOTAL_S = 6.0
 QWEN_CONNECT_S = 1.0
 QWEN_MODELS_S = 2.0
 CLAUDE_TOTAL_S = 20.0
+UNREACHABLE_FILE = "qwen-unreachable"
+UNREACHABLE_TTL_S = 600.0
 
-# Copied from cc\launcher-spike\cc-new-spike.ps1 ($keywords). Matched as whole words of the lower-cased name.
-KEYWORDS: dict[str, tuple[str, ...]] = {
-    "work\\net": ("forti", "fortigate", "fortios", "vpn", "ikev2", "cert", "dns", "firewall", "acme"),
-    "work\\halo": ("halo", "psa", "ticket", "runbook"),
-    "work\\rewst": ("rewst", "workflow", "jinja", "graphql"),
-    "work\\ninja": ("ninja", "rmm", "script", "deploy"),
-    "work\\cipp": ("cipp", "standards"),
-    "work\\m365": ("m365", "entra", "intune", "exchange", "teams", "sharepoint", "ca policy"),
-    "work\\vendors": ("huntress", "keeper", "keepit", "vircom", "blackpoint", "proofpoint", "screenconnect"),
-    "home\\homelab": ("homelab", "pxe", "supermicro", "fgt2", "traefik"),
-    "home\\ai": ("qwen", "ollama", "llama", "model"),
-    "cc": ("claude", "session", "launcher", "hook", "skill", "reorg"),
-}
-
-_STOP = {"new", "fix", "phase", "update", "the", "and", "for", "with"}
 _CONFIDENCE = ("high", "medium", "low")
 _NULLS = ("", "null", "none")
 _CLAUDE_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")  # use the subscription login, never a key
@@ -58,7 +52,42 @@ class Suggestion:
     new_folder: str | None
     confidence: str  # high | medium | low
     reason: str
-    source: str  # qwen | claude | history | keywords | root
+    source: str  # qwen | claude | history | root
+    alternatives: list[Path] = field(default_factory=list)  # the next two ranked projects (not this one's branch)
+    strong: bool = False  # local answers only: clear enough to move the picker without a model
+
+
+class Unreachable(OSError):
+    """The TCP connect to the model endpoint failed."""
+
+
+@dataclass
+class Prepared:
+    """Retrieval for one session name: the ranked projects, the places, and the numbered prompt built from them."""
+    scored: list[retrieve.Scored]
+    places: list[retrieve.Place]
+    message: str
+    choices: list[Choice]
+
+
+def prepare(env: Env, rows: list, name: str) -> Prepared:
+    """Rank the folders for `name` (from the row list) and build the v2 user message."""
+    cands = retrieve.candidates(env, None, rows)
+    scored = retrieve.rank(name, cands, env.now())
+    places = retrieve.places(env, cands, name)
+    message, choices = build_user_message(name, scored, places)
+    return Prepared(scored, places, message, choices)
+
+
+def _same_branch(a: Path, b: Path) -> bool:
+    pa, pb = [p.lower() for p in Path(a).parts], [p.lower() for p in Path(b).parts]
+    n = min(len(pa), len(pb))
+    return pa[:n] == pb[:n]
+
+
+def _alternatives(prep: Prepared, chosen: Path, n: int = 2) -> list[Path]:
+    """The next `n` ranked projects that are neither `chosen` nor its ancestor or descendant."""
+    return [s.cand.path for s in prep.scored if not _same_branch(s.cand.path, chosen)][:n]
 
 
 Http = Callable[[str, str, dict, "dict | None", float], "tuple[int, dict | str]"]
@@ -180,13 +209,42 @@ def _parse_json(text) -> dict | None:
     return None
 
 
-def _model_answer(env: Env, text, source: str) -> Suggestion:
+def _place_name(folder: Path, value) -> str | None:
+    """The model's proposed new folder name as a safe slug that does not exist yet in `folder`, else None."""
+    if not isinstance(value, str) or value.strip().lower() in _NULLS:
+        return None
+    name = slug(value.strip())
+    try:
+        check_name(name)
+    except ValueError:
+        return None
+    return None if (folder / name).exists() else name
+
+
+def validate_choice(env: Env, raw, prep: Prepared, source: str = "") -> Suggestion | None:
+    """A v2 answer (`{"choice": n, "new_folder", "confidence", "reason"}`) as a Suggestion, or None unless `choice`
+    is an int naming one of the numbered candidates. A PROJECT never carries a new folder; a PLACE keeps its place
+    even when its proposed name is unusable (the name is dropped)."""
+    if not isinstance(raw, dict):
+        return None
+    n = raw.get("choice")
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= len(prep.choices):
+        return None
+    choice = prep.choices[n - 1]
+    new_folder = _place_name(choice.path, raw.get("new_folder")) if choice.kind == "PLACE" else None
+    confidence = raw.get("confidence") if raw.get("confidence") in _CONFIDENCE else "low"
+    reason = " ".join(raw["reason"].split()) if isinstance(raw.get("reason"), str) else ""
+    return Suggestion(choice.path, new_folder, confidence, reason, source,
+                      alternatives=_alternatives(prep, choice.path))
+
+
+def _model_answer(env: Env, text, prep: Prepared, source: str) -> Suggestion:
     raw = _parse_json(text)
     if raw is None:
         raise _Skip("answer is not JSON")
-    s = validate(env, raw, source=source)
+    s = validate_choice(env, raw, prep, source=source)
     if s is None:
-        raise _Skip(f"answer failed validation: path={raw.get('path')!r} new_folder={raw.get('new_folder')!r}")
+        raise _Skip(f"answer failed validation: choice={raw.get('choice')!r} of {len(prep.choices)}")
     return s
 
 
@@ -208,11 +266,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def default_http(method: str, url: str, headers: dict, body: dict | None, timeout: float) -> tuple[int, dict | str]:
     """One HTTP call: a TCP connect check (at most 1 s) first, then the request without any proxy (the endpoint is
-    on the LAN/VPN) and without following redirects. Returns (status, parsed JSON or text); network errors raise."""
+    on the LAN/VPN) and without following redirects. Returns (status, parsed JSON or text); a failed connect check
+    raises `Unreachable`, other network errors raise as they come."""
     parts = urllib.parse.urlsplit(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
-    with socket.create_connection((parts.hostname, port), timeout=min(QWEN_CONNECT_S, timeout)):
-        pass
+    try:
+        with socket.create_connection((parts.hostname, port), timeout=min(QWEN_CONNECT_S, timeout)):
+            pass
+    except OSError as e:
+        raise Unreachable(f"connect to {parts.hostname}:{port} failed: {type(e).__name__}") from None
     data = None if body is None else json.dumps(body).encode("utf-8")
     hdrs = dict(headers)
     if data is not None:
@@ -257,35 +319,73 @@ def _current_alias(data) -> str | None:
     return next((i for i in ids if isinstance(i, str) and i.endswith("-current")), None)
 
 
-def stage_qwen(http: Http = default_http, message: str | None = None) -> Stage:
-    """Stage 1: the self-hosted Qwen endpoint. `message` is the prebuilt user message (built from the index when
-    None, on the calling thread)."""
+def qwen_request(model: str, message: str) -> dict:
+    """The chat-completions body the Qwen stage sends (also used by tools/suggest_eval.py)."""
+    return {
+        "model": model,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": message}],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "max_tokens": 400,
+    }
+
+
+def _is_timeout(e: BaseException) -> bool:
+    return isinstance(e, TimeoutError) or (isinstance(e, urllib.error.URLError)
+                                           and isinstance(e.reason, TimeoutError))
+
+
+def _unreachable_cached(env: Env) -> bool:
+    try:
+        when = float((env.data_dir / UNREACHABLE_FILE).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return 0 <= env.now() - when < UNREACHABLE_TTL_S
+
+
+def _remember_unreachable(env: Env) -> None:
+    try:
+        env.data_dir.mkdir(parents=True, exist_ok=True)
+        (env.data_dir / UNREACHABLE_FILE).write_text(repr(env.now()), encoding="utf-8")
+    except OSError:
+        pass  # only an optimisation: the next attempt pays the connect timeout again
+
+
+def _prepared(env: Env, index, name: str, prepared: Prepared | None) -> Prepared:
+    return prepared if prepared is not None else prepare(env, index.rows(), name)
+
+
+def stage_qwen(http: Http = default_http, prepared: Prepared | None = None) -> Stage:
+    """Stage 1: the self-hosted Qwen endpoint. `prepared` is the retrieval and prompt for this name (worked out
+    from `index.rows()` when None). Skipped without a network call while `data_dir/qwen-unreachable` is fresh."""
 
     def run(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
         def body(info: dict) -> Suggestion:
             end = min(deadline, time.monotonic() + QWEN_TOTAL_S)
             key, base, configured = _qwen_config(env)
             info["secret"] = key
-            msg = message if message is not None else build_user_message(env, index, name)
-            info["prompt_chars"] = len(SYSTEM_PROMPT) + len(msg)
+            if _unreachable_cached(env):
+                raise _Skip("skipped: unreachable (cached)")
+            prep = _prepared(env, index, name, prepared)
+            info["prompt_chars"] = len(SYSTEM_PROMPT) + len(prep.message)
             headers = {"Authorization": f"Bearer {key}"}
             try:
                 status, data = http("GET", base + "/models", headers, None, min(QWEN_MODELS_S, _remaining(end)))
                 alias = _current_alias(data) if status == 200 else None
             except _Skip:
                 raise
-            except Exception:  # noqa: BLE001 - no model list: fall back to the configured name
+            except Exception as e:  # noqa: BLE001 - no model list: fall back to the configured name
+                if isinstance(e, Unreachable) or _is_timeout(e):
+                    _remember_unreachable(env)
+                    raise _Skip(f"unreachable: {type(e).__name__}: {e}") from None
                 alias = None
-            model = alias or configured
-            request = {
-                "model": model,
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": msg}],
-                "chat_template_kwargs": {"enable_thinking": False},
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-                "max_tokens": 400,
-            }
-            status, data = http("POST", base + "/chat/completions", headers, request, _remaining(end))
+            try:
+                status, data = http("POST", base + "/chat/completions", headers,
+                                    qwen_request(alias or configured, prep.message), _remaining(end))
+            except Unreachable as e:
+                _remember_unreachable(env)
+                raise _Skip(f"unreachable: {e}") from None
             _remaining(end)  # an answer that arrives after the deadline is dropped
             if status != 200:
                 raise _Skip(f"HTTP {status}")
@@ -294,7 +394,7 @@ def stage_qwen(http: Http = default_http, message: str | None = None) -> Stage:
             except (KeyError, IndexError, TypeError):
                 raise _Skip("no choices[0].message.content in the response") from None
             info["answer"] = content
-            return _model_answer(env, content, "qwen")
+            return _model_answer(env, content, prep, "qwen")
 
         return _attempt(env, "qwen", name, body)
 
@@ -309,9 +409,9 @@ def _find_claude() -> Path | None:
     return fallback if fallback.is_file() else None
 
 
-def stage_claude(runner: Runner | None = None, exe: Path | None = None, message: str | None = None) -> Stage:
+def stage_claude(runner: Runner | None = None, exe: Path | None = None, prepared: Prepared | None = None) -> Stage:
     """Stage 2: Haiku through the signed-in Claude Code CLI (`claude.exe -p`), run from `data_dir/suggest-cwd`.
-    `exe` overrides the PATH / ~/.local/bin lookup; `message` as in `stage_qwen`."""
+    `exe` overrides the PATH / ~/.local/bin lookup; `prepared` as in `stage_qwen`."""
     runner = runner or Runner()
 
     def run(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
@@ -320,8 +420,8 @@ def stage_claude(runner: Runner | None = None, exe: Path | None = None, message:
             binary = Path(exe) if exe is not None else _find_claude()
             if binary is None or not binary.is_file():
                 raise _Skip("claude.exe not found")
-            msg = message if message is not None else build_user_message(env, index, name)
-            info["prompt_chars"] = len(SYSTEM_PROMPT) + len(msg)
+            prep = _prepared(env, index, name, prepared)
+            info["prompt_chars"] = len(SYSTEM_PROMPT) + len(prep.message)
             cwd = env.data_dir / "suggest-cwd"
             cwd.mkdir(parents=True, exist_ok=True)
             # the user message goes on stdin (print mode reads the prompt from it): no command-line length limit
@@ -329,7 +429,7 @@ def stage_claude(runner: Runner | None = None, exe: Path | None = None, message:
                     "--system-prompt", SYSTEM_PROMPT, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                     "--tools", "", "--no-session-persistence"]
             env_ = {k: v for k, v in os.environ.items() if k.upper() not in _CLAUDE_ENV_DROP}
-            res = runner.run(args, cwd, env=env_, timeout=_remaining(end), input=msg)
+            res = runner.run(args, cwd, env=env_, timeout=_remaining(end), input=prep.message)
             if res.code != 0:
                 raise _Skip(f"claude exited {res.code}: {res.err.strip()[:200]}")
             try:
@@ -339,7 +439,7 @@ def stage_claude(runner: Runner | None = None, exe: Path | None = None, message:
             if not isinstance(out, dict) or out.get("is_error"):
                 raise _Skip("claude reported is_error")
             info["answer"] = out.get("result")
-            return _model_answer(env, out.get("result"), "claude")
+            return _model_answer(env, out.get("result"), prep, "claude")
 
         return _attempt(env, "claude", name, body)
 
@@ -348,58 +448,54 @@ def stage_claude(runner: Runner | None = None, exe: Path | None = None, message:
 
 # ---- local stages ---------------------------------------------------------------------------------------------------
 
-def _tokens(text: str | None) -> set[str]:
-    return {t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 3 and t not in _STOP}
-
-
-def stage_history(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
-    """Stage 3: the folder whose sessions share the most words with the name (session names + folder name)."""
+def stage_history(env: Env, index: Index, name: str, deadline: float,
+                  prepared: Prepared | None = None) -> Suggestion | None:
+    """Stage 3 (local): the top-ranked existing folder (see `retrieve.rank`), with `strong` from `retrieve.strong`
+    and the next two ranked folders as alternatives."""
 
     def body(info: dict) -> Suggestion:
-        want = _tokens(name)
-        if not want:
-            raise _Skip("no distinctive words in the name")
-        groups: dict[str, list] = {}  # folder key -> [cwd, total score, sessions, last activity]
-        for r in index.rows():
-            if not r.cwd:
-                continue
-            score = len(want & (_tokens(r.display_name) | _tokens(Path(r.cwd).name)))
-            if score:
-                g = groups.setdefault(str(Path(r.cwd)).lower(), [r.cwd, 0, 0, 0.0])
-                g[1] += score
-                g[2] += 1
-                g[3] = max(g[3], r.last_activity)
-        for cwd, _total, n, _last in sorted(groups.values(), key=lambda g: (-g[1], -g[3])):
-            reason = "1 similar session lives here" if n == 1 else f"{n} similar sessions live here"
-            s = validate(env, {"path": cwd, "confidence": "medium", "reason": reason}, source="history")
-            if s:
-                return s
-        raise _Skip("no overlap with an existing folder")
+        prep = _prepared(env, index, name, prepared)
+        if not prep.scored:
+            raise _Skip("no folder matches a word of the name")
+        top = prep.scored[0]
+        sure = retrieve.strong(prep.scored)
+        return Suggestion(top.cand.path, None, "high" if sure else "medium", "matches " + ", ".join(top.matched),
+                          "history", alternatives=_alternatives(prep, top.cand.path), strong=sure)
 
     return _attempt(env, "history", name, body)
 
 
-def stage_keywords(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
-    """Stage 4: the bucket whose keywords the name mentions most, as whole words (ties: table order). Bucket only."""
-
-    def body(info: dict) -> Suggestion:
-        lower = name.lower()
-        ranked = sorted(((-len(hits), i, bucket, hits) for i, (bucket, words) in enumerate(KEYWORDS.items())
-                         if (hits := [w for w in words if re.search(rf"\b{re.escape(w)}\b", lower)])))
-        for _n, _i, bucket, hits in ranked:
-            s = validate(env, {"path": bucket, "confidence": "low", "reason": "name mentions " + ", ".join(hits)},
-                         source="keywords")
-            if s:
-                return s
-        raise _Skip("no keyword bucket" if not ranked else "keyword bucket missing on disk")
-
-    return _attempt(env, "keywords", name, body)
-
-
 def stage_root(env: Env, index: Index, name: str, deadline: float) -> Suggestion | None:
-    """Stage 5: the picker opens at the tree root."""
+    """Stage 4 (local): the picker opens at the tree root."""
     return _attempt(env, "root", name,
                     lambda info: Suggestion(env.root, None, "low", "no suggestion; start at the root", "root"))
+
+
+# ---- outcome --------------------------------------------------------------------------------------------------------
+
+def _rel_or_none(env: Env, path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        rel = Path(path).relative_to(env.root)
+    except ValueError:
+        return str(path)
+    return None if str(rel) == "." else str(rel)
+
+
+def log_outcome(env: Env, name: str, suggestion: Suggestion | None, chosen: Path, new_folder: str | None) -> None:
+    """One `suggest.log` line recording where the user finally started: `chosen` (the folder, or the parent of
+    `new_folder`) against the suggestion in effect. `match` is true when both name the same final folder (same
+    folder, same new folder name or none), compared case-insensitively. A root suggestion counts as none."""
+    suggested = None if suggestion is None else _rel_or_none(env, suggestion.path)
+
+    def final(folder: Path, sub: str | None) -> str:
+        return str(Path(folder) / sub if sub else Path(folder)).lower()
+
+    match = suggested is not None and final(suggestion.path, suggestion.new_folder) == final(chosen, new_folder)
+    _log(env, {"ts": env.now(), "stage": "outcome", "name": name, "suggested": suggested,
+               "suggested_source": suggestion.source if suggestion is not None else None,
+               "chosen": _rel_or_none(env, chosen) or "", "new_folder": new_folder, "match": match})
 
 
 # ---- the pipeline ---------------------------------------------------------------------------------------------------
@@ -494,49 +590,39 @@ class _Rows:
         return self._rows
 
 
-def _fan_out(env: Env, rows: _Rows, name: str, http: Http, runner: Runner | None, claude_exe: Path | None,
-             pending: Pending, on_update: Callable[[Suggestion], None]) -> None:
-    """Background thread: wait until the model stages are released (at once unless deferred), then build the prompt
-    from the row snapshot and run Qwen and Claude concurrently. A cancelled request starts nothing."""
-    def failed(stage: str, e: Exception) -> None:
-        _log(env, {"ts": env.now(), "stage": stage, "name": name, "latency_ms": 0, "ok": False,
-                   "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
-
-    pending._release.wait()
-    if pending.cancelled:
-        pending._settled.set()
-        return
+def _run_models(env: Env, rows: _Rows, name: str, prep: Prepared | None, http: Http, runner: Runner | None,
+                claude_exe: Path | None, pending: Pending, on_update: Callable[[Suggestion], None]) -> None:
+    """Background thread: wait until the model stages are released (at once unless deferred), then run Qwen and,
+    only when Qwen gave no valid answer, Claude, one after the other. A cancelled request starts nothing more."""
     try:
-        message = build_user_message(env, rows, name)
-    except Exception as e:  # noqa: BLE001
-        failed("prompt", e)
+        pending._release.wait()
+        if pending.cancelled or prep is None:
+            return
+        stages = [(stage_qwen(http, prepared=prep), QWEN_TOTAL_S),
+                  (stage_claude(runner, exe=claude_exe, prepared=prep), CLAUDE_TOTAL_S)]
+        for stage, budget in stages:
+            if pending.cancelled:
+                return
+            try:
+                answer = stage(env, rows, name, time.monotonic() + budget)
+            except Exception as e:  # noqa: BLE001 - stages already catch; this is a last guard
+                _log(env, {"ts": env.now(), "stage": "models", "name": name, "latency_ms": 0, "ok": False,
+                           "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
+                answer = None
+            if answer is not None:
+                _offer(env, name, pending, answer, on_update)
+                return
+    finally:
         pending._settled.set()
-        return
-    stages = [("qwen", stage_qwen(http, message=message), QWEN_TOTAL_S),
-              ("claude", stage_claude(runner, exe=claude_exe, message=message), CLAUDE_TOTAL_S)]
-
-    def work(stage: Stage, budget: float) -> None:
-        try:
-            _offer(env, name, pending, stage(env, rows, name, time.monotonic() + budget), on_update)
-        except Exception as e:  # noqa: BLE001 - stages already catch; this is a last guard
-            failed("fan_out", e)
-
-    threads = [threading.Thread(target=work, args=(stage, budget), name=f"suggest-{label}", daemon=True)
-               for label, stage, budget in stages]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    pending._settled.set()
 
 
 def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, runner: Runner | None = None,
             on_update: Callable[[Suggestion], None], claude_exe: Path | None = None,
             defer_models: bool = False) -> Pending:
-    """Return at once with the best local answer (history, then keywords, then root) and start one daemon thread
-    that builds the prompt and runs Qwen and Claude concurrently; `on_update` gets the first valid model answer,
-    once, from that thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection
-    is single-threaded); everything else works from that list. `defer_models`: the thread waits for
+    """Return at once with the local answer (the top-ranked folder, else the root) and start one daemon thread that
+    asks Qwen, then Claude only if Qwen gave no valid answer; `on_update` gets the model answer, once, from that
+    thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection is
+    single-threaded), and the retrieval and prompt are worked out here too. `defer_models`: the thread waits for
     `Pending.release_models()` (or `cancel()`) before starting the model stages."""
     try:
         rows = _Rows(index.rows())
@@ -544,11 +630,17 @@ def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, run
         _log(env, {"ts": env.now(), "stage": "index", "name": name, "latency_ms": 0, "ok": False,
                    "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
         rows = _Rows([])
-    local = (stage_history(env, rows, name, 0.0) or stage_keywords(env, rows, name, 0.0)
+    try:
+        prep = prepare(env, rows.rows(), name)
+    except Exception as e:  # noqa: BLE001
+        _log(env, {"ts": env.now(), "stage": "prompt", "name": name, "latency_ms": 0, "ok": False,
+                   "reason_or_error": f"{type(e).__name__}: {e}", "prompt_chars": None})
+        prep = None
+    local = ((stage_history(env, rows, name, 0.0, prepared=prep) if prep is not None else None)
              or stage_root(env, rows, name, 0.0))
     pending = Pending(local, defer_models=defer_models)
     pending._thread = threading.Thread(
-        target=_fan_out, args=(env, rows, name, http, runner, claude_exe, pending, on_update),
+        target=_run_models, args=(env, rows, name, prep, http, runner, claude_exe, pending, on_update),
         name="suggest", daemon=True)
     pending._thread.start()
     return pending
