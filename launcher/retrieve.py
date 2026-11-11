@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,8 +29,9 @@ RECENT_S = 30 * 86400.0
 RECENT_BONUS = 0.15
 # strong(): a token counts as rare when its IDF is at least RARE_IDF; the top result needs sessions, STRONG_TOKENS
 # rare tokens, an IDF sum of at least STRONG_SUM, and LEAD times the runner-up's score. Calibrated with
-# tools/suggest_eval.py on the real tree (2,538 folders): strong for 3 of the 15 names, all 3 right; none of the 8
-# wrong top results was strong (without the sessions rule, the 0-session ninja_rmm_alert_renewal_review was).
+# tools/suggest_eval.py on the real tree (about 2,540 folders): strong for 1 of 29 names (right). It was 3 of 15,
+# all right, before area/bucket/client words stopped counting for projects; never strong on a wrong top result
+# (without the sessions rule, the 0-session ninja_rmm_alert_renewal_review was).
 RARE_IDF = 1.5
 STRONG_TOKENS = 2
 STRONG_SUM = 4.0
@@ -77,6 +80,8 @@ class Place:
     rel: str
     path: Path
     note: str
+    sessions_here: int = 0  # sessions whose cwd is exactly this folder
+    names_here: tuple[str, ...] = ()  # the two newest of them
 
 
 # ---- tokens ---------------------------------------------------------------------------------------------------------
@@ -101,36 +106,81 @@ def _rel(env: Env, path: Path) -> str:
     return str(Path(path).relative_to(env.root))
 
 
-def candidates(env: Env, index, rows: list) -> list[Cand]:
-    """Every folder to depth 4 below work and home and depth 2 below cc (areas included), with its stats and tokens
-    (relative path words plus its 3 most recent session names). `index` is unused when `rows` is given; it is kept
-    for the signature `tree.children` shares."""
-    stats = folder_stats_map(rows)
-    out: list[Cand] = []
-    empty = FolderStats(0, None, [])
+WALK_TTL_S = 60.0
+_walk_cache: dict[str, tuple[float, list[tuple[str, str, int]]]] = {}
+_walk_lock = threading.Lock()
 
-    def add(path: str, rel: str, key: tuple[str, ...], depth: int) -> None:
-        st = stats.get(key, empty)
-        words = tokens(rel.replace("\\", " ") + " " + " ".join(st.names or []))
-        out.append(Cand(rel, Path(path), depth, FolderStats(st.sessions, st.last_activity, list(st.names)),
-                        frozenset(words)))
 
-    def walk(path: str, rel: str, key: tuple[str, ...], depth: int, limit: int) -> None:
-        # os.scandir rather than tree.children: the same listing rule (`tree._listed`), but a few thousand
-        # folders in well under a second, since the entries carry their directory flag
+def _walk_tree(root: str) -> list[tuple[str, str, int]]:
+    """(rel, full path, depth) of every folder to depth 4 below work and home and depth 2 below cc (areas
+    included, depth 1). os.scandir rather than tree.children: the same listing rule (`tree._listed`), but a few
+    thousand folders in well under a second, since the entries carry their directory flag."""
+    out: list[tuple[str, str, int]] = []
+
+    def walk(path: str, rel: str, depth: int, limit: int) -> None:
         for name, child in _subdirs(path):
-            child_rel, child_key = rel + "\\" + name, key + (name.lower(),)
-            add(child, child_rel, child_key, depth + 1)
+            child_rel = rel + "\\" + name
+            out.append((child_rel, child, depth + 1))
             if depth < limit:
-                walk(child, child_rel, child_key, depth + 1, limit)
+                walk(child, child_rel, depth + 1, limit)
 
-    root_key = tuple(p.lower() for p in Path(env.root).parts)
-    for name, path in _subdirs(str(env.root)):
+    for name, path in _subdirs(root):
         limit = DEPTH.get(name.lower())
         if limit is None:
             continue
-        add(path, name, root_key + (name.lower(),), 1)
-        walk(path, name, root_key + (name.lower(),), 1, limit)
+        out.append((name, path, 1))
+        walk(path, name, 1, limit)
+    return out
+
+
+def _structure(root: Path) -> list[tuple[str, str, int]]:
+    """`_walk_tree(root)`, cached per process for WALK_TTL_S seconds (the folder layout only; stats and tokens are
+    worked out from the current rows on every call). `invalidate_walk()` drops it."""
+    key = str(root).lower()
+    now = time.monotonic()
+    with _walk_lock:
+        hit = _walk_cache.get(key)
+        if hit is not None and now - hit[0] < WALK_TTL_S:
+            return hit[1]
+    found = _walk_tree(str(root))
+    with _walk_lock:
+        _walk_cache[key] = (now, found)
+    return found
+
+
+def invalidate_walk() -> None:
+    """Forget the cached folder walk (called when the launcher creates a folder)."""
+    with _walk_lock:
+        _walk_cache.clear()
+
+
+def _org_prefix_len(parts: list[str]) -> int:
+    """How many leading parts of a relative path are organisational ancestors (area, bucket, client, home place)."""
+    n = 0
+    for i in range(1, len(parts)):
+        if organisational("\\".join(parts[:i])):
+            n = i
+    return n
+
+
+def candidates(env: Env, index, rows: list) -> list[Cand]:
+    """Every folder to depth 4 below work and home and depth 2 below cc (areas included), with its stats and tokens:
+    the words of its relative path below its organisational ancestors, plus its 3 most recent session names, minus
+    the words of those ancestors' names. A client's or bucket's name is no evidence for one project in it (the
+    client is offered as a PLACE instead), and as a path word shared by every folder below it, it would crowd the
+    shortlist with that client's folders. `index` is unused; it is kept for the signature `tree.children` shares."""
+    stats = folder_stats_map(rows)
+    root_key = tuple(p.lower() for p in Path(env.root).parts)
+    empty = FolderStats(0, None, [])
+    out: list[Cand] = []
+    for rel, path, depth in _structure(env.root):
+        parts = rel.split("\\")
+        st = stats.get(root_key + tuple(p.lower() for p in parts), empty)
+        cut = _org_prefix_len(parts)
+        org_words = set(tokens(" ".join(parts[:cut])))
+        words = [t for t in tokens(" ".join(parts[cut:]) + " " + " ".join(st.names or [])) if t not in org_words]
+        out.append(Cand(rel, Path(path), depth, FolderStats(st.sessions, st.last_activity, list(st.names)),
+                        frozenset(words)))
     return out
 
 
@@ -274,7 +324,7 @@ def _claude_md_note(folder: Path) -> str:
     first heading's text and the first non-empty line that is not a heading, list item, table row, quote or code
     fence. Trimmed to NOTE_CHARS."""
     try:
-        text = (folder / "CLAUDE.md").read_text(encoding="utf-8")
+        text = (folder / "CLAUDE.md").read_text(encoding="utf-8-sig")  # a BOM must not hide the heading
     except (OSError, UnicodeDecodeError):
         return ""
     title = line = ""
@@ -294,31 +344,42 @@ def _claude_md_note(folder: Path) -> str:
     return note[:NOTE_CHARS]
 
 
-def _place(env: Env, path: Path) -> Place:
+def _place(env: Env, path: Path, here: dict) -> Place:
     """A place and its note: the built-in note for the known places (their CLAUDE.md files are instructions for
-    agents, not descriptions), else the folder's CLAUDE.md, else none."""
+    agents, not descriptions), else the folder's CLAUDE.md, else none; plus the sessions started in it directly."""
     rel = _rel(env, path)
-    return Place(rel, path, NOTES.get(rel.lower()) or _claude_md_note(path))
+    names = here.get(tuple(p.lower() for p in Path(path).parts), [])
+    return Place(rel, path, NOTES.get(rel.lower()) or _claude_md_note(path), len(names), tuple(names[:2]))
 
 
-def places(env: Env, cands: list[Cand], name: str) -> list[Place]:
+def _sessions_here(rows: list) -> dict[tuple[str, ...], list[str]]:
+    """Session names (newest first) by the lower-cased parts of their exact cwd."""
+    out: dict[tuple[str, ...], list[str]] = {}
+    for r in sorted((r for r in rows if r.cwd), key=lambda r: -r.last_activity):
+        out.setdefault(tuple(p.lower() for p in Path(r.cwd).parts), []).append(r.display_name)
+    return out
+
+
+def places(env: Env, cands: list[Cand], name: str, rows: list = ()) -> list[Place]:
     """Where a new folder could go: every area (work, home, cc) and every `work\\<bucket>` on disk, the known home
     places (home\\homelab, home\\ai) when they exist, and `work\\clients\\<client>` for each client whose name
-    stem-matches a word of `name`. Each carries the first plain line of its CLAUDE.md, else a built-in note."""
+    stem-matches a word of `name`. Each carries a note (see `_place`) and the count and two newest names of the
+    sessions in `rows` whose cwd is exactly that folder (a session can start in a place itself)."""
+    here = _sessions_here(list(rows))
     out: list[Place] = []
     areas = [a for a in _listed(env.root) if a.name.lower() in DEPTH]
     for area in areas:
-        out.append(_place(env, area))
+        out.append(_place(env, area, here))
         if area.name.lower() == "work":
-            out.extend(_place(env, b) for b in _listed(area))
+            out.extend(_place(env, b, here) for b in _listed(area))
     for rel in HOME_PLACES:
         hit = next((c for c in cands if c.rel.lower() == rel), None)
         if hit is not None:
-            out.append(_place(env, hit.path))
+            out.append(_place(env, hit.path, here))
     query = tokens(name)
     for c in cands:
         parts = c.rel.lower().split("\\")
         if len(parts) == 3 and parts[:2] == ["work", "clients"] and \
                 any(stem_match(q, t) for q in query for t in tokens(parts[2])):
-            out.append(_place(env, c.path))
+            out.append(_place(env, c.path, here))
     return out

@@ -12,6 +12,16 @@ from launcher.paths import Env
 _TREE = ("work/clients/bast/bifrost", "work/net", "work/halo", "work/vendors", "home/homelab", "home/ai", "cc")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_folder_walk():
+    """The suggester caches its folder walk per process for 60 s; a test that adds folders between two
+    suggestions must not see the stale walk."""
+    from launcher.retrieve import invalidate_walk
+    invalidate_walk()
+    yield
+    invalidate_walk()
+
+
 @pytest.fixture
 def fake_env(tmp_path) -> Env:
     root = tmp_path / "root"

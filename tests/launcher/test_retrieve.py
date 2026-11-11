@@ -161,3 +161,73 @@ def test_places_lists_areas_buckets_from_disk_and_reads_claude_md(fake_env):
     assert got["work\\net"].note.startswith("Fortinet")  # a known place keeps its built-in note
     assert got["work\\zz"].note == ("Long one: " + "x" * 300)[:120]
     assert got["work\\yy"].note == "only a plain line"
+
+
+# ---- fix round ------------------------------------------------------------------------------------------------------
+
+def test_claude_md_note_ignores_a_bom(fake_env):
+    r = fake_env.root
+    (r / "work" / "bommed").mkdir()
+    (r / "work" / "bommed" / "CLAUDE.md").write_bytes("\ufeff# Bommed bucket\n\nWhat lives here.\n".encode("utf-8"))
+    got = {p.rel: p for p in places(fake_env, candidates(fake_env, None, []), "x")}
+    assert got["work\\bommed"].note == "Bommed bucket: What lives here."
+
+
+def test_client_name_does_not_crowd_the_shortlist(fake_env):
+    """Every folder of a client carries the client's name in its path; that word must not score them, or one
+    client's folders fill the shortlist (seen on the real tree for "Bast monthly patch report")."""
+    r, now = fake_env.root, fake_env.now()
+    bast = r / "work" / "clients" / "bast"
+    for name in [f"proj{i:02d}" for i in range(20)] + ["patching"]:
+        (bast / name).mkdir()
+    (r / "work" / "ninja" / "patch_reports").mkdir(parents=True)
+    rows = [make_row(r / "work" / "ninja" / "patch_reports", "monthly patch summary", now - DAY, "s1")]
+    cands = candidates(fake_env, None, rows)
+    by_rel = {c.rel: c for c in cands}
+    assert "bast" not in by_rel["work\\clients\\bast\\proj00"].tokens
+    assert "bast" in by_rel["work\\clients\\bast"].tokens  # the client itself keeps its own name
+    rels = _rels(rank("Bast monthly patch report", cands, now))
+    assert rels[0] == "work\\ninja\\patch_reports"
+    assert not any(x.startswith("work\\clients\\bast\\proj") for x in rels)
+    assert "work\\clients\\bast\\patching" in rels  # its own name still matches
+    assert "work\\clients\\bast" in {p.rel for p in places(fake_env, cands, "Bast monthly patch report")}
+
+
+def test_places_carry_their_own_sessions(fake_env):
+    r, now = fake_env.root, fake_env.now()
+    (r / "home" / "ai" / "sub").mkdir()
+    rows = [make_row(r / "home" / "ai", "whisper test", now - 60, "s1"),
+            make_row(r / "home" / "ai", "ollama bench", now - 30, "s2"),
+            make_row(r / "home" / "ai", "older one", now - 90, "s3"),
+            make_row(r / "home" / "ai" / "sub", "below, not here", now, "s4")]
+    got = {p.rel: p for p in places(fake_env, candidates(fake_env, None, rows), "x", rows)}
+    assert got["home\\ai"].sessions_here == 3 and got["home\\ai"].names_here == ("ollama bench", "whisper test")
+    assert got["home"].sessions_here == 0 and got["home"].names_here == ()
+
+
+def test_folder_walk_is_cached_for_a_minute_and_dropped_on_create(fake_env, monkeypatch):
+    import launcher.retrieve as retrieve
+    from launcher.scaffold import create_folder
+
+    calls = []
+    real = retrieve._walk_tree
+    monkeypatch.setattr(retrieve, "_walk_tree", lambda root: calls.append(root) or real(root))
+    clock = [1000.0]
+    monkeypatch.setattr(retrieve.time, "monotonic", lambda: clock[0])
+    candidates(fake_env, None, [])
+    candidates(fake_env, None, [])
+    assert len(calls) == 1
+    clock[0] += retrieve.WALK_TTL_S - 1
+    candidates(fake_env, None, [])
+    assert len(calls) == 1
+    clock[0] += 2
+    candidates(fake_env, None, [])
+    assert len(calls) == 2  # stale after 60 s
+
+    class NoRun:
+        def run(self, *a, **k):
+            raise AssertionError("no commands for a container")
+
+    create_folder(fake_env.root / "home", "fresh", "container", "x", runner=NoRun())
+    rels = [c.rel for c in candidates(fake_env, None, [])]
+    assert len(calls) == 3 and "home\\fresh" in rels  # create_folder dropped the cache

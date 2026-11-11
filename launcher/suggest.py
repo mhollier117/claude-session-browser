@@ -74,7 +74,7 @@ def prepare(env: Env, rows: list, name: str) -> Prepared:
     """Rank the folders for `name` (from the row list) and build the v2 user message."""
     cands = retrieve.candidates(env, None, rows)
     scored = retrieve.rank(name, cands, env.now())
-    places = retrieve.places(env, cands, name)
+    places = retrieve.places(env, cands, name, rows)
     message, choices = build_user_message(name, scored, places)
     return Prepared(scored, places, message, choices)
 
@@ -223,8 +223,9 @@ def _place_name(folder: Path, value) -> str | None:
 
 def validate_choice(env: Env, raw, prep: Prepared, source: str = "") -> Suggestion | None:
     """A v2 answer (`{"choice": n, "new_folder", "confidence", "reason"}`) as a Suggestion, or None unless `choice`
-    is an int naming one of the numbered candidates. A PROJECT never carries a new folder; a PLACE keeps its place
-    even when its proposed name is unusable (the name is dropped)."""
+    is an int naming one of the numbered candidates. A PROJECT never carries a new folder. A PLACE with
+    `new_folder` null means "start in the place itself"; a PLACE whose proposed name is unusable or already
+    exists keeps its place and drops the name (the same result)."""
     if not isinstance(raw, dict):
         return None
     n = raw.get("choice")

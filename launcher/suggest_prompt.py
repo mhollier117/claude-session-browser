@@ -18,14 +18,14 @@ from .tree import children, folder_stats_map
 
 SYSTEM_PROMPT = r"""You file a new coding-assistant session into an existing folder tree. Reply with JSON only.
 
-You get the session name and a numbered list of candidates of two kinds. A PROJECT is an existing project folder, shown with its session count and recent session names. A PLACE is an area, a bucket or a client folder where a new project folder can be made, shown with a note on what belongs there.
+You get the session name and a numbered list of candidates of two kinds. A PROJECT is an existing project folder, shown with its session count and recent session names. A PLACE is an area, a bucket or a client folder where a new project folder can be made, shown with a note on what belongs there and, when sessions were started directly in it, how many and their names.
 
 Pick a PROJECT when the session is more work on that same project or the same system, even if the task itself is new. A bug in the Halo ticket list sync belongs in the existing ticket list sync project. Judge by the subject: a PROJECT that shares only one generic word with the session name (alert, review, app, report, workflow, user, sync) is not a match.
 Otherwise pick the PLACE that fits the subject and name a new folder for it: lower case, words joined by _, 2 to 4 words, no dates. Client work goes under that client's folder when it is listed. Personal or hobby work goes under home (or a home place), never under a work bucket. The reverse holds too: work for the MSP or its clients (FortiGate, VPN, certificates, Halo, Ninja, CIPP, Rewst, Microsoft 365) goes under work, not into a home or homelab project, unless the name says homelab.
 Always answer with one of the numbers. Never return {}. If the name means nothing to you, pick the most general fitting PLACE, invent a short folder name and say confidence low.
 
 Output JSON: {"choice": <number>, "new_folder": "<name or null>", "confidence": "high|medium|low", "reason": "<one sentence>"}
-new_folder is null for a PROJECT and a name for a PLACE.
+new_folder is null for a PROJECT. For a PLACE a new folder name is the default; set new_folder to null only when the session clearly continues work that lives directly in that place (its line shows sessions here on the same subject), which means "start in the place itself".
 
 Example 1. Session name: Halo ticket list sync bug
 1. PROJECT  work\halo\view_management  · 12 sessions · recent: "ticket list view sync", "halo view columns"
@@ -84,7 +84,11 @@ def build_user_message(name: str, scored: list[Scored], places: list[Place]) -> 
         lines.append(text + (f" · recent: {recent}" if recent else ""))
     for p in places:
         choices.append(Choice("PLACE", p.rel, p.path))
-        lines.append(f"{len(choices)}. PLACE    {p.rel}" + (f"  — {p.note}" if p.note else ""))
+        text = f"{len(choices)}. PLACE    {p.rel}" + (f"  — {p.note}" if p.note else "")
+        if p.sessions_here:
+            recent = ", ".join(json.dumps(n, ensure_ascii=False) for n in p.names_here)
+            text += f" · {p.sessions_here} sessions here" + (f" · recent: {recent}" if recent else "")
+        lines.append(text)
     clean = " ".join(name.split())
     return f"Session name: {clean}\n\nCandidates:\n" + "\n".join(lines) + "\n", choices
 

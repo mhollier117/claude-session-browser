@@ -635,3 +635,26 @@ def test_log_outcome_line_shape(fake_env):
     assert _log(fake_env)[-1]["match"] is True  # case-insensitive
     log_outcome(fake_env, "n", s2, r / "work" / "net", "sub")
     assert _log(fake_env)[-1]["match"] is False  # a new folder below the suggested project is not a match
+
+
+def test_place_with_null_new_folder_means_start_in_the_place(fake_env):
+    prep = _prep_with_projects(fake_env)
+    ai = _number(prep.message, "home\\ai")
+    s = validate_choice(fake_env, {"choice": ai, "new_folder": None, "confidence": "high"}, prep, "qwen")
+    assert s.path == fake_env.root / "home" / "ai" and s.new_folder is None
+
+
+def test_unwritable_data_dir_never_raises(fake_env, index):
+    from launcher.suggest import _log, _remember_unreachable
+    blocker = fake_env.root.parent / "not_a_dir"
+    blocker.write_text("a file, not a folder", encoding="utf-8")
+    env = dataclasses.replace(fake_env, data_dir=blocker / "data")  # every write under it fails
+    _log(env, {"stage": "x"})
+    _remember_unreachable(env)
+    _qwen_settings(env)
+
+    def down(method, url, headers, body, timeout):
+        raise Unreachable("connect failed")
+
+    assert stage_qwen(down)(env, index, "vpn", _soon()) is None
+    assert not (blocker / "data").exists()

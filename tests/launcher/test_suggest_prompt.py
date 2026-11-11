@@ -144,3 +144,12 @@ def test_v2_project_line_shows_the_recent_names_that_match_best(fake_env):
     msg, _choices = build_user_message("Halo ticket list sync bug", scored, [])
     assert msg.splitlines()[-1] == ('1. PROJECT  work\\halo\\view_management  · 4 sessions · recent: '
                                     '"Bastionpoint ticket list sync tool", "halo views"')
+
+
+def test_v2_place_line_shows_sessions_started_there(fake_env):
+    r = fake_env.root
+    msg, _ = build_user_message("x", [], [Place("home\\ai", r / "home" / "ai", "local AI", 3, ("a b", "c")),
+                                          Place("home", r / "home", "", 1, ("solo",))])
+    assert msg.splitlines()[-2:] == ['1. PLACE    home\\ai  — local AI · 3 sessions here · recent: "a b", "c"',
+                                     '2. PLACE    home · 1 sessions here · recent: "solo"']
+    assert "start in the place itself" in SYSTEM_PROMPT

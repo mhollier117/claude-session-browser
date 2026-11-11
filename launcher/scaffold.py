@@ -113,6 +113,8 @@ def create_folder(parent: Path, name: str, kind: str, session_name: str, runner:
     if path.parent != Path(parent):
         raise ValueError(f"folder name escapes its parent: {name!r}")
     path.mkdir()
+    from .retrieve import invalidate_walk  # local: retrieve is not otherwise needed here
+    invalidate_walk()  # the suggester's cached folder walk must see the new folder
     created = Created(path)
     if kind == "client":
         _write_template(path / "CLAUDE.md", "CLAUDE.client.md", name=name)

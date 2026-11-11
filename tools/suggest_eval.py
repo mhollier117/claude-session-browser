@@ -49,7 +49,36 @@ CASES = [
                                              ("work\\clients\\brandito", None, True)], ""),
     ("contact sync duplicate users", [("work\\halo\\contact_sync", "PROJECT", False)], ""),
     ("SFDSDF", [("", "PLACE", True)], "any PLACE, confidence low"),
+    # held out: never quoted in the system prompt, added after the prompt was written
+    ("Huntress exclusion list update", [("work\\vendors\\huntress_exclusions", "PROJECT", False)], ""),
+    ("keepit backup api paging", [("work\\vendors\\keepitapi", "PROJECT", False),
+                                  ("work\\vendors\\keepit_issues", "PROJECT", False)], ""),
+    ("CA policy report for break glass accounts", [("work\\m365\\CA Policy Script", "PROJECT", False)], ""),
+    ("teams migration channel mapping", [("work\\m365\\teams_migration", "PROJECT", False)], ""),
+    ("traefik dashboard auth", [("home\\traefik", "PROJECT", False)], ""),
+    ("LlamaNote sync crash on android", [("home\\LlamaNote", "PROJECT", True)], ""),
+    ("session repair orphan chain bug", [("cc\\claude_session_repair", "PROJECT", False)], ""),
+    ("win-acme renewal task failing", [("work\\net\\Win-Acme_setups", "PROJECT", True)], ""),
+    ("ScreenConnect custom api extension", [("work\\vendors\\SC Custom API", "PROJECT", False)], ""),
+    ("usb block policy exceptions", [("work\\ninja\\usb block scripts", "PROJECT", False)], ""),
+    ("Dinwiddie printer deployment", [("work\\clients\\Dinwiddie", "PLACE", False)], ""),
+    ("Pendleton onboarding checklist", [("work\\clients\\Pendleton", "PLACE", False)], ""),
+    ("plex server migration", [("home", "PLACE", False), ("home\\homelab", "PLACE", False)], ""),
+    ("Bast monthly patch report", [("work\\clients\\bast", "PLACE", False), ("work\\ninja", "PLACE", False),
+                                   ("work\\m365", "PLACE", False)], ""),
 ]
+# The names quoted as worked examples in the system prompt: their score is not evidence of generalisation.
+IN_PROMPT = {"Halo ticket list sync bug", "Ninja RMM Alert Review", "razer synapse app reverse engineer",
+             "homelab pxe boot order"}
+
+
+def _load_cases(path: str) -> list:
+    """Extra cases from JSON: [{"name": "...", "accept": [["rel", "PROJECT"|"PLACE"|null, false|true|"prefix"]],
+    "note": "...", "in_prompt": false}]."""
+    import json
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return [(c["name"], [tuple(a) for a in c["accept"]], c.get("note", ""), bool(c.get("in_prompt", False)))
+            for c in data]
 
 
 def _rel(env, path) -> str:
@@ -80,7 +109,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-v", "--verbose", action="store_true", help="print each user message and raw answer")
     ap.add_argument("--only", type=int, nargs="*", help="1-based case numbers to run")
+    ap.add_argument("--cases", help="JSON file of extra cases (see _load_cases)")
     args = ap.parse_args()
+    cases = [(n, acc, note, n in IN_PROMPT) for n, acc, note in CASES]
+    if args.cases:
+        cases += _load_cases(args.cases)
 
     env = default_env()
     index = Index(env)  # read-only use: never refresh() here
@@ -94,7 +127,7 @@ def main() -> int:
           f"strong: RARE_IDF={retrieve.RARE_IDF} STRONG_SUM={retrieve.STRONG_SUM} LEAD={retrieve.LEAD}\n")
 
     results = []
-    for i, (name, accepted, note) in enumerate(CASES, 1):
+    for i, (name, accepted, note, in_prompt) in enumerate(cases, 1):
         if args.only and i not in args.only:
             continue
         prep = prepare(env, rows, name)
@@ -126,9 +159,9 @@ def main() -> int:
             kind_ok = kind_ok and s.confidence == "low"
         local_ok = top is not None and _accepts(accepted, top.cand.rel, "PROJECT")[1]
         results.append({"name": name, "valid": s is not None, "folder": folder_ok, "correct": kind_ok, "ms": ms,
-                        "strong": is_strong, "local_ok": local_ok})
+                        "strong": is_strong, "local_ok": local_ok, "in_prompt": in_prompt})
         mark = "OK " if kind_ok else ("~  " if folder_ok else "XX ")
-        print(f"{i:2}. {mark}{name}")
+        print(f"{i:2}. {mark}{name}" + ("   [in prompt]" if in_prompt else ""))
         if s is not None:
             print(f"      qwen  {ms:5} ms {usage} tok -> {kind} {rel}" + (f" + {s.new_folder}" if s.new_folder else "")
                   + f"  [{s.confidence}] {s.reason[:110]}")
@@ -150,10 +183,13 @@ def main() -> int:
     n = len(results)
     lat = [r["ms"] for r in results]
     strong_rows = [r for r in results if r["strong"]]
+    held = [r for r in results if not r["in_prompt"]]
     print("\nSCOREBOARD")
     print(f"  valid          {sum(r['valid'] for r in results)}/{n}")
     print(f"  correct folder {sum(r['folder'] for r in results)}/{n}")
-    print(f"  correct (folder and kind) {sum(r['correct'] for r in results)}/{n}")
+    print(f"  correct (folder and kind) {sum(r['correct'] for r in results)}/{n}  (overall)")
+    print(f"  held out (not quoted in the prompt): correct {sum(r['correct'] for r in held)}/{len(held)}, "
+          f"folder {sum(r['folder'] for r in held)}/{len(held)}")
     print(f"  latency median {statistics.median(lat):.0f} ms, max {max(lat)} ms")
     print(f"  local strong   {len(strong_rows)} cases, top right in {sum(r['local_ok'] for r in strong_rows)}; "
           f"weak but top right in {sum(r['local_ok'] for r in results if not r['strong'])}")
