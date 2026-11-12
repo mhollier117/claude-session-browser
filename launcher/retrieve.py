@@ -262,7 +262,7 @@ def rank(name: str, cands: list[Cand], now: float, k: int = 14) -> list[Scored]:
         if c.stats.last_activity and now - c.stats.last_activity < RECENT_S:
             score += RECENT_BONUS
         scored.append(Scored(c, score, tuple(hits), weights))
-    scored = _one_per_branch_match(_collapse_empty(scored))
+    scored = _collapse_dated(_one_per_branch_match(_collapse_empty(scored)))
     scored.sort(key=_order)
     return _prefer_used(scored, k)
 
@@ -293,28 +293,60 @@ def _collapse_empty(scored: list[Scored]) -> list[Scored]:
     return list(by_rel.values())
 
 
+PROTECTED_MAX = 2  # empty folders named for the session that `_prefer_used` may keep ahead of other empty ones
+
+
 def _prefer_used(scored: list[Scored], k: int) -> list[Scored]:
-    """The best `k`, where a zero-session folder is kept only when it scores at least as well as the best folder
-    with sessions, when its own folder name matches two or more of the session name's words (an empty
-    `teams_migration` for "teams migration channel mapping"), or to fill the slots that folders with sessions leave
-    empty. `scored` is sorted best first."""
+    """The best `k`. A folder with sessions always counts; a zero-session folder is kept when it scores at least as
+    well as the best folder with sessions, or to fill the slots that folders with sessions leave empty. Among the
+    latter, at most PROTECTED_MAX empty folders whose own name matches two or more of the session name's words (an
+    empty `teams_migration` for "teams migration channel mapping") are tried first, best leaf match, then score,
+    then newest, then rank order. A protected folder never evicts one with sessions. `scored` is sorted best first."""
     used = [s for s in scored if s.cand.stats.sessions]
     if not used:
         return scored[:k]
     best = used[0].score
-    named = {id(s) for s in scored if not s.cand.stats.sessions and s.score < best and _leaf_hits(s) >= 2}
-    keep = [s for s in scored if s.cand.stats.sessions or s.score >= best or id(s) in named]
-    for s in reversed(list(keep)):  # over `k`: the lowest-ranked go, folders named for the session last
-        if len(keep) <= k:
-            break
-        if id(s) not in named:
-            keep.remove(s)
-    keep = keep[:k]
-    if len(keep) < k:
+    keep = [s for s in scored if s.cand.stats.sessions or s.score >= best][:k]
+    slots = k - len(keep)
+    if slots > 0:
         chosen = {id(s) for s in keep}
-        keep += [s for s in scored if id(s) not in chosen][:k - len(keep)]
-        keep.sort(key=_order)
+        rest = [(i, s) for i, s in enumerate(scored) if id(s) not in chosen]
+        named = sorted(((i, s) for i, s in rest if _leaf_hits(s) >= 2),
+                       key=lambda x: (-_leaf_hits(x[1]), -x[1].score, -(x[1].cand.stats.last_activity or 0.0), x[0]))
+        protected = {id(s) for _i, s in named[:PROTECTED_MAX]}
+        order = [s for _i, s in named[:PROTECTED_MAX]] + [s for _i, s in rest if id(s) not in protected]
+        keep = sorted(keep + order[:slots], key=_order)
     return keep
+
+
+_DATED_SUFFIX = re.compile(r"(?:[_-]\d{4}-\d{2}-\d{2}|_\d{8}|_[0-9a-fA-F]{6,40})$")
+
+
+def _undated(leaf: str) -> tuple[str, str]:
+    """(leaf without a trailing date or hash suffix, that suffix's digits or '')."""
+    m = _DATED_SUFFIX.search(leaf)
+    if m is None or (m.group(0)[1:].isalpha()):  # a hex suffix needs a digit, or `_decade` is a word
+        return leaf, ""
+    return leaf[:m.start()], re.sub(r"\D", "", m.group(0))
+
+
+def _collapse_dated(scored: list[Scored]) -> list[Scored]:
+    """Of empty sibling folders that differ only by a trailing date or hash (`Export_2026-01-03`, `Export_20260412`,
+    `Export_3fa9c1d2`), keep the newest: by last activity when any has one, else by the date in the name, else by
+    name (descending). Folders with sessions are never dropped."""
+    groups: dict[tuple[str, str], list[Scored]] = {}
+    for s in scored:
+        if not s.cand.stats.sessions:
+            parent, _, leaf = s.cand.rel.lower().rpartition("\\")
+            groups.setdefault((parent, _undated(leaf)[0]), []).append(s)
+    drop: set[int] = set()
+    for group in groups.values():
+        if len(group) > 1:
+            newest = max(group, key=lambda s: (s.cand.stats.last_activity or 0.0,
+                                               _undated(s.cand.rel.lower().rpartition("\\")[2])[1],
+                                               s.cand.rel.lower()))
+            drop |= {id(s) for s in group if s is not newest}
+    return [s for s in scored if id(s) not in drop]
 
 
 def _leaf_hits(s: Scored) -> int:

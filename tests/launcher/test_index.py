@@ -431,3 +431,24 @@ def test_older_schema_cache_is_dropped_and_rebuilt(fake_env):
     db.close()
     idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
     assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 2
+
+def test_incremental_refresh_follows_the_new_last_record_and_counts_each_message_once(fake_env):
+    """A transcript that only grew is counted from its stored offset: its last_activity follows the new last
+    record, a record whose timestamp is not a string is skipped, and no message is counted twice."""
+    from datetime import datetime, timezone
+    cwd = fake_env.root / "cc"
+    path = write_claude_session(fake_env, cwd, "grow", [_u("one", cwd, ts="2026-10-01T10:00:00.000Z"), _a("r1")])
+    _touch(path, T0)
+    idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
+    idx.refresh()
+    first = idx.row("claude", "grow")
+    assert (first.user_msgs, first.assistant_msgs) == (1, 1)
+    assert first.last_activity == datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc).timestamp()
+    _append(path, _u("two", ts="2026-10-05T08:00:00+02:00"),
+            {"type": "assistant", "timestamp": 1762000000,
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "r2"}]}})
+    _touch(path, T0 + 10)
+    assert idx.refresh() == 1
+    row = idx.row("claude", "grow")
+    assert (row.user_msgs, row.assistant_msgs) == (2, 2)
+    assert row.last_activity == datetime(2026, 10, 5, 6, 0, tzinfo=timezone.utc).timestamp()

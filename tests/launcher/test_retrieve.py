@@ -272,7 +272,7 @@ def test_empty_export_folders_do_not_fill_the_shortlist():
     family = _cand("work\\wf\\acme_user_creation", ["acme onboarding"], now - DAY)
     exports = [_cand(f"work\\wf\\acme_user_creation\\Acme_New_Hire_Workflow_2026-0{m}-01", sessions=0)
                for m in range(1, 10)]
-    elsewhere = [_cand(f"work\\wf\\Acme_Report_{i}", sessions=0) for i in range(6)]
+    elsewhere = [_cand(f"work\\wf\\Acme_Hire_Report_{i}", sessions=0) for i in range(6)]
     used = [_cand(f"work\\wf\\acme_task_{i}", [f"acme hire task {i}"], now - DAY) for i in range(16)]
     scored = rank("Acme new hire workflow", [family, *exports, *elsewhere, *used], now)
     rels = _rels(scored)
@@ -282,7 +282,7 @@ def test_empty_export_folders_do_not_fill_the_shortlist():
     fam = next(s for s in scored if s.cand.rel == "work\\wf\\acme_user_creation")
     assert fam.folded and fam.matched == ("acme",)  # the exports' score, but only its own words
     assert fam.score > sum(fam.weights) + 0.15  # more than its own words earn: the best export's score
-    assert not any(x.startswith("work\\wf\\Acme_Report") for x in rels)  # empty, weaker, slots are full
+    assert not any(x.startswith("work\\wf\\Acme_Hire_Report") for x in rels)  # empty, weaker, slots are full
     few = rank("Acme new hire workflow", [*elsewhere, used[0]], now)
     assert len(few) == 7  # fewer than k folders with sessions: the empty ones fill the slots
 
@@ -297,15 +297,67 @@ def test_a_folder_scored_by_a_folded_empty_sub_folder_is_never_strong():
     assert not strong(scored)
 
 
-def test_an_empty_folder_named_for_the_session_stays_in_the_shortlist():
-    """Zero-session candidates are dropped when enough folders with sessions scored, except one whose own folder
-    name matches two or more of the session name's words."""
+def _named_fixture(named, n_filler=12, n_used=6):
+    """`n_used` folders with sessions that score above every empty folder, `n_filler` empty folders that match two
+    of the name's words in their path (not their own name) and sort before the `named` ones on a tie."""
     now = 1_700_000_000.0
-    name = "teams migration channel mapping"
-    used = [_cand(f"work\\m365\\team_notes_{i}", ["teams migration channel mapping notes"], now - DAY)
-            for i in range(16)]
-    named = _cand("work\\m365\\teams_migration", sessions=0)
-    one_word = _cand("work\\m365\\teams_other", sessions=0)  # only one of the words in its own name
-    rels = _rels(rank(name, [*used, named, one_word], now))
-    assert len(rels) == 14 and "work\\m365\\teams_migration" in rels
-    assert "work\\m365\\teams_other" not in rels
+    used = [_cand(f"work\\m365\\notes_{i}", ["teams migration channel mapping"], now - DAY) for i in range(n_used)]
+    filler = [_cand(f"work\\a_teams_migration\\i{i}", sessions=0) for i in range(n_filler)]
+    return now, used, filler, named
+
+
+def test_an_empty_folder_named_for_the_session_takes_a_slot_other_empty_ones_would_have_had():
+    named = _cand("work\\z\\teams_migration", sessions=0)
+    now, used, filler, _ = _named_fixture(named)
+    rels = _rels(rank("teams migration channel mapping", [*used, *filler, named], now))
+    assert len(rels) == 14 and "work\\z\\teams_migration" in rels
+    assert sum(1 for x in rels if x.startswith("work\\a_teams_migration")) == 7  # one filler made room
+
+
+def test_a_named_empty_folder_never_evicts_a_folder_with_sessions():
+    now = 1_700_000_000.0
+    used = [_cand(f"work\\m365\\notes_{i}", ["teams migration channel mapping"], now - DAY) for i in range(16)]
+    named = _cand("work\\z\\teams_migration", sessions=0)
+    rels = _rels(rank("teams migration channel mapping", [*used, named], now))
+    assert len(rels) == 14 and "work\\z\\teams_migration" not in rels
+    assert all("notes_" in x for x in rels)
+
+
+def test_two_different_empty_folders_named_for_the_session_are_both_kept():
+    a = _cand("work\\z\\teams_migration", sessions=0)
+    b = _cand("work\\y\\migration_teams", sessions=0)
+    now, used, filler, _ = _named_fixture(None)
+    rels = _rels(rank("teams migration channel mapping", [*used, *filler, a, b], now))
+    assert "work\\z\\teams_migration" in rels and "work\\y\\migration_teams" in rels and len(rels) == 14
+
+
+def test_three_empty_folders_named_for_the_session_keep_two_by_leaf_hits_score_recency():
+    now = 1_700_000_000.0
+    three = _cand("work\\x\\teams_migration_channel", sessions=0)  # 3 leaf hits: first
+    recent = _cand("work\\z\\teams_migration", sessions=0, last=now - DAY)  # 2 hits, newer than `plain`
+    plain = _cand("work\\y\\migration_teams", sessions=0)
+    _now, used, filler, _ = _named_fixture(None)
+    rels = _rels(rank("teams migration channel mapping", [*used, *filler, plain, recent, three], now))
+    assert "work\\x\\teams_migration_channel" in rels and "work\\z\\teams_migration" in rels
+    assert "work\\y\\migration_teams" not in rels and len(rels) == 14
+
+
+def test_dated_export_siblings_collapse_to_the_newest_and_do_not_crowd_out_used_folders():
+    now = 1_700_000_000.0
+    exports = [_cand(f"work\\wf\\Rewst_Master_v3_Client_Offboarding_2026-0{m}-01", sessions=0) for m in range(1, 7)]
+    hashed = [_cand("work\\wf\\Client_Offboarding_report_" + h, sessions=0) for h in ("3fa9c1d2", "9b7e4a10")]
+    used = [_cand(f"work\\wf\\acme_{i}", ["client offboarding"], now - DAY) for i in range(3)]
+    rels = _rels(rank("client offboarding fix", [*exports, *hashed, *used], now))
+    assert {f"work\\wf\\acme_{i}" for i in range(3)} <= set(rels)
+    dated = [x for x in rels if "Rewst_Master" in x]
+    assert dated == ["work\\wf\\Rewst_Master_v3_Client_Offboarding_2026-06-01"]  # the newest by the date in the name
+    assert sum(1 for x in rels if "Client_Offboarding_report" in x) == 1  # one hash group, one entry
+    assert len([x for x in rels if x not in {f"work\\wf\\acme_{i}" for i in range(3)}]) <= 2
+
+
+def test_dated_siblings_that_have_sessions_are_never_collapsed():
+    now = 1_700_000_000.0
+    cands = [_cand(f"work\\wf\\Export_2026-0{m}-01", [f"export run {m}"], now - m * DAY) for m in range(1, 4)]
+    cands.append(_cand("work\\wf\\Export_2026-09-01", sessions=0))
+    rels = _rels(rank("export run", cands, now))
+    assert len([x for x in rels if "Export_2026-0" in x]) == 4  # the empty one is its own group: nothing to merge

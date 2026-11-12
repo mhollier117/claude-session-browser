@@ -235,3 +235,23 @@ def test_last_ts_is_none_without_a_usable_timestamp(fake_env):
     p2 = write_claude_session(fake_env, cwd, "t4", [
         {"type": "user", "timestamp": "not a date", "message": {"role": "user", "content": "hi"}}])
     assert read_claude(p2).last_ts is None
+
+def test_last_ts_honours_an_explicit_utc_offset(fake_env):
+    from datetime import datetime, timezone
+    p = write_claude_session(fake_env, fake_env.root / "cc", "t5", [
+        {"type": "user", "timestamp": "2026-11-03T14:30:15.500+02:00", "message": {"role": "user", "content": "hi"}}])
+    assert read_claude(p).last_ts == datetime(2026, 11, 3, 12, 30, 15, 500000, tzinfo=timezone.utc).timestamp()
+
+
+def test_last_ts_skips_non_string_timestamps_without_crashing(fake_env):
+    from datetime import datetime, timezone
+    good = "2026-11-01T10:00:00Z"
+    p = write_claude_session(fake_env, fake_env.root / "cc", "t6", [
+        {"type": "user", "timestamp": good, "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant", "timestamp": 1762000000, "message": {"role": "assistant", "content": "x"}},
+        {"type": "assistant", "timestamp": None, "message": {"role": "assistant", "content": "y"}},
+        {"type": "system", "timestamp": ["2026-11-09T00:00:00Z"]}])
+    assert read_claude(p).last_ts == datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc).timestamp()
+    p2 = write_claude_session(fake_env, fake_env.root / "cc", "t7", [
+        {"type": "user", "timestamp": 12345, "message": {"role": "user", "content": "hi"}}])
+    assert read_claude(p2).last_ts is None
