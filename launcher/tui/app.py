@@ -251,9 +251,9 @@ POLL_S = 0.25  # how often the picker looks for the model's suggestion
 
 
 def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Application:
-    """Draw `render_new(flow)` and route keys to it; a 250 ms timer applies the model's suggestion via `flow.poll`
-    (it never blocks: `Pending.wait(0)`). Exits with the flow's `Launch`, or None on ctrl-c (or q on a choice
-    step; in the picker q is a filter character)."""
+    """Draw `render_new(flow)` and route keys to it; a 250 ms timer shows the model's suggestion via `flow.poll`
+    (it never blocks: `Pending.wait(0)`, and never moves the picker). Exits with the flow's `Launch`, or None on
+    ctrl-c (or q on a choice step; in the picker q is a filter character), which the flow logs as a cancel."""
     from .new import render_new
     kb = KeyBindings()
     texty = Condition(lambda: flow.step in ("name", "folder_name"))
@@ -268,6 +268,7 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
 
     @kb.add("c-c")
     def _quit(event) -> None:
+        flow.cancel()
         event.app.exit(result=None)
 
     busy = {"on": False}
@@ -328,6 +329,7 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
         elif flow.step == "picker":  # every printable key filters, q included (folder names start with q too)
             flow.type_filter(flow.filter + ch)
         elif ch == "q":  # the kind, wrapper and GitHub choices have no text to type
+            flow.cancel()
             event.app.exit(result=None)
 
     window = Window(FormattedTextControl(fragments, focusable=True, show_cursor=False), wrap_lines=False)

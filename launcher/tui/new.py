@@ -1,22 +1,28 @@
 """The new-session walk: a pure state machine (`NewFlow`) and its renderer (`render_new`).
 
-Steps, in order: name → picker (the suggestion is applied live) → folder name → kind → wrapper → GitHub account
-(project only) → done. The picker walks the tree one level at a time; each level lists its child folders with
-session stats, `● start here` (not at the root) and `+ new folder here…`. Nothing here touches the terminal; all
-Index use stays on the calling (main) thread.
+Steps, in order: name → picker → folder name → kind → wrapper → GitHub account (project only) → done. The picker
+walks the tree one level at a time; each level lists up to three suggestion rows (the model's answer `★` once it
+arrives, then the ranked alternatives `≈`), its child folders with session stats (most recent first, folded past
+`FOLD_AT`), `● start here` (not at the root) and `+ new folder here…`. Typed text filters the children and is
+offered as `+ new folder: <slug>`. Suggestions never move the picker or take the cursor; only a strong local answer
+decides where the picker opens. Every step is written to `flow.log` (see `flowlog`). Nothing here touches the
+terminal; all Index use stays on the calling (main) thread.
 """
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
 
+from prompt_toolkit.utils import get_cwidth
+
+from .. import flowlog
 from ..display import age, rel_or_abs
 from ..index import FolderStats, Index
 from ..launch import WRAPPERS, Launch, default_wrapper, new_command
 from ..paths import Env
 from ..scaffold import Runner, check_name, create_folder
-from ..suggest import Pending, Suggestion, default_http, suggest
-from ..tree import children, folder_stats_map, new_folder_kind_options, resolve_fragment, slug
+from ..suggest import Pending, Suggestion, default_http, log_outcome, suggest
+from ..tree import Child, children, folder_stats_map, new_folder_kind_options, resolve_fragment, slug
 from .resume import fit
 
 _KIND_LABELS = {"project": ("a project", "start the session in it · git init · .claude-project · plan.md"),
@@ -26,7 +32,11 @@ _KIND_LABELS = {"project": ("a project", "start the session in it · git init ·
 _GITHUB = (("personal", "personal", "mhollier117"), ("work", "work", "mhollierBPT"))
 _SEP = " › "
 _NAME_COL = 28
-PICKER_KEYS = "type to filter (a/b jumps, /a/b from the root) · ↑↓ · enter opens · backspace up · esc root · ctrl-c quit"
+FOLD_AT = 12  # a level with more children shows this many and a `… N more` row
+MAX_SUGGESTIONS = 3
+_SUGGESTION_KINDS = ("suggested", "alt")
+PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspace up · esc top · /path jump · "
+                 "ctrl-c cancel")
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
 
@@ -48,6 +58,28 @@ def _stats_text(st: FolderStats, tool: str | None, now: float) -> str:
     when = f"{when} ago" if when[:1].isdigit() else when
     text = f"{st.sessions} session{'' if st.sessions == 1 else 's'} · {when}"
     return f"{text} · {tool}" if tool else text
+
+
+def _recent_first(c: Child) -> tuple:
+    """Children by last activity, newest first; folders with no session last, alphabetical."""
+    last = c.stats.last_activity if c.stats.sessions else None
+    return (last is None, -(last or 0.0), c.name.lower())
+
+
+def wrap_items(text: str, width: int, sep: str = " · ") -> list[str]:
+    """`text` (items joined by `sep`) broken into lines of at most `width` cells, only between items; an item wider
+    than the line on its own is cut."""
+    lines: list[str] = []
+    cur = ""
+    for item in text.split(sep):
+        joined = f"{cur}{sep}{item}" if cur else item
+        if cur and get_cwidth(joined) > width:
+            lines.append(cur)
+            cur = item
+        else:
+            cur = joined
+    lines.append(cur)
+    return [fit(x, width).rstrip() for x in lines]
 
 
 class NewFlow:
@@ -73,12 +105,13 @@ class NewFlow:
         self.filter = ""
         self.rows: list[tuple[str, str, Path | None]] = []
         self.selected = 0
-        self.moved = False  # the user has acted in the picker: a late suggestion is offered, not applied
         self.pending: Pending | None = None
-        self.suggestion: Suggestion | None = None  # the one the picker jumped to (shown as the banner)
-        self.offered: Suggestion | None = None  # a late one, shown as a ★ row at the top
+        self.suggestion: Suggestion | None = None  # the one whose folder was opened (shown as the banner there)
+        self.offered: Suggestion | None = None  # the model's answer, shown as the ★ row
         self._model_applied = False
         self._preselect: str | None = None  # `+ new folder: <name>` from a suggestion, for self.folder only
+        self._expanded: set[Path] = set()  # folded levels the user asked to see in full
+        self._new_source: str | None = None  # the picker row kind that led to the folder-name step
         self.new_name: str | None = None  # None: start here (no new folder)
         self.new_kind: str | None = None
         self.wrapper: str | None = None
@@ -90,8 +123,8 @@ class NewFlow:
     # ---- name -------------------------------------------------------------------------------------------------------
 
     def start(self, name: str) -> NewFlow:
-        """Begin the walk for session `name` (required); the picker opens at the local suggestion at once and the
-        model stages run in the background (see `poll`)."""
+        """Begin the walk for session `name` (required). The picker opens at the root, or at the local answer when
+        it is strong; the model stages run in the background (see `poll`)."""
         name = (name or "").strip()
         if not name:
             raise ValueError("a session name is required")
@@ -100,8 +133,35 @@ class NewFlow:
         self.error = ""
         self.pending = self._suggest(self.env, self.index, name, http=self.http, runner=self.runner,
                                      on_update=lambda s: None)
-        self._jump(self.pending.local)
+        local = self.pending.local
+        sure = local.strong and local.source != "root"
+        self.suggestion = local if sure else None
+        self._log("start", name=name, suggested=self._rel(local.path) if local.source != "root" else None,
+                  source=local.source, strong=sure)
+        self._open(local.path if sure else self.env.root, via="start")
         return self
+
+    # ---- flow log ---------------------------------------------------------------------------------------------------
+
+    def _rel(self, path: Path | None) -> str | None:
+        if path is None:
+            return None
+        rel = rel_or_abs(self.env.root, path)
+        return "" if rel == "." else rel
+
+    def _log(self, event: str, kind: str | None = None, **extra) -> None:
+        flowlog.log(self.env, event, folder=self._rel(self.folder), kind=kind, filter=self.filter, step=self.step,
+                    **extra)
+
+    def cancel(self) -> None:
+        """The user quit the walk (ctrl-c, or q on a choice step): logged only."""
+        self._log("cancel")
+
+    def suggestion_in_effect(self) -> Suggestion | None:
+        """The model's answer once it arrived in the picker, else the local answer (None before `start`)."""
+        if self.offered is not None:
+            return self.offered
+        return self.pending.local if self.pending is not None else None
 
     def poll(self) -> bool:
         """Apply the model's answer once it is there (called by the app's timer); True when it changed the view."""
@@ -124,62 +184,119 @@ class NewFlow:
     # ---- picker -----------------------------------------------------------------------------------------------------
 
     def apply_suggestion(self, s: Suggestion) -> None:
-        """Jump to `s` if the user has not acted in the picker yet; otherwise offer it as a ★ row at the top.
-        Ignored once the walk has left the picker."""
+        """Show the model's answer `s` as the ★ row at the top of every level. It never moves the picker and never
+        takes the cursor. Ignored once the walk has left the picker."""
         if self.step != "picker":
             return
-        if not self.moved:
-            self._jump(s)
-        else:
-            self.offered = s
-            self._refresh(select_first=False)
+        self.offered = s
+        self._refresh()
 
-    def _jump(self, s: Suggestion) -> None:
-        self.suggestion = s
-        self.offered = None
-        self._open(s.path, preselect=s.new_folder)
-
-    def _open(self, folder: Path, preselect: str | None = None) -> None:
+    def _open(self, folder: Path, preselect: str | None = None, via: str | None = None) -> None:
+        """Show `folder`'s level with an empty filter; `preselect` names a proposed new folder to select."""
         self.folder = Path(folder)
         self.filter = ""
         self._preselect = preselect
-        self._refresh()
+        self._refresh(keep=False)
+        self._log("open", kind=via)
 
-    def _refresh(self, select_first: bool = True) -> None:
-        """Rebuild the rows. `select_first`: select the preselected new-folder row, else the first row that is not
-        the ★ offer (enter must go where the user typed, not to the offer); otherwise keep the selected row."""
-        current = self.rows[self.selected] if self.rows and not select_first else None
+    @staticmethod
+    def _key(row: tuple[str, str, Path | None]) -> tuple[str, str, str]:
+        """A row's identity across rebuilds: kind, path, and the proposed name of a `new_named` row (the label of
+        `new_typed` follows the filter, so it is not part of its identity)."""
+        kind, label, path = row
+        return kind, str(path).lower() if path is not None else "", label if kind == "new_named" else ""
+
+    def _default_row(self) -> int:
+        """The first row that is not a suggestion (and, while a filter is typed, not `● start here`)."""
+        skip = set(_SUGGESTION_KINDS) | ({"start"} if self.filter else set())
+        return next((i for i, (k, _l, _p) in enumerate(self.rows) if k not in skip), 0)
+
+    def _refresh(self, keep: bool = True) -> None:
+        """Rebuild the rows. `keep`: keep the selected row by identity (a row arriving above it, such as a
+        suggestion, never takes the cursor); `● start here` is not kept once a filter is typed. Otherwise, or when
+        the row is gone: the proposed new folder on a freshly opened level, else `_default_row`."""
+        current = self._key(self.rows[self.selected]) if keep and 0 <= self.selected < len(self.rows) else None
         self.rows = self._build_rows()
+        keys = [self._key(r) for r in self.rows]
         kinds = [k for k, _l, _p in self.rows]
-        if current in self.rows:
-            self.selected = self.rows.index(current)
-        elif self._preselect and "new_named" in kinds:
+        if current in keys and not (self.filter and current[0] == "start"):
+            self.selected = keys.index(current)
+        elif not keep and self._preselect and "new_named" in kinds:
             self.selected = kinds.index("new_named")
         else:
-            self.selected = next((i for i, k in enumerate(kinds) if k != "suggested"), 0)
+            self.selected = self._default_row()
+
+    def proposed_name(self) -> str | None:
+        """A suggested new folder for this level: the one carried in by entering a ★ row, or the model's answer
+        when it names this very folder."""
+        if self._preselect:
+            return self._preselect
+        s = self.offered
+        return s.new_folder if s is not None and s.new_folder and Path(s.path) == self.folder else None
+
+    def _suggestion_rows(self) -> list[tuple[str, str, Path | None]]:
+        """Up to `MAX_SUGGESTIONS` rows: the model's answer (★), then the ranked alternatives (≈): the model's
+        alternatives once it answered, before that the local top candidate and its alternatives. The current folder
+        and duplicates are left out."""
+        rows: list[tuple[str, str, Path | None]] = []
+        seen: set[str] = set()
+
+        def add(kind: str, path: Path, label: str) -> None:
+            key = str(path).lower()
+            if key in seen:
+                return
+            seen.add(key)
+            if Path(path) != self.folder:
+                rows.append((kind, label, Path(path)))
+
+        model = self.offered
+        if model is not None:
+            rel = rel_or_abs(self.env.root, model.path)
+            add("suggested", model.path, f"★ {rel} + new folder: {model.new_folder}" if model.new_folder
+                else f"★ {rel}")
+            ranked = list(model.alternatives)
+        else:
+            local = self.pending.local if self.pending is not None else None
+            ranked = [local.path, *local.alternatives] if local is not None and local.source != "root" else []
+        for p in ranked:
+            add("alt", p, f"≈ {rel_or_abs(self.env.root, p)}")
+        return rows[:MAX_SUGGESTIONS]
 
     def _build_rows(self) -> list[tuple[str, str, Path | None]]:
-        rows: list[tuple[str, str, Path | None]] = []
-        if self.offered is not None and Path(self.offered.path) != self.folder:
-            s = self.offered
-            rows.append(("suggested", f"★ {rel_or_abs(self.env.root, s.path)} — suggested by {s.source}"
-                                      + (f" · {s.reason}" if s.reason else ""), Path(s.path)))
-        if "/" in self.filter:  # a fragment: `a/b` from this level, `/a/b` from the root
-            base = self.env.root if self.filter.startswith("/") else self.folder
-            for p in resolve_fragment(self.env, base, self.filter):
+        typed = self.filter
+        rows: list[tuple[str, str, Path | None]] = [] if typed else self._suggestion_rows()
+        if "/" in typed:  # a fragment: `a/b` from this level, `/a/b` from the root
+            base = self.env.root if typed.startswith("/") else self.folder
+            for p in resolve_fragment(self.env, base, typed):
                 rows.append(("match", self.crumb(p), p))
             return rows
-        kids = [c for c in children(self.env, self.index, self.folder, self._stats)
-                if self.filter.lower() in c.name.lower()]
+        kids = sorted(children(self.env, self.index, self.folder, self._stats), key=_recent_first)
+        more = 0
+        new_typed = None
+        if typed:
+            needle, name = typed.lower(), slug(typed)
+            kids = [c for c in kids if needle in c.name.lower() or (name and name in c.name.lower())]
+            if name and not (self.folder / name).exists():
+                new_typed = ("new_typed", f"+ new folder: {name}", None)
+        elif len(kids) > FOLD_AT and self.folder not in self._expanded:
+            more = len(kids) - FOLD_AT
+            kids = kids[:FOLD_AT]
+        if new_typed and not kids:
+            rows.append(new_typed)  # nothing matches: the typed text is the new folder, first and selected
         width = min(_NAME_COL, max((len(c.name) for c in kids), default=0))
         now = self.env.now()
         for c in kids:
             stats = _stats_text(c.stats, self._tool.get(tuple(p.lower() for p in c.path.parts)), now)
             rows.append(("child", f"{fit(c.name, width)}  {stats}", c.path))
+        if more:
+            rows.append(("more", f"… {more} more (type to filter, enter to show all)", None))
+        if new_typed and kids:
+            rows.append(new_typed)
         if self.folder != self.env.root:
             rows.append(("start", "● start here", None))
-        if self._preselect:
-            rows.append(("new_named", f"+ new folder: {self._preselect}", None))
+        proposed = self.proposed_name()
+        if proposed and not (new_typed and slug(typed) == proposed):
+            rows.append(("new_named", f"+ new folder: {proposed}", None))
         rows.append(("new", "+ new folder here…", None))
         return rows
 
@@ -198,7 +315,6 @@ class NewFlow:
         return f"suggested by {s.source}" + (f" · {s.reason}" if s.reason else "")
 
     def _act(self) -> None:
-        self.moved = True
         self.error = ""
 
     def move(self, delta: int) -> None:
@@ -223,16 +339,16 @@ class NewFlow:
     def back(self) -> None:
         self._act()
         if self.folder != self.env.root and self.env.root in self.folder.parents:
-            self._open(self.folder.parent)
+            self._open(self.folder.parent, via="back")
         else:
-            self._open(self.env.root)
+            self._open(self.env.root, via="back")
 
     def esc(self) -> None:
         """Picker: back to the root. Later steps: back to the step before."""
         if self.step in ("picker", "name"):
             if self.step == "picker":
                 self._act()
-                self._open(self.env.root)
+                self._open(self.env.root, via="esc")
             return
         self.error = ""
         if self.step == "folder_name":
@@ -274,18 +390,29 @@ class NewFlow:
             return
         kind, _label, path = self.rows[self.selected]
         self._act()
-        if kind in ("child", "match", "suggested"):
-            preselect = self.offered.new_folder if kind == "suggested" and self.offered else None
-            if kind == "suggested":
-                self.suggestion, self.offered = self.offered, None
-            self._open(path, preselect=preselect)
+        if self.filter:
+            self._log("filter-enter", kind=kind)
+        if kind in ("child", "match", "alt"):
+            self._open(path, via=kind)
+        elif kind == "suggested":
+            self.suggestion = self.offered
+            self._open(path, preselect=self.offered.new_folder if self.offered else None, via=kind)
+        elif kind == "more":
+            at = self.selected
+            self._expanded.add(self.folder)
+            self._refresh(keep=False)
+            self.selected = min(at, len(self.rows) - 1)  # the first child that was folded away
         elif kind == "start":
             self.new_name = self.new_kind = None
             self._to_wrapper()
-        elif kind == "new":
-            self._to_folder_name(slug(self.name))
-        elif kind == "new_named":
-            self._to_folder_name(self._preselect or slug(self.name))
+        else:
+            self._new_source = kind
+            if kind == "new":
+                self._to_folder_name(slug(self.name))
+            elif kind == "new_named":
+                self._to_folder_name(self.proposed_name() or slug(self.name))
+            elif kind == "new_typed":
+                self._to_folder_name(slug(self.filter))
 
     # ---- new folder ---------------------------------------------------------------------------------------------------
 
@@ -311,6 +438,7 @@ class NewFlow:
         if self.error:
             return
         self.new_name = name
+        self._log("new-folder", kind=self._new_source, name=name)
         if self._kind_values() == ["organisational"]:
             self.new_kind = "organisational"
             self._walk_into_new()
@@ -326,6 +454,7 @@ class NewFlow:
         if kind not in self._kind_values():
             raise ValueError(f"{kind!r} is not offered here")
         self.new_kind = kind
+        self._log("kind", value=kind, name=self.new_name)
         if kind == "project":
             self._to_wrapper()
         else:  # a container or client is a grouping folder: create it and keep walking inside it
@@ -409,6 +538,9 @@ class NewFlow:
             self.cwd = self.folder
         self.session_id = str(uuid.uuid4())
         self.step = "done"
+        self._log("launch", folder_kind=self.new_kind, new_folder=self.new_name, wrapper=self.wrapper, github=self.github,
+                  cwd=self._rel(self.cwd))
+        log_outcome(self.env, self.name, self.suggestion_in_effect(), self.folder, self.new_name)
 
     def result(self) -> Launch | None:
         if self.step != "done":
@@ -508,13 +640,16 @@ def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
         line(("class:dim", "asking the model for a better place…"))
     else:
         line()
-    head = [("class:title", flow.breadcrumb()), ("", "   ")]
-    head += [("class:dim", "filter: "), ("", flow.filter), ("class:dim", "▏")] if flow.filter else \
-        [("class:dim", PICKER_KEYS)]
+    head = [("class:title", flow.breadcrumb())]
+    if flow.filter:
+        head += [("", "   "), ("class:dim", "filter: "), ("", flow.filter), ("class:dim", "▏")]
     line(*head)
-    visible = max(1, height - 7)
+    footer = wrap_items(PICKER_FOOTER, max(1, width))
+    chrome = 6 + len(footer) + (1 if flow.status else 0) + (1 if flow.error else 0)
+    visible = max(1, height - chrome)
     top = max(0, min(flow.selected - visible + 1, len(flow.rows) - visible)) if flow.selected >= visible else 0
-    styles = {"start": "class:live", "new": "class:title", "new_named": "class:title", "suggested": "class:status"}
+    styles = {"start": "class:live", "new": "class:title", "new_named": "class:title", "new_typed": "class:title",
+              "suggested": "class:status", "alt": "class:section", "more": "class:dim"}
     for i, (kind, label, _path) in enumerate(flow.rows[top:top + visible], top):
         sel = i == flow.selected
         text = fit(("▶ " if sel else "  ") + label, width)
@@ -523,3 +658,6 @@ def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
         line(("class:dim", "no folder matches"))
     if flow.error:
         line(("class:status", flow.error))
+    line()
+    for text in footer:
+        line(("class:footer", text))

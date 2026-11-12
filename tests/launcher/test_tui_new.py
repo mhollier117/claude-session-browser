@@ -222,28 +222,18 @@ def test_bad_folder_name_is_shown_inline(fake_env, index):
 
 # ---- suggestion ----------------------------------------------------------------------------------------------------
 
-def test_local_suggestion_opens_picker_there(fake_env, index):
+def test_weak_local_suggestion_is_a_row_at_the_root(fake_env, index):
     r = fake_env.root
-    (r / "home" / "homelab" / "pxe").mkdir()  # home\homelab itself is a place, never a project answer
-    _session(fake_env, r / "home" / "homelab" / "pxe", "h1", "homelab pxe boot", fake_env.now() - 60)
+    pxe = r / "home" / "homelab" / "pxe"
+    pxe.mkdir()  # home\homelab itself is a place, never a project answer
+    _session(fake_env, pxe, "h1", "homelab pxe boot", fake_env.now() - 60)
     index.refresh()
     flow = _flow(fake_env, index)
     flow.start("pxe boot rework")
-    assert flow.folder == r / "home" / "homelab" / "pxe"
-    assert flow.banner() == "suggested by history · matches pxe, boot"
-
-
-def test_suggestion_jumps_when_user_has_not_moved(fake_env, index):
-    r = fake_env.root
-    flow = _flow(fake_env, index)
-    flow.start("zzz qqq")
-    assert flow.folder == r  # root fallback
-    flow.apply_suggestion(Suggestion(r / "work" / "net", "forti_tool", "high", "matched net", "qwen"))
-    assert flow.folder == r / "work" / "net"
-    assert flow.rows[flow.selected] == ("new_named", "+ new folder: forti_tool", None)
-    assert flow.banner() == "suggested by qwen · matched net"
-    flow.enter()
-    assert flow.step == "folder_name" and flow.text == "forti_tool"
+    assert flow.pending.local.path == pxe and not flow.pending.local.strong
+    assert flow.folder == r and flow.banner() == ""  # round 2: only a strong local answer moves the picker
+    assert flow.rows[0] == ("alt", "≈ home\\homelab\\pxe", pxe) and flow.rows[flow.selected][0] == "child"
+    flow.pending.join(5)
 
 
 def test_suggestion_is_offered_not_forced_after_user_moved(fake_env, index):
@@ -255,7 +245,7 @@ def test_suggestion_is_offered_not_forced_after_user_moved(fake_env, index):
     before = flow.rows[flow.selected]
     flow.apply_suggestion(Suggestion(r / "work" / "net", None, "high", "matched net", "qwen"))
     assert flow.folder == r / "home"
-    assert flow.rows[0] == ("suggested", "★ work\\net — suggested by qwen · matched net", r / "work" / "net")
+    assert flow.rows[0] == ("suggested", "★ work\\net", r / "work" / "net")
     assert flow.rows[flow.selected] == before  # the row the user had selected stays selected
     flow.selected = 0
     flow.enter()
@@ -269,13 +259,15 @@ def test_offer_never_steals_enter_from_what_the_user_typed(fake_env, index):
     flow.start("zzz qqq")
     _go(flow, r / "home")
     flow.apply_suggestion(Suggestion(r / "work" / "net", None, "high", "matched net", "qwen"))
-    flow.type_filter("ai")
-    assert flow.rows[0][0] == "suggested" and flow.rows[flow.selected][2] == r / "home" / "ai"
+    assert flow.rows[0][0] == "suggested"
+    flow.type_filter("ai")  # while a filter is typed the suggestion rows step aside
+    assert "suggested" not in _kinds(flow) and flow.rows[flow.selected][2] == r / "home" / "ai"
     flow.enter()
     assert flow.folder == r / "home" / "ai"
     flow.esc()  # the offer is still there at the root; a fragment must not lose to it either
+    assert flow.rows[0][0] == "suggested"
     flow.type_filter("w/h")
-    assert flow.rows[0][0] == "suggested" and flow.rows[flow.selected][0] == "match"
+    assert "suggested" not in _kinds(flow) and flow.rows[flow.selected][0] == "match"
     flow.enter()
     assert flow.folder == r / "work" / "halo"
     flow.back()  # opening a level selects its first real row, not the offer
@@ -312,7 +304,9 @@ def test_live_model_answer_arrives_through_poll(fake_env, index):
     assert flow.folder == fake_env.root
     assert flow.pending.wait(5) is not None
     assert flow.poll() is True
-    assert flow.folder == fake_env.root / "work" / "halo"
+    assert flow.folder == fake_env.root  # round 2: the answer is the ★ row, it does not move the picker
+    assert flow.rows[0] == ("suggested", "★ work\\halo", fake_env.root / "work" / "halo")
+    assert flow.rows[flow.selected][0] == "child"
     assert flow.poll() is False  # applied once
     flow.pending.join(5)
 
@@ -515,7 +509,7 @@ def test_picker_footer_names_ctrl_c_not_q(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("zzz qqq")
     text = "".join(t for _s, t in render_new(flow, 200, 40))
-    assert "ctrl-c quit" in text and "q quit" not in text.replace("ctrl-c quit", "")
+    assert "ctrl-c cancel" in text and "q quit" not in text
 
 
 def test_render_new_shows_breadcrumb_banner_and_rows(fake_env, index):
@@ -524,9 +518,259 @@ def test_render_new_shows_breadcrumb_banner_and_rows(fake_env, index):
     flow.start("zzz qqq")
     flow.apply_suggestion(Suggestion(r / "work" / "net", "forti_tool", "high", "matched net", "qwen"))
     text = "".join(t for _s, t in render_new(flow, 100, 30))
+    assert "★ work\\net + new folder: forti_tool" in text
+    flow.selected = 0
+    flow.enter()  # the ★ row
+    text = "".join(t for _s, t in render_new(flow, 100, 30))
     assert "Session name: zzz qqq" in text
     assert "suggested by qwen · matched net" in text
     assert "work › net" in text and "▶ + new folder: forti_tool" in text and "● start here" in text
+
+
+# ---- round 2: typed new folder, selection identity, suggestions block, folding, footer, flow log ----------------
+
+class _FakePending:
+    """A `suggest()` result with a fixed local answer and (optionally) a model answer, no thread."""
+
+    def __init__(self, local, model=None):
+        self.local, self.model = local, model
+
+    def wait(self, timeout=None):
+        return self.model
+
+    def join(self, timeout=None):
+        return True
+
+
+def _flow_with(env, index, local=None, model=None, runner=None):
+    pending = _FakePending(local or Suggestion(env.root, None, "low", "no suggestion", "root"), model)
+    flow = NewFlow(env, index, runner or FakeRunner(), FakeHttp(), suggest_fn=lambda *a, **k: pending)
+    return flow, pending
+
+
+def _flowlog(env):
+    path = env.data_dir / "flow.log"
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def _outcomes(env):
+    path = env.data_dir / "suggest.log"
+    lines = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [x for x in lines if x.get("stage") == "outcome"]
+
+
+def test_typed_text_matching_no_child_becomes_the_new_folder(fake_env, index):
+    r = fake_env.root
+    ninja = r / "work" / "ninja"
+    (ninja / "scripts").mkdir(parents=True)
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("Ninja RMM Alert Review")
+    _go(flow, ninja)
+    flow.type_filter("alert review")
+    assert flow.rows[0] == ("new_typed", "+ new folder: alert_review", None)
+    assert flow.selected == 0
+    flow.enter()
+    assert flow.step == "folder_name" and flow.text == "alert_review"  # not the session-name slug
+    flow.esc()  # back in the picker, the typed text is still there
+    assert flow.step == "picker" and flow.filter == "alert review" and flow.rows[flow.selected][0] == "new_typed"
+
+
+def test_typed_new_folder_in_a_level_without_children_never_defaults_to_start_here(fake_env, index):
+    r = fake_env.root
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("Ninja RMM Alert Review")
+    _go(flow, r / "home" / "ai")  # no children: start here is the default with no filter
+    assert flow.rows[flow.selected][0] == "start"
+    for ch in "alert review":
+        flow.type_filter(flow.filter + ch)
+        assert flow.rows[flow.selected][0] != "start"
+    assert flow.rows[flow.selected] == ("new_typed", "+ new folder: alert_review", None)
+    flow.enter()
+    assert flow.step == "folder_name" and flow.text == "alert_review"
+    flow.esc()
+    flow.type_filter("!!")  # nothing usable as a name: still not start here
+    assert "new_typed" not in _kinds(flow) and flow.rows[flow.selected][0] == "new"
+
+
+def test_typed_new_folder_is_offered_after_matching_children(fake_env, index):
+    r = fake_env.root
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("x")
+    _go(flow, r / "work")
+    flow.type_filter("ha")
+    assert _kinds(flow) == ["child", "new_typed", "start", "new"]
+    assert flow.rows[1][1] == "+ new folder: ha" and flow.rows[flow.selected][2] == r / "work" / "halo"
+    flow.type_filter("halo")  # an existing folder's exact name is not offered as new
+    assert "new_typed" not in _kinds(flow)
+    flow.type_filter("w/h")  # a fragment jump is not a folder name
+    assert "new_typed" not in _kinds(flow)
+
+
+def test_offer_arrival_keeps_the_selected_child(fake_env, index):
+    r = fake_env.root
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("x")
+    _go(flow, r / "work")
+    first = flow.rows[flow.selected]
+    assert first[0] == "child"
+    flow.apply_suggestion(Suggestion(r / "home" / "ai", None, "high", "ai", "qwen"))
+    assert flow.rows[0][0] == "suggested" and flow.rows[flow.selected] == first  # the ★ never takes the cursor
+    flow.move(1)
+    second = flow.rows[flow.selected]
+    flow.apply_suggestion(Suggestion(r / "home" / "homelab", None, "high", "lab", "qwen"))
+    assert flow.rows[flow.selected] == second
+    assert flow.folder == r / "work"  # a model answer never moves the picker
+
+
+def test_model_answer_is_a_row_and_enter_preselects_its_new_folder(fake_env, index):
+    r = fake_env.root
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("zzz qqq")
+    assert flow.folder == r
+    flow.apply_suggestion(Suggestion(r / "work" / "net", "forti_tool", "high", "matched net", "qwen"))
+    assert flow.folder == r
+    assert flow.rows[0] == ("suggested", "★ work\\net + new folder: forti_tool", r / "work" / "net")
+    assert flow.rows[flow.selected][0] == "child"
+    flow.selected = 0
+    flow.enter()
+    assert flow.folder == r / "work" / "net"
+    assert "suggested" not in _kinds(flow)  # the current folder is never suggested
+    assert flow.rows[flow.selected] == ("new_named", "+ new folder: forti_tool", None)
+    assert flow.banner() == "suggested by qwen · matched net"
+    flow.enter()
+    assert flow.step == "folder_name" and flow.text == "forti_tool"
+
+
+def test_suggestions_block_local_alternatives_then_model(fake_env, index):
+    r = fake_env.root
+    a, b, c, d = (r / "work" / "halo", r / "home" / "ai", r / "home" / "homelab", r / "cc")
+    local = Suggestion(a, None, "medium", "matches halo", "history", alternatives=[b, c])
+    flow, pending = _flow_with(fake_env, index, local=local)
+    flow.start("halo thing")
+    assert flow.folder == r  # not strong: the picker opens at the root
+    assert flow.rows[:3] == [("alt", "≈ work\\halo", a), ("alt", "≈ home\\ai", b), ("alt", "≈ home\\homelab", c)]
+    assert flow.rows[3][0] == "child" and flow.selected == 3
+    flow.selected = 1
+    flow.enter()
+    assert flow.folder == b and [k for k in _kinds(flow) if k == "alt"] == ["alt", "alt"]  # b hidden here
+    pending.model = Suggestion(d, None, "high", "tooling", "qwen", alternatives=[a, c])
+    assert flow.poll() is True
+    assert flow.folder == b
+    assert flow.rows[:3] == [("suggested", "★ cc", d), ("alt", "≈ work\\halo", a), ("alt", "≈ home\\homelab", c)]
+    assert flow.poll() is False
+
+
+def test_strong_local_opens_the_picker_there(fake_env, index):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "net", None, "high", "matches forti, vpn", "history", strong=True)
+    flow, _p = _flow_with(fake_env, index, local=local)
+    flow.start("forti vpn")
+    assert flow.folder == r / "work" / "net"
+    assert flow.banner() == "suggested by history · matches forti, vpn"
+    flow.esc()
+    assert flow.rows[0] == ("alt", "≈ work\\net", r / "work" / "net")
+
+
+def test_children_are_ordered_by_last_activity(fake_env, index):
+    r = fake_env.root
+    now = fake_env.now()
+    _session(fake_env, r / "work" / "halo", "s1", "halo", now - 5 * 86400)
+    _session(fake_env, r / "work" / "net", "s2", "net", now - 3600)
+    index.refresh()
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("x")
+    _go(flow, r / "work")
+    assert [p.name for k, _l, p in flow.rows if k == "child"] == ["net", "halo", "clients", "vendors"]
+
+
+def test_long_levels_fold_and_expand(fake_env, index):
+    many = fake_env.root / "home" / "many"
+    for i in range(1, 16):
+        (many / f"f{i:02d}").mkdir(parents=True)
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("x")
+    _go(flow, many)
+    assert _kinds(flow) == ["child"] * 12 + ["more", "start", "new"]
+    assert flow.rows[12] == ("more", "… 3 more (type to filter, enter to show all)", None)
+    flow.selected = 12
+    flow.enter()
+    assert flow.folder == many and _kinds(flow) == ["child"] * 15 + ["start", "new"]
+    assert flow.rows[flow.selected][2] == many / "f13"
+    flow.back()
+    _go(flow, many)
+    flow.type_filter("f15")  # a filter searches every child, folded or not
+    assert [p.name for k, _l, p in flow.rows if k == "child"] == ["f15"]
+
+
+def test_picker_footer_names_the_exits_and_wraps(fake_env, index):
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("zzz qqq")
+    from launcher.tui.new import PICKER_FOOTER
+    assert PICKER_FOOTER == ("enter select · type to filter or name a new folder · backspace up · esc top · "
+                             "/path jump · ctrl-c cancel")
+    wide = "".join(t for _s, t in render_new(flow, 200, 40)).splitlines()
+    assert PICKER_FOOTER in wide
+    for width in (100, 60):
+        lines = "".join(t for _s, t in render_new(flow, width, 40)).splitlines()
+        start = next(i for i, x in enumerate(lines) if x.startswith("enter select"))
+        footer = [x for x in lines[start:] if x]
+        assert all(len(x) <= width for x in footer) and len(footer) >= 2
+        assert " · ".join(footer) == PICKER_FOOTER  # wrapped, nothing cut
+
+
+def test_flow_log_and_outcome_for_a_typed_new_project(fake_env, index):
+    r = fake_env.root
+    ninja = r / "work" / "ninja"
+    ninja.mkdir()
+    model = Suggestion(ninja, "alert_review", "high", "ninja alerts", "qwen")
+    flow, _p = _flow_with(fake_env, index, model=model)
+    flow.start("Ninja RMM Alert Review")
+    flow.poll()
+    _go(flow, ninja)
+    flow.type_filter("alert review")
+    flow.enter()
+    flow.enter()  # folder name
+    assert flow.step == "kind"
+    flow.enter()  # project
+    flow.choose_wrapper("clauded")
+    flow.choose_github("personal")
+    assert flow.step == "done"
+    events = _flowlog(fake_env)
+    assert [e["event"] for e in events if e["event"] != "open"] == [
+        "start", "filter-enter", "new-folder", "kind", "launch"]
+    assert all({"ts", "event", "folder", "kind", "filter", "step"} <= set(e) for e in events)
+    fe = next(e for e in events if e["event"] == "filter-enter")
+    assert fe["folder"] == "work\\ninja" and fe["kind"] == "new_typed" and fe["filter"] == "alert review"
+    nf = next(e for e in events if e["event"] == "new-folder")
+    assert nf["name"] == "alert_review" and nf["kind"] == "new_typed"
+    assert next(e for e in events if e["event"] == "kind")["value"] == "project"
+    launch = next(e for e in events if e["event"] == "launch")
+    assert launch["folder"] == "work\\ninja" and launch["new_folder"] == "alert_review"
+    assert launch["wrapper"] == "clauded"
+    assert _outcomes(fake_env) == [{"ts": fake_env.now(), "stage": "outcome", "name": "Ninja RMM Alert Review",
+                                    "suggested": "work\\ninja", "suggested_source": "qwen",
+                                    "chosen": "work\\ninja", "new_folder": "alert_review", "match": True}]
+
+
+def test_outcome_uses_the_local_suggestion_before_a_model_answer(fake_env, index):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "matches halo", "history")
+    flow, _p = _flow_with(fake_env, index, local=local)
+    flow.start("halo")
+    _go(flow, r / "home")
+    _pick(flow, "start")
+    flow.choose_wrapper("clauded")
+    out = _outcomes(fake_env)
+    assert len(out) == 1 and out[0]["suggested"] == "work\\halo" and out[0]["chosen"] == "home"
+    assert out[0]["new_folder"] is None and out[0]["match"] is False
+
+
+def test_ctrl_c_logs_cancel(fake_env, index):
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("zzz qqq")
+    assert _run_keys(flow, "ab\x03") is None
+    events = _flowlog(fake_env)
+    assert events[-1]["event"] == "cancel" and events[-1]["filter"] == "ab" and events[-1]["step"] == "picker"
 
 
 # ---- launched.json sidecar ----------------------------------------------------------------------------------------
