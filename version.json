@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.2",
-  "notes": "Fix: the Fable limit notice comes once per account per reset period, not on every usage check.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.2",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.2/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "bee634d0d86c3d70b11ad8c093175fe0a2bc0f6238d9e310c44ecf3124c12433"
+  "version": "1.7.0.3",
+  "notes": "Fix: sturdier check against a second copy of the app. Each start is recorded in %LOCALAPPDATA%\\ClaudeSessionBrowser\\startup.log with what started it.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.3",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.3/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "8494bdfa90af370d7827c3e6775da7fcff8e9501abfe7891796a6af6e59d56c9"
 }
