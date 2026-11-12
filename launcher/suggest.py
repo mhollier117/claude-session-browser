@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import retrieve
+from . import flowlog, retrieve
 from .index import Index
 from .paths import Env
 from .scaffold import Runner, check_name
@@ -108,8 +108,12 @@ def _log(env: Env, entry: dict) -> None:
     try:
         env.data_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry, ensure_ascii=False) + "\n"
-        with _log_lock, open(env.data_dir / "suggest.log", "a", encoding="utf-8") as fh:
-            fh.write(line)
+        path = env.data_dir / "suggest.log"
+        with _log_lock:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            if path.stat().st_size > flowlog.MAX_BYTES:  # the same 1 MB cap as flow.log
+                flowlog.trim(path)
     except OSError:
         pass  # the log is for tuning only
 

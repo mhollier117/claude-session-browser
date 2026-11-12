@@ -196,7 +196,8 @@ def test_launcher_methods_answer_errors_instead_of_raising(api, monkeypatch):
     monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
     for call in (lambda: api.launcher_rows(), lambda: api.launcher_children("x"),
                  lambda: api.launcher_kind_options("x"), lambda: api.launcher_suggest("x"),
-                 lambda: api.launcher_suggest_poll("t"), lambda: api.launcher_new({})):
+                 lambda: api.launcher_suggest_poll("t"), lambda: api.launcher_new({}),
+                 lambda: api.launcher_cancel("x", "picker")):
         assert call() == {"ok": False, "error": "RuntimeError: boom"}
 
 
@@ -399,6 +400,35 @@ def test_launcher_new_logs_the_outcome_against_the_suggestion_shown(fake_env, ap
     assert outcomes[0]["new_folder"] == "vpn"
 
 
+def test_launcher_suggest_with_no_name_asks_nothing(fake_env, api, monkeypatch):
+    def no_suggest(*a, **k):
+        raise AssertionError("suggest() must not run for an empty name")
+    monkeypatch.setattr("launcher.suggest.suggest", no_suggest)
+    for name in ("", "   ", None):
+        res = api.launcher_suggest(name)
+        assert res["token"] is None and res["chips"] == [] and res["wait_ms"] == 0
+        assert res["local"]["path"] == "" and res["local"]["source"] == "root"
+    assert not (fake_env.data_dir / "flow.log").exists()  # no start event either
+
+
+def test_launcher_cancel_logs_a_browser_cancel(fake_env, api):
+    assert api.launcher_cancel("work/net", "picker") == {"ok": True}
+    [line] = (fake_env.data_dir / "flow.log").read_text(encoding="utf-8").splitlines()
+    e = json.loads(line)
+    assert (e["event"], e["folder"], e["step"], e["ui"]) == ("cancel", "work\\net", "picker", "browser")
+
+
+def test_launcher_new_created_folder_then_failed_launch_reports_created(fake_env, api, monkeypatch):
+    def popen(argv, **kw):
+        raise PermissionError("blocked")
+    monkeypatch.setattr(cs.subprocess, "Popen", popen)
+    res = api.launcher_new({"name": "x", "rel": "home/ai", "new_folder": "fresh", "kind": "project",
+                            "wrapper": "clauded", "github": "none"})
+    assert res["ok"] is False and res["launched"] is False and "blocked" in res["error"]
+    assert res["created"] is True and res["rel"] == "home/ai/fresh"  # the page walks into the new folder
+    assert (fake_env.root / "home" / "ai" / "fresh").is_dir()
+
+
 def test_launcher_new_launch_survives_a_broken_log(fake_env, api, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk full")
@@ -468,6 +498,28 @@ def test_page_preselects_the_bucket_defaults_and_offers_github_none(page):
     assert "['none', t('keins'), t('kein GitHub-Repo, nur git init')]" in nf
     assert "github: project ? LN.github : null" in _js_fn(page, "lnCreate")
     assert "lnApplyDefaultWrapper" not in page
+
+
+def test_page_a_failed_suggestion_can_be_asked_again(page):
+    suggest = _js_fn(page, "lnSuggest")
+    failed = suggest[suggest.index("if(!r || r.ok===false || !r.local){"):]
+    assert failed.index("LN.suggName='';") < failed.index("return;")
+
+
+def test_page_a_typed_name_that_slugs_to_nothing_never_falls_back(page):
+    norm = _js_fn(page, "lnNfNormalise")
+    assert "if(!LN.nf || !LN.nf.touched) return;" in norm
+    assert "if(!folder){ lnSetMsg(t('Bitte gib einen Ordnernamen ein.'), 'err'); return; }" in norm
+    assert 'onchange="lnNfNormalise(this)"' in page
+    assert "if(!folder){ lnSetMsg(t('Bitte gib einen Ordnernamen ein.'), 'err'); return; }" in _js_fn(page, "lnCreate")
+
+
+def test_page_logs_cancel_only_when_closed_without_a_launch(page):
+    close = _js_fn(page, "lnClose")
+    assert close.startswith("function lnClose(launched){") and "if(!launched && lnIsOpen())" in close
+    assert "api.launcher_cancel(" in close
+    assert "lnClose(true);" in _js_fn(page, "lnSubmit")
+    assert "keywords" not in _js_fn(page, "lnSourceName")
 
 
 def test_page_new_strings_are_translated(page):

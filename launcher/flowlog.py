@@ -18,11 +18,13 @@ _lock = threading.Lock()
 
 
 def _tmp_path(path):
-    """The temp file `_trim` writes: per process, so two `cc` processes trimming at once never share one."""
+    """The temp file `trim` writes: per process, so two `cc` processes trimming at once never share one."""
     return path.with_name(f"{path.name}.{os.getpid()}.tmp")
 
 
-def _trim(path) -> None:
+def trim(path) -> None:
+    """Keep only the newer half of the log at `path` (cut at a line boundary) once it is past `MAX_BYTES`; also
+    used for `suggest.log`. Raises OSError when the file cannot be read or replaced."""
     data = path.read_bytes()
     if len(data) <= MAX_BYTES:
         return
@@ -52,6 +54,6 @@ def log(env: Env, event: str, **fields) -> None:
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line)
             if path.stat().st_size > MAX_BYTES:
-                _trim(path)
+                trim(path)
     except (OSError, TypeError, ValueError):
         pass

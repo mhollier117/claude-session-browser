@@ -950,7 +950,6 @@ TRANSLATIONS = {
         "Kein Vorschlag: {grund}": "No suggestion: {grund}",
         "· Modell denkt nach…": "· asking the model…",
         "deinem Verlauf": "your history",
-        "Stichwörtern": "keywords",
         "Spalten bis zu diesem Ordner öffnen": "Open the columns at this folder",
         "Neuer Ordner in {ordner}": "New folder in {ordner}",
         "Neuer Ordner in {ordner}…": "New folder in {ordner}…",

@@ -260,7 +260,8 @@ POLL_S = 0.25  # how often the picker looks for the model's suggestion
 def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Application:
     """Draw `render_new(flow)` and route keys to it; a 250 ms timer shows the model's suggestion via `flow.poll`
     (it never blocks: `Pending.wait(0)`, and never moves the picker). Exits with the flow's `Launch`, or None on
-    ctrl-c (or q on the kind step; in the picker q is a filter character, on the confirm step q does nothing), which the flow logs as a cancel."""
+    ctrl-c (or q on the kind step; in the picker q is a filter character), which the flow logs as a cancel. On the
+    confirm step ctrl-w / ctrl-g change the wrapper / GitHub choice and letters go to `flow.type_on_confirm`."""
     from .new import render_new
     kb = KeyBindings()
     texty = Condition(lambda: flow.step in ("name", "folder_name"))
@@ -309,6 +310,16 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
     def _escape(event) -> None:
         flow.esc()
 
+    confirming = Condition(lambda: flow.step == "confirm")
+
+    @kb.add("c-w", filter=confirming)  # as on the resume list; plain w and g are letters on this step
+    def _cycle_wrapper(event) -> None:
+        flow.cycle_wrapper()
+
+    @kb.add("c-g", filter=confirming)
+    def _cycle_github(event) -> None:
+        flow.cycle_github()
+
     @kb.add("up", filter=~texty)
     def _up(event) -> None:
         flow.move(-1)
@@ -335,11 +346,8 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
             flow.error = ""
         elif flow.step == "picker":  # every printable key filters, q included (folder names start with q too)
             flow.type_filter(flow.filter + ch)
-        elif flow.step == "confirm":  # w and g cycle the choices; q does not cancel here (ctrl-c does)
-            if ch.lower() == "w":
-                flow.cycle_wrapper()
-            elif ch.lower() == "g":
-                flow.cycle_github()
+        elif flow.step == "confirm":  # letters are text here (ctrl-w / ctrl-g change the choices; ctrl-c cancels)
+            flow.type_on_confirm(ch)
         elif ch == "q":  # the kind choice has no text to type
             flow.cancel()
             event.app.exit(result=None)

@@ -107,7 +107,11 @@ def remember(env: Env, folder: Path, wrapper: str, github: str | None = None) ->
     tmp = path.with_name(f"{FILE}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        try:
+            os.replace(tmp, path)
+        except PermissionError:  # another process has the file open for a moment (Windows): try once more
+            time.sleep(_RETRY_S)
+            os.replace(tmp, path)
     except BaseException:
         try:
             tmp.unlink()

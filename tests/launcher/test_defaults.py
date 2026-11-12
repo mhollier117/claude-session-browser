@@ -137,6 +137,39 @@ def test_a_failed_replace_leaves_no_temp_file(fake_env, monkeypatch):
     assert (fake_env.data_dir / "defaults.json").read_bytes() == before
 
 
+def test_a_locked_replace_is_retried_once(fake_env, monkeypatch):
+    _seed(fake_env)
+    real, calls, sleeps = defaults.os.replace, [], []
+
+    def once_locked(src, dst):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError("locked")
+        real(src, dst)
+    monkeypatch.setattr(defaults.os, "replace", once_locked)
+    monkeypatch.setattr(defaults.time, "sleep", sleeps.append)
+    defaults.remember(fake_env, fake_env.root / "home", "claudew", "none")
+    assert len(calls) == 2 and sleeps == [defaults._RETRY_S]
+    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("claudew", "none")
+    assert not [p for p in fake_env.data_dir.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_replace_locked_twice_raises_and_leaves_no_temp_file(fake_env, monkeypatch):
+    before = _seed(fake_env)
+    calls = []
+
+    def boom(src, dst):
+        calls.append(1)
+        raise PermissionError("locked")
+    monkeypatch.setattr(defaults.os, "replace", boom)
+    monkeypatch.setattr(defaults.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        defaults.remember(fake_env, fake_env.root / "home", "claudew", "none")
+    assert len(calls) == 2
+    assert [p.name for p in fake_env.data_dir.iterdir()] == ["defaults.json"]
+    assert (fake_env.data_dir / "defaults.json").read_bytes() == before
+
+
 def test_temp_names_are_unique_per_writer(fake_env, monkeypatch):
     names = []
     real = defaults.os.replace

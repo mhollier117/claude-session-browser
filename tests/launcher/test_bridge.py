@@ -467,7 +467,7 @@ def test_supersede_cancels_the_previous_request_at_once():
     assert store.poll(t2) == "B"
 
 
-def test_in_effect_is_the_model_answer_else_the_local_one_for_the_same_name(fake_env):
+def test_in_effect_is_the_model_answer_once_handed_to_the_page_else_the_local_one(fake_env):
     r = fake_env.root
     local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history")
     model = Suggestion(r / "work" / "net", None, "high", "vpn", "qwen")
@@ -477,9 +477,13 @@ def test_in_effect_is_the_model_answer_else_the_local_one_for_the_same_name(fake
     assert store.local(token) is local and store.local("nope") is None
     assert store.in_effect("fix vpn") is local
     handle.answer = model
+    assert store.in_effect("fix vpn") is local  # answered, but the page has not been shown it yet
+    assert store.poll(token) is model
     assert store.in_effect("fix vpn") is model
     assert store.in_effect("another name") is None
     assert bridge.PendingSuggestions().in_effect("fix vpn") is None
+    store.supersede(FakeHandle(local), "fix vpn")  # a new request for the same name starts from its local answer
+    assert store.in_effect("fix vpn") is local
 
 
 def test_suggest_has_no_deferred_model_path():
@@ -528,8 +532,9 @@ def test_prepare_new_project_logs_new_folder_kind_and_launch_like_the_terminal(f
     r = fake_env.root
     store = bridge.PendingSuggestions()
     handle = FakeHandle(Suggestion(r / "work" / "halo", None, "medium", "halo", "history"))
-    store.supersede(handle, "fix vpn")
+    token = store.supersede(handle, "fix vpn")
     handle.answer = Suggestion(r / "work" / "net", "vpn_fix", "high", "vpn", "qwen")
+    assert store.poll(token) is handle.answer  # handed to the page: now the suggestion shown
     bridge.prepare_new(fake_env, _payload(new_folder="alert_review", kind="project", github="none", via="new_typed"),
                        runner=FakeRunner(), suggestions=store)
     events = _flow_events(fake_env)
@@ -568,6 +573,15 @@ def test_prepare_new_launches_when_logging_fails(fake_env, monkeypatch):
     result, launch = bridge.prepare_new(fake_env, _payload(new_folder="x1", kind="project"), runner=FakeRunner())
     assert result["ok"] is True and result["launched"] is True and launch is not None
     assert result["warnings"] == []
+
+
+def test_log_cancel_mirrors_the_terminal_cancel_event(fake_env):
+    bridge.log_cancel(fake_env, "work/net", "folder_name")
+    bridge.log_cancel(fake_env, "work/nope", "bogus")
+    first, second = _flow_events(fake_env)
+    assert {k: first[k] for k in ("event", "folder", "kind", "filter", "step", "ui")} == {
+        "event": "cancel", "folder": "work\\net", "kind": None, "filter": "", "step": "folder_name", "ui": "browser"}
+    assert (second["folder"], second["step"]) == ("", "picker")  # unknown folder and step: root, picker
 
 
 def test_log_start_mirrors_the_terminal_start_event(fake_env):

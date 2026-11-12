@@ -1,7 +1,8 @@
 """The new-session walk: a pure state machine (`NewFlow`) and its renderer (`render_new`).
 
 Steps, in order: name → picker → folder name → kind (new folders) → confirm (wrapper, and GitHub for a new project,
-preselected from `defaults`; `w` and `g` cycle them in place) → done. The picker
+preselected from `defaults`; ctrl-w and ctrl-g cycle them in place; on a start-here confirm typing returns to the
+picker as a filter) → done. The picker
 walks the tree one level at a time; each level lists up to three suggestion rows (the model's answer `★` once it
 arrives, then the ranked alternatives `≈`), its child folders with session stats (most recent first, folded past
 `FOLD_AT`), `● start here` (not at the root) and `+ new folder here…`. Typed text filters the children and is
@@ -42,7 +43,10 @@ PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspa
 HIDDEN_HINT = "suggestions hidden while filtering · backspace to clear"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
-CONFIRM_KEYS = "enter launch · w wrapper · g github · esc back · ctrl-c cancel"
+CONFIRM_KEYS = "enter launch · ctrl-w wrapper · ctrl-g github · esc back · ctrl-c cancel"
+# start here: nothing is created, so there is no GitHub choice, and typing goes back to the picker as a filter
+CONFIRM_HERE_KEYS = "enter launch · ctrl-w wrapper · type to name a new folder · esc back · ctrl-c cancel"
+CONFIRM_TYPED_HINT = "esc to go back and change the folder name"
 
 
 def _tools(rows) -> dict[tuple[str, ...], str]:
@@ -96,6 +100,7 @@ class NewFlow:
         self.pending: Pending | None = None
         self.suggestion: Suggestion | None = None  # the one whose folder was opened (shown as the banner there)
         self.offered: Suggestion | None = None  # the model's answer, shown as the ★ row
+        self.shown: Suggestion | None = None  # `offered` once its ★ row has been drawn (the outcome log's suggestion)
         self._model_applied = False
         self._preselect: str | None = None  # `+ new folder: <name>` from a suggestion, for self.folder only
         self._expanded: set[Path] = set()  # folded levels the user asked to see in full
@@ -148,21 +153,26 @@ class NewFlow:
         self._log("cancel")
 
     def suggestion_in_effect(self) -> Suggestion | None:
-        """The model's answer once it arrived in the picker, else the local answer (None before `start`)."""
-        if self.offered is not None:
-            return self.offered
+        """The suggestion the user was shown: the model's answer once its ★ row has been drawn, else the local
+        answer (None before `start`)."""
+        if self.shown is not None:
+            return self.shown
         return self.pending.local if self.pending is not None else None
 
+    def note_shown(self) -> None:
+        """The renderer drew the ★ row: from now on the model's answer is the suggestion in effect."""
+        if self.offered is not None:
+            self.shown = self.offered
+
     def poll(self) -> bool:
-        """Apply the model's answer once it is there (called by the app's timer); True when it changed the view."""
-        if self.pending is None or self._model_applied:
+        """Apply the model's answer once it is there and the walk is in the picker (called by the app's timer); an
+        answer that arrives on another step waits until the picker shows again. True when it changed the view."""
+        if self.pending is None or self._model_applied or self.step != "picker":
             return False
         s = self.pending.wait(0)
         if s is None:
             return False
         self._model_applied = True
-        if self.step != "picker":
-            return False
         self.apply_suggestion(s)
         return True
 
@@ -533,14 +543,31 @@ class NewFlow:
             raise ValueError(f"unknown GitHub account: {account!r}")
         self.github = account
 
+    def confirm_keys(self) -> str:
+        """The confirm step's footer: a new project can change GitHub; start here can type a new folder's name."""
+        return CONFIRM_KEYS if self._new_project() else CONFIRM_HERE_KEYS
+
+    def type_on_confirm(self, ch: str) -> None:
+        """A printable key on the confirm step. Start here (nothing is created): back to the picker for this folder
+        with `ch` as the start of the filter, as esc and then typing would, so typing a folder name there names a
+        new folder instead of launching in this one. A new project: nothing changes; the hint says how to rename."""
+        if self.step != "confirm":
+            return
+        if self.new_name is not None:
+            self.error = CONFIRM_TYPED_HINT
+            return
+        self.error = ""
+        self.step = "picker"
+        self.type_filter(ch)  # a typed filter selects its own first match, not the row the picker was left from
+
     def cycle_wrapper(self) -> None:
-        """`w`: the next wrapper, in the order of the old wrapper step."""
+        """ctrl-w: the next wrapper (the Claude wrappers, then qwen)."""
         values = [v for v, _l, _h in self._wrapper_options()]
         now = values.index(self.wrapper) if self.wrapper in values else -1
         self.wrapper = values[(now + 1) % len(values)]
 
     def cycle_github(self) -> None:
-        """`g`: personal -> work -> none -> personal; only for a new project (otherwise nothing is created)."""
+        """ctrl-g: personal -> work -> none -> personal; only for a new project (otherwise nothing is created)."""
         if not self._new_project():
             return
         values = defaults.GITHUB_CHOICES
@@ -715,15 +742,15 @@ def _render_confirm(flow: NewFlow, width: int, line) -> None:
     new = flow.new_name is not None
     what = _FOLDER_TEXT.get(flow.new_kind or "", "new folder") if new else "existing"
     line(("class:dim", "folder   "), ("class:name", what), ("", f"   {flow.new_name}" if new else ""))
-    line(("class:dim", "wrapper  "), ("class:name", flow.wrapper or ""), ("class:dim", "   (w to change)"))
+    line(("class:dim", "wrapper  "), ("class:name", flow.wrapper or ""), ("class:dim", "   (ctrl-w to change)"))
     if flow.new_kind == "project" and new:
-        line(("class:dim", "github   "), ("class:name", flow.github or "none"), ("class:dim", "   (g to change)"))
+        line(("class:dim", "github   "), ("class:name", flow.github or "none"), ("class:dim", "   (ctrl-g to change)"))
     for n, text in enumerate(_hanging(flow.command_text(), max(10, width), 9)):
         line(*([("class:dim", "runs     ")] if n == 0 else []), ("class:live", text[9:] if n == 0 else text))
     if flow.error:
         line(("class:status", flow.error))
     line()
-    _footer(line, CONFIRM_KEYS, width)
+    _footer(line, flow.confirm_keys(), width)
 
 
 def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
@@ -748,6 +775,8 @@ def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
     styles = {"start": "class:live", "new": "class:title", "new_named": "class:title", "new_typed": "class:title",
               "suggested": "class:status", "alt": "class:section", "more": "class:dim"}
     for i, (kind, label, _path) in enumerate(flow.rows[top:top + visible], top):
+        if kind == "suggested":
+            flow.note_shown()
         sel = i == flow.selected
         text = fit(("▶ " if sel else "  ") + label, width)
         line(("class:cur" if sel else styles.get(kind, "class:name"), text))

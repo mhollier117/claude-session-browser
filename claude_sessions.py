@@ -4494,10 +4494,13 @@ class Api:
         in the background (a newer call cancels this one), and their first answer is fetched with
         launcher_suggest_poll(token) for up to `wait_ms`."""
         from launcher import bridge
-        from launcher.suggest import default_http, suggest
+        from launcher.suggest import Suggestion, default_http, suggest
         name = str(name or "").strip()
         with self._launcher_state():
             env = self._launcher_env
+            if not name:  # nothing to suggest for: no model stage, no log
+                empty = Suggestion(env.root, None, "low", "", "root")
+                return {"local": bridge.suggestion_dict(env.root, empty), "token": None, "chips": [], "wait_ms": 0}
             pending = suggest(env, self._launcher_idx(), name,
                               http=_LAUNCHER_HTTP or default_http, runner=_LAUNCHER_RUNNER,
                               on_update=lambda s: None)
@@ -4519,6 +4522,14 @@ class Api:
             return None
         root = self._launcher_env.root
         return {**bridge.suggestion_dict(root, s), "chips": bridge.suggestion_chips(root, local, s)}
+
+    @_launcher_api
+    def launcher_cancel(self, rel="", step="picker"):
+        """The New session dialog was closed without a launch: logged only (bridge.log_cancel), best effort."""
+        from launcher import bridge
+        self._launcher_state()
+        bridge.log_cancel(self._launcher_env, rel, step)
+        return {"ok": True}
 
     @_launcher_api
     def launcher_new(self, payload):
@@ -9354,7 +9365,11 @@ function lnOpen(){
 }
 // Cancel always works, also while a request runs: its answer is then ignored
 // (only a started session is still reported).
-function lnClose(){
+function lnClose(launched){
+  if(!launched && lnIsOpen()){   // closed without a launch: logged like the terminal's cancel (best effort)
+    const c=LN.nf ? {rel: LN.nf.rel} : lnCur();
+    try{ Promise.resolve(api.launcher_cancel(c ? c.rel : '', LN.nf ? 'folder_name' : 'picker')).catch(()=>{}); }catch(e){}
+  }
   clearTimeout(LN.pollT);
   LN.seq++; LN.navSeq++; LN.openId++; LN.busy=false;
   closeOverlay('overlay-launcher');
@@ -9436,6 +9451,7 @@ async function lnSuggest(name){
   try{ r=await api.launcher_suggest(name); }catch(e){ r={ok:false, error:String(e)}; }
   if(my!==LN.seq || !lnIsOpen()) return;
   if(!r || r.ok===false || !r.local){
+    LN.suggName='';   // a failed request: enter or leaving the field on the same name asks again
     LN.sugg={error: (r && r.error) || t('Das hat nicht geklappt.')}; LN.chips=[]; LN.suggWaiting=false;
     lnRenderSugg(); return;
   }
@@ -9458,7 +9474,7 @@ async function lnSuggest(name){
   LN.pollT=setTimeout(tick, 500);
 }
 function lnSourceName(src){
-  return ({qwen:'Qwen', claude:'Claude', history:t('deinem Verlauf'), keywords:t('Stichwörtern')})[src] || src;
+  return ({qwen:'Qwen', claude:'Claude', history:t('deinem Verlauf')})[src] || src;
 }
 // ★ the model's answer, ≈ the local best and the alternatives (as the terminal rows)
 function lnChipPath(c){ return lnPathText(c.rel, c.new_folder || (c.needs_name ? t('neuer Ordner…') : '')); }
@@ -9543,6 +9559,15 @@ function lnNfName(v){
   LN.nf.via=LN.nf.touched ? 'new_typed' : 'new';
 }
 function lnNfFolder(){ const nf=LN.nf; return nf ? lnSlug(nf.touched ? nf.name : lnName()) : ''; }
+// Leaving the field shows the typed name as it will be created. Typed text
+// that slugs to nothing ("!!!") stays as typed and says so: it never falls
+// back to the session-name slug (only an empty field does).
+function lnNfNormalise(el){
+  if(!LN.nf || !LN.nf.touched) return;
+  const folder=lnNfFolder();
+  if(!folder){ lnSetMsg(t('Bitte gib einen Ordnernamen ein.'), 'err'); return; }
+  el.value=folder; LN.nf.name=folder;
+}
 function lnNfKinds(){ const c=LN.nf && LN.cols.find(x=>x.rel===LN.nf.rel); return (c && c.kind_options) || []; }
 function lnSetKindAt(i){ const k=lnNfKinds()[i]; if(LN.nf && k){ LN.nf.kind=k; lnRender(); } }
 function lnSetGithub(g){ LN.github=g; LN.githubSet=true; lnRenderNf(); }
@@ -9591,7 +9616,7 @@ async function lnSubmit(payload){
     return;
   }
   if(!failed && r.launched){
-    lnClose();
+    lnClose(true);
     started();
     return;
   }
@@ -9664,7 +9689,7 @@ function lnRenderNf(){
   el.innerHTML=`<h4>${esc(t('Neuer Ordner in {ordner}', {ordner: lnPathText(nf.rel)}))}</h4>`
     + `<div class="ln-field"><label for="ln-nf-name">${esc(t('Ordnername'))}</label>`
     + `<input class="modal-input" id="ln-nf-name" autocomplete="off" spellcheck="false" oninput="lnNfName(this.value)"`
-    + ` onchange="if(LN.nf && LN.nf.touched){ this.value=lnNfFolder(); lnNfName(this.value); }"></div>`
+    + ` onchange="lnNfNormalise(this)"></div>`
     + `<div class="ln-field"><div class="ln-lbl">${esc(t('Was ist es?'))}</div>${kindHtml}</div>${github}`;
   const f=document.getElementById('ln-nf-name');
   f.value=nf.name; f.placeholder=lnSlug(lnName());

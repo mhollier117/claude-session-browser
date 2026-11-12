@@ -257,6 +257,22 @@ def log_start(env: Env, name: str, local: Suggestion) -> None:
         pass
 
 
+CANCEL_STEPS = ("picker", "folder_name")  # where the dialog can be: the columns, or the new-folder form
+
+
+def log_cancel(env: Env, rel=None, step=None) -> None:
+    """The dialog was closed without a launch: the terminal's `cancel` event, at the folder the dialog showed
+    (`rel`, the root when unknown) and its step. Never raises."""
+    try:
+        try:
+            folder = resolve_rel(env.root, rel)
+        except ValueError:
+            folder = env.root
+        _flow(env, "cancel", folder, step if step in CANCEL_STEPS else "picker")
+    except Exception:  # noqa: BLE001 - diagnostic only
+        pass
+
+
 def _log_new(env: Env, req: NewRequest, via: str | None) -> None:
     """The terminal's `new-folder` and `kind` events for a new folder the dialog is about to create."""
     _flow(env, "new-folder", req.folder, "folder_name", kind=via, name=req.new_folder)
@@ -332,6 +348,7 @@ class PendingSuggestions:
         self._items: dict[str, tuple[float, Pending]] = {}
         self._current: Pending | None = None  # the request `supersede` issued last
         self._current_name: str | None = None  # the session name it was for
+        self._current_shown: Suggestion | None = None  # its model answer once `poll` handed it to the page
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -355,18 +372,19 @@ class PendingSuggestions:
         with self._lock:
             previous, self._current = self._current, pending
             self._current_name = (name or "").strip()
+            self._current_shown = None
         if previous is not None and previous is not pending:
             previous.cancel()
         return self.add(pending)
 
     def in_effect(self, name: str) -> Suggestion | None:
-        """The suggestion the dialog shows for session `name`: the model's answer once there, else the local one;
-        None when the current request was for another name (or there is none)."""
+        """The suggestion the dialog showed for session `name`: the model's answer once `poll` has handed it to the
+        page, else the local one; None when the current request was for another name (or there is none)."""
         with self._lock:
-            pending, current_name = self._current, self._current_name
+            pending, current_name, shown = self._current, self._current_name, self._current_shown
         if pending is None or current_name != (name or "").strip():
             return None
-        return pending.wait(0) or pending.local
+        return shown or pending.local
 
     def local(self, token: str) -> Suggestion | None:
         """The local answer of the request behind `token` (None for an unknown or expired token)."""
@@ -385,4 +403,6 @@ class PendingSuggestions:
             answer = entry[1].wait(0)
             if answer is not None:
                 del self._items[token]
+                if entry[1] is self._current:
+                    self._current_shown = answer
             return answer

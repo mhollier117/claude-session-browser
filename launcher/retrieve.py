@@ -15,6 +15,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .index import FolderStats
@@ -319,21 +320,38 @@ def _prefer_used(scored: list[Scored], k: int) -> list[Scored]:
     return keep
 
 
-_DATED_SUFFIX = re.compile(r"(?:[_-]\d{4}-\d{2}-\d{2}|_\d{8}|_[0-9a-fA-F]{6,40})$")
+_DATED_SUFFIX = re.compile(r"(?:[_-](\d{4})-(\d{2})-(\d{2})|_(\d{8})|_([0-9a-fA-F]{6,40}))$")
+
+
+def _is_date(digits: str) -> bool:
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return False
+    return True
 
 
 def _undated(leaf: str) -> tuple[str, str]:
-    """(leaf without a trailing date or hash suffix, that suffix's digits or '')."""
+    """(leaf without a trailing date or hash suffix, the date as YYYYMMDD when the suffix is a date, else '').
+    A hash needs at least one hex letter and one digit: `_decade` is a word and `ticket_123456` a number, so
+    neither is a suffix; eight digits are a suffix only when they form a valid date."""
     m = _DATED_SUFFIX.search(leaf)
-    if m is None or (m.group(0)[1:].isalpha()):  # a hex suffix needs a digit, or `_decade` is a word
+    if m is None:
         return leaf, ""
-    return leaf[:m.start()], re.sub(r"\D", "", m.group(0))
+    if m.group(1):
+        return leaf[:m.start()], m.group(1) + m.group(2) + m.group(3)
+    if m.group(4) and _is_date(m.group(4)):
+        return leaf[:m.start()], m.group(4)
+    h = m.group(5) or ""
+    if re.search(r"[a-fA-F]", h) and re.search(r"\d", h):
+        return leaf[:m.start()], ""
+    return leaf, ""
 
 
 def _collapse_dated(scored: list[Scored]) -> list[Scored]:
     """Of empty sibling folders that differ only by a trailing date or hash (`Export_2026-01-03`, `Export_20260412`,
-    `Export_3fa9c1d2`), keep the newest: by last activity when any has one, else by the date in the name, else by
-    name (descending). Folders with sessions are never dropped."""
+    `Export_3fa9c1d2`), keep the newest: by last activity when any has one, else by the date in the name (a dated
+    sibling beats one without a date), else by name (descending). Folders with sessions are never dropped."""
     groups: dict[tuple[str, str], list[Scored]] = {}
     for s in scored:
         if not s.cand.stats.sessions:

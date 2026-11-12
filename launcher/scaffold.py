@@ -90,6 +90,8 @@ def check_name(name: str) -> None:
         raise ValueError(f"invalid folder name: {name!r}")
     if _BAD_CHARS & set(name):
         raise ValueError(f"folder name must not contain a path separator or {''.join(sorted(_BAD_CHARS))}: {name!r}")
+    if name.startswith("-") or slug(name).startswith("-"):  # the repo name would reach `gh repo create` as an option
+        raise ValueError(f"folder name must not start with '-': {name!r}")
 
 
 def _clean_env(**extra: str) -> dict:

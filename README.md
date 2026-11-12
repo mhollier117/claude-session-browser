@@ -237,17 +237,25 @@ launcher from the repository's `.venv`, else `python -m launcher.cli`.
   letters and spaces included, goes to the filter; space opens the preview only while the
   filter is empty. Esc clears the filter. The list is ordered by the time of each session's
   last record, not by when its file was last touched.
-- **New session walk:** name, then a destination picker, then the wrapper. enter
-  confirms or chooses, esc goes back (in the picker: to the root), ctrl-c quits. In the
-  picker every letter, `q` included, filters the folders.
+- **New session walk:** name, then a destination picker, then one confirm step that
+  shows the folder, wrapper, GitHub choice and the exact command. enter confirms or
+  chooses, esc goes back (in the picker: to the root), ctrl-c quits. In the picker every
+  letter, `q` included, filters the folders, and typed text that matches no folder becomes
+  the new folder's name. On the confirm step ctrl-w changes the wrapper and ctrl-g the
+  GitHub choice (personal, work or none); the choices are remembered per bucket in
+  `defaults.json`.
 
-**How the destination suggestion works.** Local answers (your history, then keywords,
-then the root folder) appear at once and the picker never waits. In the background the
-self-hosted Qwen endpoint is asked first (only reachable on the VPN, 6 seconds in
-total); Claude Code (Haiku) runs alongside, using the Claude session you are already
-signed in with (20 seconds). The first valid model answer is offered once. Every attempt
-is appended to `%LOCALAPPDATA%\cc-launcher\suggest.log` (stage, name, latency, outcome
-and prompt size; never the API key).
+**How the destination suggestion works.** Local retrieval ranks the folders at once (the
+picker never waits) and supplies the alternatives. In the background the self-hosted Qwen
+endpoint is asked first (only reachable on the VPN, 6 seconds in total); Claude Code
+(Haiku), using the Claude session you are already signed in with (20 seconds), is asked
+only if Qwen was skipped or failed. The model answer is offered as a suggestion; it never
+moves the picker. Every attempt, and the folder you finally chose, is appended to
+`%LOCALAPPDATA%\cc-launcher\suggest.log` (stage, name, latency, outcome and prompt size;
+never the API key); each step of the walk goes to `flow.log` beside it.
+
+The first run after this update rebuilds the index, which takes a few minutes; a second
+`cc` or the app may report "index busy" meanwhile.
 
 **Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index.sqlite`.
 Each location can be overridden with an environment variable:
@@ -255,7 +263,7 @@ Each location can be overridden with an environment variable:
 | Variable | Default | What it is |
 |---|---|---|
 | `CC_LAUNCHER_ROOT` | `C:\claude-code` | project tree the picker browses |
-| `CC_LAUNCHER_DATA` | `%LOCALAPPDATA%\cc-launcher` | index, `suggest.log`, remembered wrappers |
+| `CC_LAUNCHER_DATA` | `%LOCALAPPDATA%\cc-launcher` | index, `suggest.log`, `flow.log`, `defaults.json`, remembered wrappers |
 | `CC_LAUNCHER_QWEN_HOME` | `~\.qwen` | Qwen's session store |
 | `CLAUDE_CONFIG_DIR` | `~\.claude` | Claude's session store |
 

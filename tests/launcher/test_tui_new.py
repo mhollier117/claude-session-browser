@@ -735,6 +735,7 @@ def test_flow_log_and_outcome_for_a_typed_new_project(fake_env, index):
     flow, _p = _flow_with(fake_env, index, model=model)
     flow.start("Ninja RMM Alert Review")
     flow.poll()
+    _text(flow)  # the ★ row is drawn: the model's answer is the suggestion shown
     _go(flow, ninja)
     flow.type_filter("alert review")
     flow.enter()
@@ -1047,7 +1048,8 @@ def test_cli_n_from_resume_list_runs_new_flow(fake_env, index, capsys):
 
 # ---- the confirm step (round 2, task 4) ---------------------------------------------------------------------------
 
-CONFIRM_KEYS = "enter launch · w wrapper · g github · esc back · ctrl-c cancel"
+CONFIRM_KEYS = "enter launch · ctrl-w wrapper · ctrl-g github · esc back · ctrl-c cancel"
+CONFIRM_HERE_KEYS = "enter launch · ctrl-w wrapper · type to name a new folder · esc back · ctrl-c cancel"
 
 
 def _text(flow, width=100, height=30):
@@ -1068,8 +1070,8 @@ def test_confirm_screen_for_start_here_in_an_existing_folder(fake_env, index):
     _pick(flow, "start")
     target = fake_env.root / "work" / "net"
     assert _text(flow, 400).splitlines() == [
-        "Session name: net stuff", "", "work › net", "folder   existing", "wrapper  clauded   (w to change)",
-        f'runs     cd {target} ; clauded -n "net stuff"', "", CONFIRM_KEYS]
+        "Session name: net stuff", "", "work › net", "folder   existing", "wrapper  clauded   (ctrl-w to change)",
+        f'runs     cd {target} ; clauded -n "net stuff"', "", CONFIRM_HERE_KEYS]
 
 
 def test_confirm_screen_for_a_new_project_under_work_net(fake_env, index):
@@ -1079,7 +1081,7 @@ def test_confirm_screen_for_a_new_project_under_work_net(fake_env, index):
     target = fake_env.root / "work" / "net" / "vpn_export"
     assert _text(flow, 400).splitlines() == [
         "Session name: vpn export", "", "work › net › vpn_export", "folder   new project   vpn_export",
-        "wrapper  clauded   (w to change)", "github   personal   (g to change)",
+        "wrapper  clauded   (ctrl-w to change)", "github   personal   (ctrl-g to change)",
         f'runs     cd {target} ; clauded -n "vpn export"', "", CONFIRM_KEYS]
 
 
@@ -1219,13 +1221,13 @@ def test_remembering_failure_is_a_warning_not_a_failed_launch(fake_env, index, m
     assert flow.step == "done" and any("could not remember" in w for w in flow.result().warnings)
 
 
-def test_confirm_keys_in_the_app_w_g_cycle_q_does_not_cancel_enter_launches(fake_env, index):
+def test_confirm_keys_in_the_app_ctrl_w_ctrl_g_cycle_letters_do_not_enter_launches(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("x y")
     _to_new_project(flow, fake_env.root / "home" / "ai", "keys")
-    launch = _run_keys(flow, "wwgqQ\r")
+    launch = _run_keys(flow, "\x17\x17\x07wgqQ\r")  # ctrl-w ctrl-w ctrl-g, then plain letters
     assert isinstance(launch, Launch) and launch.argv[0] == "claudeb"
-    assert flow.github == "work"  # personal, then g: work (two w: claude6, claudeb)
+    assert flow.github == "work"  # personal, then ctrl-g: work (two ctrl-w: claude6, claudeb); w and g changed nothing
 
 
 def test_ctrl_c_cancels_from_the_confirm_step(fake_env, index):
@@ -1233,9 +1235,90 @@ def test_ctrl_c_cancels_from_the_confirm_step(fake_env, index):
     flow.start("x y")
     _go(flow, fake_env.root / "home")
     _pick(flow, "start")
-    assert _run_keys(flow, "w\x03") is None
-    assert flow.step == "confirm"
+    assert _run_keys(flow, "\x17\x03") is None
+    assert flow.step == "confirm" and flow.wrapper == "claude6"
     assert [e["event"] for e in _flowlog(fake_env)].count("cancel") == 1
+
+
+def test_typing_a_folder_name_on_a_start_here_confirm_names_a_new_folder(fake_env, index):
+    """The original failure: on the confirm step for an existing folder, typing "alert review" changed the wrapper
+    on the `w` and enter then launched in the parent folder."""
+    net = fake_env.root / "work" / "net"
+    flow = _flow(fake_env, index)
+    flow.start("alert things")
+    _go(flow, net)
+    _pick(flow, "start")
+    assert flow.step == "confirm" and flow.wrapper == "clauded"
+    _run_keys(flow, "alert review\x03")
+    assert flow.wrapper == "clauded"  # the w did not cycle anything
+    assert flow.step == "picker" and flow.folder == net and flow.filter == "alert review"
+    assert flow.rows[flow.selected][:2] == ("new_typed", "+ new folder: alert_review")
+    flow.enter()  # the typed new folder
+    assert flow.step == "folder_name" and flow.text == "alert_review"
+    flow.enter()
+    assert flow.step == "kind"
+    flow.enter()  # project
+    assert flow.step == "confirm" and flow.target() == net / "alert_review"
+    flow.enter()
+    assert flow.step == "done" and flow.result().cwd == net / "alert_review"
+
+
+def test_typing_on_a_start_here_confirm_ignores_the_saved_row(fake_env, index):
+    r = fake_env.root
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, r / "work")
+    _pick(flow, "start")  # the saved row is `● start here`
+    flow.type_on_confirm("n")
+    assert flow.step == "picker" and flow.filter == "n"
+    assert flow.rows[flow.selected][0] == "child" and flow.rows[flow.selected][2] == r / "work" / "net"
+
+
+def test_typing_on_a_new_project_confirm_changes_nothing_and_hints(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai", "keys")
+    before = (flow.wrapper, flow.github, flow.target())
+    _run_keys(flow, "wg x\x03")
+    assert flow.step == "confirm" and (flow.wrapper, flow.github, flow.target()) == before
+    assert "esc to go back and change the folder name" in _text(flow, 400)
+
+
+def test_start_here_confirm_footer_offers_typing_not_github(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    text = _text(flow, 400)
+    assert "type to name a new folder" in text and "ctrl-g" not in text
+    flow.cycle_github()
+    assert flow.github is None
+
+
+def test_a_model_answer_arriving_on_another_step_shows_back_in_the_picker(fake_env, index):
+    r = fake_env.root
+    flow, pending = _flow_with(fake_env, index)
+    flow.start("x y")
+    _go(flow, r / "home")
+    _pick(flow, "start")  # the confirm step
+    pending.model = Suggestion(r / "work" / "net", None, "high", "vpn", "qwen")
+    assert flow.poll() is False  # not applied on the confirm step, and not lost
+    flow.esc()
+    assert flow.step == "picker"
+    assert flow.poll() is True
+    assert "★ work\\net" in _text(flow)
+
+
+def test_outcome_logs_the_model_answer_only_once_its_row_was_drawn(fake_env, index):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history")
+    flow, pending = _flow_with(fake_env, index, local=local,
+                               model=Suggestion(r / "work" / "net", None, "high", "vpn", "qwen"))
+    flow.start("x y")
+    flow.poll()  # applied, but never drawn
+    assert flow.suggestion_in_effect() is local
+    _text(flow)
+    assert flow.suggestion_in_effect().source == "qwen"
 
 
 # ---- fix round 1 ----------------------------------------------------------------------------------------------------

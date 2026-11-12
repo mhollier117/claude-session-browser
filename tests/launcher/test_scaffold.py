@@ -111,7 +111,8 @@ def test_organisational_and_container_make_folder_only(fake_env, kind):
 
 
 @pytest.mark.parametrize("name", ["", ".", "..", ".hidden", "a/b", "a\\b", "../escape", "D:evil", "C:evil",
-                                  "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b", "a;b", "x; calc"])
+                                  "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b", "a;b", "x; calc", "--public", "-x",
+                                  "_-x"])
 def test_bad_names_rejected_before_touching_disk(fake_env, name):
     parent = fake_env.root / "cc"
     before = sorted(p.name for p in parent.iterdir())
@@ -121,6 +122,14 @@ def test_bad_names_rejected_before_touching_disk(fake_env, name):
     assert sorted(p.name for p in parent.iterdir()) == before
     assert sorted(p.name for p in parent.parent.iterdir()) == ["cc", "home", "work"]
     assert runner.calls == []
+
+
+@pytest.mark.parametrize("name", ["--public", "-x"])
+def test_leading_dash_is_rejected_with_a_clear_message(name):
+    from launcher.scaffold import check_name
+    with pytest.raises(ValueError, match="must not start with '-'"):
+        check_name(name)
+    check_name("x-1")  # a dash inside the name is fine
 
 
 def test_semicolon_rejected_everywhere_a_folder_name_is_checked(fake_env):

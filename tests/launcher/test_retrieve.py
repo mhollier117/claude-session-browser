@@ -355,6 +355,29 @@ def test_dated_export_siblings_collapse_to_the_newest_and_do_not_crowd_out_used_
     assert len([x for x in rels if x not in {f"work\\wf\\acme_{i}" for i in range(3)}]) <= 2
 
 
+def _collapsed(*rels):
+    from launcher.retrieve import Scored, _collapse_dated
+    return _rels(_collapse_dated([Scored(_cand(r, sessions=0), 1.0) for r in rels]))
+
+
+def test_pure_digit_suffixes_are_not_hashes():
+    assert _collapsed("work\\t\\ticket_123456", "work\\t\\ticket_123457") == [
+        "work\\t\\ticket_123456", "work\\t\\ticket_123457"]
+    assert len(_collapsed("work\\t\\invoice_12345678", "work\\t\\invoice_87654321")) == 2  # not valid dates
+    assert _collapsed("work\\t\\export_20260102", "work\\t\\export_20260301") == ["work\\t\\export_20260301"]
+
+
+def test_hash_siblings_keep_the_name_descending_one():
+    assert _collapsed("work\\t\\report_3fa9c1d2", "work\\t\\report_9b7e4a10") == ["work\\t\\report_9b7e4a10"]
+    assert _collapsed("work\\t\\report_9b7e4a10", "work\\t\\report_a0000001") == ["work\\t\\report_a0000001"]
+    assert len(_collapsed("work\\t\\notes_abcdef", "work\\t\\notes_decade")) == 2  # letters only: words, not hashes
+
+
+def test_a_dated_sibling_beats_an_undated_one():
+    assert _collapsed("work\\t\\export", "work\\t\\export_2026-01-03") == ["work\\t\\export_2026-01-03"]
+    assert _collapsed("work\\t\\export_2026-01-03", "work\\t\\export") == ["work\\t\\export_2026-01-03"]
+
+
 def test_dated_siblings_that_have_sessions_are_never_collapsed():
     now = 1_700_000_000.0
     cands = [_cand(f"work\\wf\\Export_2026-0{m}-01", [f"export run {m}"], now - m * DAY) for m in range(1, 4)]
