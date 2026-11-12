@@ -10,7 +10,7 @@ No GitHub Actions workflows in this repo: pushes cost no CI minutes.
   deleted by the wrong thread". Fix: `_run_tk_thread` runs each Tk thread body and `gc.collect()`s on that thread.
   Test: `tests/test_tk_threads.py` (child process; crashes with 0x80000003 without the helper).
 - Released as 1.7.0.0 together with the launcher (launcher fast-forwarded into main).
-- Known, not fixed: the single-instance guard starts a second copy after 1.5 s if the first has no window yet.
+- 1.7.0.1: a second start never runs alongside the first. `_wait_for_instance_slot` hands over to the running window, or waits up to 20 s for it (first copy still starting) or for the guard to free (update); it closes every non-owning mutex handle (an open one kept the mutex alive). Test: `tests/test_single_instance.py`.
 
 ## cc launcher round 2 (2026-11-12) - implemented and reviewed, released in 1.7.0.0
 - Plan: `docs/superpowers/plans/2026-11-11-launcher-round2.md` (five tasks, all done). Commits `e58bbf6..2fc0414` on

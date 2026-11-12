@@ -10256,6 +10256,47 @@ def _fit_main_window_now():
         return False
 
 
+def _close_handle(handle):
+    """Mutex-Handle einer zweiten Instanz schliessen. Bliebe es offen, hielte es
+    den Mutex am Leben, auch wenn die erste Instanz laengst beendet ist - dann
+    saehe jeder weitere Versuch weiter 'existiert schon'."""
+    if handle and _IS_WIN:
+        try:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+        except Exception:
+            pass
+
+
+def _wait_for_instance_slot(timeout=20.0, step=0.5, acquire=None, restore=None,
+                            close=None, sleep=time.sleep, clock=time.monotonic):
+    """Eine andere Instanz haelt den Guard. Nie eine zweite Kopie starten.
+
+    Hat sie ein Fenster: nach vorne holen, fertig. Hat sie noch keins, startet
+    sie gerade (Doppelklick, Autostart + Klick, Installer + Updater) oder
+    beendet sich gerade (Update) - dann warten, bis entweder ihr Fenster da ist
+    (uebergeben) oder der Guard frei wird (dann sind wir die Instanz). Mutex und
+    Lock-Datei sind Kernel-Objekte und fallen beim Prozessende automatisch weg,
+    koennen also nicht 'haengen bleiben'.
+
+    Rueckgabe wie _acquire_single_instance: (owned, handle)."""
+    acquire = acquire or _acquire_single_instance
+    restore = restore or _restore_existing_window
+    close = close or _close_handle
+    deadline = clock() + timeout
+    while True:
+        if restore():
+            return False, None
+        owned, handle = acquire()
+        if owned:
+            return True, handle
+        close(handle)
+        if clock() >= deadline:
+            logging.getLogger(__name__).warning(
+                "another instance holds the guard but shows no window; not starting a second one")
+            return False, None
+        sleep(step)
+
+
 def _restore_existing_window():
     """Sucht das Hauptfenster der laufenden Instanz und bringt es nach vorne
     (auch aus dem Tray heraus falls verstecked). Return True wenn was gefunden
@@ -10342,27 +10383,10 @@ def main():
     # nach vorne statt eine neue zu starten.
     owned, mutex_handle = _acquire_single_instance()
     if not owned:
-        if _restore_existing_window():
-            return  # bestehende Instanz wiederhergestellt -> wir sind fertig
-        # Kein Fenster findbar - das kann passieren wenn a) eine alte
-        # Instanz gerade sauber beendet wurde aber der Mutex/Lock noch
-        # kurz gehalten wird, oder b) ein stale-Lock nach einem Crash
-        # rumhaengt. Statt still zu enden (der User sieht nichts passieren!)
-        # kurz warten und nochmal versuchen. Wenn dann immer noch nicht
-        # frei, trotzdem starten - besser als "App reagiert nicht auf
-        # Doppelklick" nach einem Update.
-        import time as _time
-        _time.sleep(1.5)
-        owned2, mutex_handle2 = _acquire_single_instance()
-        if owned2:
-            mutex_handle = mutex_handle2
-        else:
-            # Immer noch nicht frei UND kein Fenster gefunden ->
-            # trotzdem starten. Der Guard hat sich verzockt, aber
-            # der User erwartet dass die App aufgeht.
-            if _restore_existing_window():
-                return
-            mutex_handle = mutex_handle2  # womoeglich None
+        _close_handle(mutex_handle)
+        owned, mutex_handle = _wait_for_instance_slot()
+        if not owned:
+            return  # die laufende Instanz ist vorne (oder startet noch) -> wir nicht
     # Handle in Modul-Scope halten bis Prozess-Ende (Mutex faellt sonst weg)
     globals()["_SINGLE_INSTANCE_HANDLE"] = mutex_handle
     api = Api()
