@@ -30,6 +30,21 @@ def test_log_keeps_the_last_half_past_the_cap(fake_env, monkeypatch):
     assert ns == list(range(ns[0], 60)) and ns[0] > 0
 
 
+def test_trim_uses_a_per_process_temp_file_and_cleans_up(fake_env, monkeypatch):
+    import os
+    path = fake_env.data_dir / "flow.log"
+    assert flowlog._tmp_path(path).name == f"flow.log.{os.getpid()}.tmp"
+    monkeypatch.setattr(flowlog, "MAX_BYTES", 200)
+
+    def boom(src, dst):
+        raise OSError("locked")
+    monkeypatch.setattr(flowlog.os, "replace", boom)
+    for i in range(10):
+        flowlog.log(fake_env, "open", n=i, pad="x" * 40)  # trimming fails every time: logging carries on
+    assert not flowlog._tmp_path(path).exists()
+    assert len(_lines(fake_env)) == 10
+
+
 def test_log_never_raises(fake_env):
     fake_env.data_dir.parent.mkdir(parents=True, exist_ok=True)
     fake_env.data_dir.write_text("not a folder", encoding="utf-8")  # mkdir and open both fail

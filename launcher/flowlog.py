@@ -17,6 +17,11 @@ FILE = "flow.log"
 _lock = threading.Lock()
 
 
+def _tmp_path(path):
+    """The temp file `_trim` writes: per process, so two `cc` processes trimming at once never share one."""
+    return path.with_name(f"{path.name}.{os.getpid()}.tmp")
+
+
 def _trim(path) -> None:
     data = path.read_bytes()
     if len(data) <= MAX_BYTES:
@@ -24,9 +29,16 @@ def _trim(path) -> None:
     tail = data[len(data) // 2:]
     cut = tail.find(b"\n")
     tail = tail[cut + 1:] if cut >= 0 else b""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(tail)
-    os.replace(tmp, path)
+    tmp = _tmp_path(path)
+    try:
+        tmp.write_bytes(tail)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def log(env: Env, event: str, **fields) -> None:

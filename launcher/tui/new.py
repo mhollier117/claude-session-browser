@@ -35,8 +35,9 @@ _NAME_COL = 28
 FOLD_AT = 12  # a level with more children shows this many and a `… N more` row
 MAX_SUGGESTIONS = 3
 _SUGGESTION_KINDS = ("suggested", "alt")
-PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspace up · esc top · /path jump · "
-                 "ctrl-c cancel")
+PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspace clear filter / up · esc top · "
+                 "/path jump · ctrl-c cancel")
+HIDDEN_HINT = "suggestions hidden while filtering · backspace to clear"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
 
@@ -112,6 +113,7 @@ class NewFlow:
         self._preselect: str | None = None  # `+ new folder: <name>` from a suggestion, for self.folder only
         self._expanded: set[Path] = set()  # folded levels the user asked to see in full
         self._new_source: str | None = None  # the picker row kind that led to the folder-name step
+        self._picker_key: tuple[str, str, str] | None = None  # the picker row last entered (restored by esc)
         self.new_name: str | None = None  # None: start here (no new folder)
         self.new_kind: str | None = None
         self.wrapper: str | None = None
@@ -191,12 +193,14 @@ class NewFlow:
         self.offered = s
         self._refresh()
 
-    def _open(self, folder: Path, preselect: str | None = None, via: str | None = None) -> None:
-        """Show `folder`'s level with an empty filter; `preselect` names a proposed new folder to select."""
+    def _open(self, folder: Path, preselect: str | None = None, via: str | None = None,
+              want: tuple[str, str, str] | None = None) -> None:
+        """Show `folder`'s level with an empty filter; `preselect` names a proposed new folder to select, `want` the
+        key of another row to select."""
         self.folder = Path(folder)
         self.filter = ""
         self._preselect = preselect
-        self._refresh(keep=False)
+        self._refresh(keep=False, want=want)
         self._log("open", kind=via)
 
     @staticmethod
@@ -204,27 +208,43 @@ class NewFlow:
         """A row's identity across rebuilds: kind, path, and the proposed name of a `new_named` row (the label of
         `new_typed` follows the filter, so it is not part of its identity)."""
         kind, label, path = row
+        if kind in _SUGGESTION_KINDS:
+            kind = "suggestion"  # a ≈ row that becomes the ★ row for the same folder is the same row
         return kind, str(path).lower() if path is not None else "", label if kind == "new_named" else ""
 
     def _default_row(self) -> int:
-        """The first row that is not a suggestion (and, while a filter is typed, not `● start here`)."""
-        skip = set(_SUGGESTION_KINDS) | ({"start"} if self.filter else set())
-        return next((i for i, (k, _l, _p) in enumerate(self.rows) if k not in skip), 0)
+        """Without a filter: the first row that is not a suggestion. While a filter is typed: the first matching
+        child (or fragment match), else the typed new folder, else `+ new folder here…`; never `● start here`."""
+        if not self.filter:
+            return next((i for i, (k, _l, _p) in enumerate(self.rows) if k not in _SUGGESTION_KINDS), 0)
+        for wanted in (("child", "match"), ("new_typed",), ("new",)):
+            i = next((i for i, (k, _l, _p) in enumerate(self.rows) if k in wanted), None)
+            if i is not None:
+                return i
+        return 0
 
-    def _refresh(self, keep: bool = True) -> None:
-        """Rebuild the rows. `keep`: keep the selected row by identity (a row arriving above it, such as a
-        suggestion, never takes the cursor); `● start here` is not kept once a filter is typed. Otherwise, or when
-        the row is gone: the proposed new folder on a freshly opened level, else `_default_row`."""
+    def _refresh(self, keep: bool = True, want: tuple[str, str, str] | None = None) -> None:
+        """Rebuild the rows and choose the selection: `want` (a row key to restore) when present; else, with `keep`,
+        the selected row by identity (a row arriving above it, such as a suggestion, never takes the cursor), except
+        that `● start here` and the new-folder rows are never kept once a filter is typed (the typed text wins);
+        else the proposed new folder on a freshly opened level; else `_default_row`."""
         current = self._key(self.rows[self.selected]) if keep and 0 <= self.selected < len(self.rows) else None
         self.rows = self._build_rows()
         keys = [self._key(r) for r in self.rows]
         kinds = [k for k, _l, _p in self.rows]
-        if current in keys and not (self.filter and current[0] == "start"):
+        if want is not None and want in keys:
+            self.selected = keys.index(want)
+        elif current in keys and not (self.filter and current[0] in ("start", "new", "new_named")):
             self.selected = keys.index(current)
-        elif not keep and self._preselect and "new_named" in kinds:
+        elif want is None and not keep and self._preselect and "new_named" in kinds:
             self.selected = kinds.index("new_named")
         else:
             self.selected = self._default_row()
+
+    def _back_to_picker(self) -> None:
+        """Return from a later step to the picker with the cursor on the row the user left it from."""
+        self.step = "picker"
+        self._refresh(keep=False, want=self._picker_key or ("", "", ""))
 
     def proposed_name(self) -> str | None:
         """A suggested new folder for this level: the one carried in by entering a ★ row, or the model's answer
@@ -236,8 +256,8 @@ class NewFlow:
 
     def _suggestion_rows(self) -> list[tuple[str, str, Path | None]]:
         """Up to `MAX_SUGGESTIONS` rows: the model's answer (★), then the ranked alternatives (≈): the model's
-        alternatives once it answered, before that the local top candidate and its alternatives. The current folder
-        and duplicates are left out."""
+        alternatives when it gave some, otherwise the local top candidate and its alternatives. The current folder
+        and duplicates (such as a local ≈ for the ★ folder) are left out."""
         rows: list[tuple[str, str, Path | None]] = []
         seen: set[str] = set()
 
@@ -250,17 +270,25 @@ class NewFlow:
                 rows.append((kind, label, Path(path)))
 
         model = self.offered
+        local = self.pending.local if self.pending is not None else None
+        ranked = [local.path, *local.alternatives] if local is not None and local.source != "root" else []
         if model is not None:
-            rel = rel_or_abs(self.env.root, model.path)
-            add("suggested", model.path, f"★ {rel} + new folder: {model.new_folder}" if model.new_folder
-                else f"★ {rel}")
-            ranked = list(model.alternatives)
-        else:
-            local = self.pending.local if self.pending is not None else None
-            ranked = [local.path, *local.alternatives] if local is not None and local.source != "root" else []
+            add("suggested", model.path, self._star_label(model))
+            if model.alternatives:
+                ranked = list(model.alternatives)
         for p in ranked:
             add("alt", p, f"≈ {rel_or_abs(self.env.root, p)}")
         return rows[:MAX_SUGGESTIONS]
+
+    def _star_label(self, s: Suggestion) -> str:
+        rel = rel_or_abs(self.env.root, s.path)
+        if s.new_folder:
+            return f"★ {rel} + new folder: {s.new_folder}"
+        return f"★ {rel} + new folder…" if s.needs_name else f"★ {rel}"
+
+    def suggestions_hidden(self) -> bool:
+        """A filter is typed and suggestion rows would otherwise show at this level."""
+        return bool(self.filter) and bool(self._suggestion_rows())
 
     def _build_rows(self) -> list[tuple[str, str, Path | None]]:
         typed = self.filter
@@ -276,7 +304,10 @@ class NewFlow:
         if typed:
             needle, name = typed.lower(), slug(typed)
             kids = [c for c in kids if needle in c.name.lower() or (name and name in c.name.lower())]
-            if name and not (self.folder / name).exists():
+            # prefix matches first, then other substring matches (each group stays most recent first)
+            kids.sort(key=lambda c: not (c.name.lower().startswith(needle)
+                                         or (name and c.name.lower().startswith(name))))
+            if name and not self._name_problem(name):  # a usable name that does not exist here yet
                 new_typed = ("new_typed", f"+ new folder: {name}", None)
         elif len(kids) > FOLD_AT and self.folder not in self._expanded:
             more = len(kids) - FOLD_AT
@@ -337,29 +368,31 @@ class NewFlow:
             self.back()
 
     def back(self) -> None:
+        """Up one level; at the root (with no filter) nothing happens."""
         self._act()
+        if self.folder == self.env.root and not self.filter:
+            return
         if self.folder != self.env.root and self.env.root in self.folder.parents:
             self._open(self.folder.parent, via="back")
         else:
             self._open(self.env.root, via="back")
 
     def esc(self) -> None:
-        """Picker: back to the root. Later steps: back to the step before."""
+        """Picker: back to the root (nothing to do at the root with no filter). Later steps: the step before."""
         if self.step in ("picker", "name"):
             if self.step == "picker":
                 self._act()
-                self._open(self.env.root, via="esc")
+                if self.folder != self.env.root or self.filter:
+                    self._open(self.env.root, via="esc")
             return
         self.error = ""
         if self.step == "folder_name":
-            self.step = "picker"
-            self._refresh()
+            self._back_to_picker()
         elif self.step == "kind":
             self._to_folder_name(self.new_name or "")
         elif self.step == "wrapper":
             if self.new_name is None:  # start here
-                self.step = "picker"
-                self._refresh()
+                self._back_to_picker()
             else:  # a project: back to its kind
                 self._to_kind()
         elif self.step == "github":
@@ -390,13 +423,17 @@ class NewFlow:
             return
         kind, _label, path = self.rows[self.selected]
         self._act()
+        self._picker_key = self._key(self.rows[self.selected])  # for esc back from the later steps
         if self.filter:
             self._log("filter-enter", kind=kind)
         if kind in ("child", "match", "alt"):
             self._open(path, via=kind)
         elif kind == "suggested":
-            self.suggestion = self.offered
-            self._open(path, preselect=self.offered.new_folder if self.offered else None, via=kind)
+            s = self.suggestion = self.offered
+            if s is not None and s.needs_name and not s.new_folder:  # a place without a name: ask for one
+                self._open(path, via=kind, want=("new", "", ""))
+            else:
+                self._open(path, preselect=s.new_folder if s else None, via=kind)
         elif kind == "more":
             at = self.selected
             self._expanded.add(self.folder)
@@ -644,8 +681,11 @@ def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
     if flow.filter:
         head += [("", "   "), ("class:dim", "filter: "), ("", flow.filter), ("class:dim", "▏")]
     line(*head)
+    hidden = flow.suggestions_hidden()
+    if hidden:
+        line(("class:dim", fit(HIDDEN_HINT, width).rstrip()))
     footer = wrap_items(PICKER_FOOTER, max(1, width))
-    chrome = 6 + len(footer) + (1 if flow.status else 0) + (1 if flow.error else 0)
+    chrome = 6 + len(footer) + (1 if flow.status else 0) + (1 if flow.error else 0) + (1 if hidden else 0)
     visible = max(1, height - chrome)
     top = max(0, min(flow.selected - visible + 1, len(flow.rows) - visible)) if flow.selected >= visible else 0
     styles = {"start": "class:live", "new": "class:title", "new_named": "class:title", "new_typed": "class:title",
