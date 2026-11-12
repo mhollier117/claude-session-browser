@@ -108,6 +108,8 @@ def test_fable_notice_once_per_period_and_quiet_when_free(monkeypatch):
                               "usage": {"f": f, "f_reset_at": reset}}]
     a._check_fable_limits(acct(100, 2e9))
     a._check_fable_limits(acct(100, 2e9))            # same period: no repeat
+    a._check_fable_limits(acct(100, 2e9 + 0.37))     # same reset, other fraction (API jitter)
+    a._check_fable_limits(acct(100, 2e9 - 59))       # same reset, a minute off
     assert len(sent) == 1 and "Main" in sent[0]
     a._check_fable_limits(acct(3, 2.6e9))            # reset: silent, re-armed
     assert len(sent) == 1

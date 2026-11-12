@@ -5199,7 +5199,12 @@ class Api:
             if f is None:
                 continue
             uuid, reset_at = a["uuid"], float(u.get("f_reset_at") or 0)
-            if f >= 100 and done.get(uuid) != reset_at:
+            # Gleicher Zeitraum, wenn der gemeldete Reset bis auf eine Stunde
+            # passt: die API liefert resets_at je Abfrage mit anderen
+            # Sekundenbruchteilen, ein exakter Vergleich meldete jedes Mal neu.
+            prev = done.get(uuid)
+            same_period = prev is not None and abs(float(prev) - reset_at) < 3600
+            if f >= 100 and not same_period:
                 when = (time.strftime("%a %H:%M", time.localtime(reset_at))
                         if reset_at > now else "?")
                 self._tray_notify(t("Fable-Limit erreicht bei {name}. Andere Modelle "
