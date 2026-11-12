@@ -8,7 +8,7 @@ from launcher import cli
 from launcher.index import Index, Row
 from launcher.launch import Launch, resume_command
 from launcher.tui.preview import render_preview
-from launcher.tui.resume import FOCUSED, NEW, Resume, ResumeState, render_rows, scroll_top
+from launcher.tui.resume import FOCUSED, KEYS, NEW, Resume, ResumeState, render_rows, scroll_top
 from launcher_helpers import write_claude_session, write_qwen_session
 
 NOW = 1_700_000_000.0
@@ -67,9 +67,8 @@ def test_render_rows_columns_and_ellipsis(fake_env):
     assert second[5:33] == "n" * 27 + "…"
     assert second[34:34 + loc_w].rstrip() == r"work\…\a_rather_long_folder\stackjack_rip_qwen"
     assert second[34 + loc_w + 1:].rstrip() == "qwen"
-    # footer exactly as the mockup, plus o and w
-    assert lines[-1] == "↑↓ move · type to filter · space preview · enter resume · o open folder · w wrapper · " \
-                        "n new · q quit"
+    assert lines[-1] == KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · "
+                                 "ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
 
 
 def test_render_rows_middle_ellipsis_on_narrow_terminal(fake_env):
@@ -182,20 +181,71 @@ def test_state_filter_move_and_enter(fake_env):
     assert result.row.path.endswith("aaa.jsonl")
 
 
-def test_state_typing_commands_and_filter(fake_env):
+def test_state_every_printable_key_filters_including_command_letters_and_inner_spaces(fake_env):
     st = ResumeState(fake_env, _two_sessions(fake_env))
-    assert [st.type_char(c) for c in "nowq"] == ["new", "open", "wrapper", "quit"]
-    assert st.type_char("f") is None and st.filter == "f" and st.footer_status() == "filter: f▏"
-    assert st.type_char("q") is None and st.filter == "fq"  # mid-filter, command letters are text
-    st.backspace()
-    st.backspace()
-    assert st.filter == "" and st.type_char("q") == "quit"
-    assert st.type_char("/") is None and st.footer_status() == "filter: ▏"
-    for c in "qw":
-        st.type_char(c)
-    assert st.filter == "qw" and [r.sid for r in st.rows] == []
+    assert [st.type_char(c) for c in "nowq"] == [None] * 4  # no longer commands
+    assert st.filter == "nowq" and st.footer_status() == "filter: nowq▏" and st.rows == []
+    for _ in range(4):
+        st.backspace()
+    assert st.filter == "" and len(st.rows) == 2 and st.footer_status() == ""
+    for c in "pxe boot":  # a space inside a filter is text
+        assert st.type_char(c) is None
+    assert st.filter == "pxe boot" and [r.sid for r in st.rows] == ["aaa"]
+    assert st.type_char("/") is None and st.filter == "pxe boot/"  # no special slash rule any more
+
+
+def test_state_space_opens_the_preview_only_while_the_filter_is_empty(fake_env):
+    st = ResumeState(fake_env, _two_sessions(fake_env))
+    assert st.type_char(" ") == "preview" and st.filter == ""  # not a leading space in the filter
+    st.type_char("p")
+    assert st.type_char(" ") is None and st.filter == "p "
+
+
+def test_state_escape_clears_the_filter_and_does_nothing_when_empty(fake_env):
+    st = ResumeState(fake_env, _two_sessions(fake_env))
+    assert st.escape() is False and st.filter == "" and len(st.rows) == 2
+    st.type_char("f")
     assert st.escape() is True and st.filter == "" and len(st.rows) == 2
-    assert st.escape() is False  # nothing to clear: the app quits
+    assert st.escape() is False
+
+
+def test_state_chords(fake_env):
+    opened = []
+    st = ResumeState(fake_env, _two_sessions(fake_env), popen=lambda argv: opened.append(argv))
+    assert st.chord("c-n") == "new" and st.chord("c-q") == "quit" and st.chord("c-c") == "quit"
+    assert st.chord("n") is None and st.chord("q") is None and st.filter == ""  # letters are not chords
+    assert st.chord("c-w") is None and st.wrapper_for(st.current()) == "claude6"
+    assert st.chord("c-o") is None and opened == [["explorer.exe", str(fake_env.root / "home" / "homelab")]]
+    st.type_char("p")
+    st.chord("c-w")  # chords work with a filter typed, and leave it alone
+    assert st.filter == "p" and st.wrapper_for(st.current()) == "claudeb"
+
+
+def _run_keys(fake_env, keys):
+    """Run the real prompt_toolkit resume app on a pipe, feeding `keys`; returns its result."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from launcher.tui.app import build_app
+    idx = _two_sessions(fake_env)
+    with create_pipe_input() as pipe:
+        app = build_app(fake_env, idx, output=DummyOutput(), input=pipe)
+        pipe.send_text(keys)
+        return app.run()
+
+
+def test_app_chords_and_typing_through_the_real_key_bindings(fake_env):
+    assert _run_keys(fake_env, "\x0e") is NEW  # ctrl-n
+    assert _run_keys(fake_env, "\x11") is None  # ctrl-q
+    assert _run_keys(fake_env, "\x03") is None  # ctrl-c
+    assert _run_keys(fake_env, "nowq\x11") is None  # letters filter, they do not quit or start anything
+    res = _run_keys(fake_env, "pxe boot\r")  # letters and an inner space filter; enter resumes the only match
+    assert isinstance(res, Resume) and res.row.sid == "aaa"
+    res = _run_keys(fake_env, "\x17\r")  # ctrl-w cycles the wrapper of the selected row
+    assert res.launch.argv == ["claude6", "-r", "aaa"]
+    res = _run_keys(fake_env, "\t\r")  # tab opens the preview; enter there resumes
+    assert isinstance(res, Resume) and res.row.sid == "aaa"
+    res = _run_keys(fake_env, " \r")  # space on an empty filter opens the preview too
+    assert isinstance(res, Resume) and res.row.sid == "aaa"
 
 
 def test_state_cycle_wrapper(fake_env):
@@ -387,3 +437,26 @@ def test_spawn_detached_leaves_no_resource_warning():
         del proc
         gc.collect()
     assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
+
+
+def test_cli_resume_goes_on_when_the_index_is_locked(fake_env, capsys):
+    """record_launch is best-effort: a locked index adds a warning and still prints the launch line."""
+    import sqlite3
+    import time
+    idx = _two_sessions(fake_env)
+    other = sqlite3.connect(idx.db_path, timeout=0)  # another cc in the middle of its refresh
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        assert cli.main([], env=fake_env, index=idx, app=lambda e, i: ResumeState(e, i).enter()) == 0
+        waited = time.monotonic() - started
+    finally:
+        other.rollback()
+        other.close()
+    out = json.loads(capsys.readouterr().out)
+    assert out["run"] == ["clauded", "-r", "aaa"]
+    assert any("could not remember the wrapper" in w for w in out["warnings"])
+    assert waited < 5  # nowhere near the 30 s a refresh waits
+    assert idx.row("claude", "aaa").wrapper is None
+    idx.record_launch("claude", "aaa", "claude6")  # the connection is usable again once the lock is gone
+    assert idx.row("claude", "aaa").wrapper == "claude6"

@@ -46,7 +46,7 @@ class FakeHttp:
 
 
 def _session(env, cwd, sid, name, mtime, store="claude"):
-    rec = [{"type": "user", "cwd": str(cwd), "timestamp": "2026-11-01T10:00:00Z",
+    rec = [{"type": "user", "cwd": str(cwd),
             "message": {"role": "user", "content": name}}]
     path = (write_claude_session if store == "claude" else write_qwen_session)(env, cwd, sid, rec)
     os.utime(path, (mtime, mtime))
@@ -906,6 +906,39 @@ def test_prefix_matches_come_before_substring_matches(fake_env, index):
     assert [(k, p.name if p else None) for k, _l, p in flow.rows][:3] == [
         ("child", "alerts_archive"), ("child", "ninja_alerts"), ("new_typed", None)]
     assert flow.selected == 0
+    # a lower match selected before typing does not keep the cursor: it lands on the first prefix match
+    flow.type_filter("")
+    flow.selected = [p.name if p else None for _k, _l, p in flow.rows].index("ninja_alerts")
+    flow.type_filter("alerts")
+    assert flow.rows[flow.selected][2].name == "alerts_archive"
+
+
+def test_cursor_goes_to_the_first_match_on_every_filter_keystroke(fake_env, index):
+    ninja = fake_env.root / "work" / "ninja"
+    for name in ("alpha", "alpine", "beta"):
+        (ninja / name).mkdir(parents=True)
+    index.refresh()
+    flow, _p = _flow_with(fake_env, index)
+    flow.start("x")
+    _go(flow, ninja)
+
+    def on():
+        kind, _label, path = flow.rows[flow.selected]
+        return kind, path.name if path else None
+
+    flow.type_filter("a")
+    flow.selected = [p.name if p else None for _k, _l, p in flow.rows].index("alpine")
+    flow.type_filter("al")  # alpine was selected: both still match, the cursor returns to the first
+    first = flow.rows[0][2].name
+    assert on() == ("child", first)
+    flow.type_filter("alq")  # no child matches: the typed new folder
+    assert on() == ("new_typed", None)
+    flow.type_filter("")  # emptied: the unfiltered level, not a start-here or new-folder row
+    assert flow.rows[flow.selected][0] == "child"
+    # a rebuild that is not a filter change keeps the selected row by identity
+    flow.selected = [p.name if p else None for _k, _l, p in flow.rows].index("beta")
+    flow._refresh()
+    assert on() == ("child", "beta")
 
 
 def test_q_on_a_choice_step_logs_one_cancel(fake_env, index):

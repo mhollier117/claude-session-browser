@@ -358,7 +358,11 @@ class NewFlow:
     def type_filter(self, text: str) -> None:
         self._act()
         self.filter = text
-        self._refresh()
+        if text:  # every keystroke puts the cursor on the first match, not on a child that now sits lower
+            self.rows = self._build_rows()
+            self.selected = self._default_row()
+        else:  # filter emptied: the level is back as it was, so the selected row stays by identity
+            self._refresh()
 
     def backspace(self) -> None:
         """Delete from the filter; on an empty filter go up one level (not above the root)."""

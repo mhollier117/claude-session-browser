@@ -12,7 +12,7 @@ _SPEC = Path(__file__).resolve().parents[2] / "docs" / "superpowers" / "specs" /
 
 def _session(env, cwd, sid, name, mtime):
     path = write_claude_session(env, cwd, sid, [
-        {"type": "user", "cwd": str(cwd), "timestamp": "2026-11-01T10:00:00Z",
+        {"type": "user", "cwd": str(cwd),
          "message": {"role": "user", "content": name}}])
     os.utime(path, (mtime, mtime))
 

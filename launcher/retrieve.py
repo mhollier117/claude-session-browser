@@ -295,12 +295,21 @@ def _collapse_empty(scored: list[Scored]) -> list[Scored]:
 
 def _prefer_used(scored: list[Scored], k: int) -> list[Scored]:
     """The best `k`, where a zero-session folder is kept only when it scores at least as well as the best folder
-    with sessions, or to fill the slots that folders with sessions leave empty. `scored` is sorted best first."""
+    with sessions, when its own folder name matches two or more of the session name's words (an empty
+    `teams_migration` for "teams migration channel mapping"), or to fill the slots that folders with sessions leave
+    empty. `scored` is sorted best first."""
     used = [s for s in scored if s.cand.stats.sessions]
     if not used:
         return scored[:k]
     best = used[0].score
-    keep = [s for s in scored if s.cand.stats.sessions or s.score >= best][:k]
+    named = {id(s) for s in scored if not s.cand.stats.sessions and s.score < best and _leaf_hits(s) >= 2}
+    keep = [s for s in scored if s.cand.stats.sessions or s.score >= best or id(s) in named]
+    for s in reversed(list(keep)):  # over `k`: the lowest-ranked go, folders named for the session last
+        if len(keep) <= k:
+            break
+        if id(s) not in named:
+            keep.remove(s)
+    keep = keep[:k]
     if len(keep) < k:
         chosen = {id(s) for s in keep}
         keep += [s for s in scored if id(s) not in chosen][:k - len(keep)]

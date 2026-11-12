@@ -89,7 +89,10 @@ def _run_new(env: Env, index: Index, name: str | None, new_app: NewAppFn | None)
 def _finish(result: object, env: Env, index: Index, new_app: NewAppFn | None) -> int:
     if isinstance(result, Resume):
         if result.row.cwd_exists:  # a missing folder: cc.ps1 shows the warning and refuses, so nothing ran
-            index.record_launch(result.row.store, result.row.sid, result.wrapper)
+            try:
+                index.record_launch(result.row.store, result.row.sid, result.wrapper)
+            except sqlite3.OperationalError:  # best-effort: another cc or the browser holds the index; still resume
+                result.launch.warnings.append("could not remember the wrapper for this session: index busy")
         _emit(to_shell_result(result.launch))
     elif isinstance(result, Launch):
         _emit(to_shell_result(result))

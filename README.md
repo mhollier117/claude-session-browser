@@ -232,10 +232,11 @@ launcher from the repository's `.venv`, else `python -m launcher.cli`.
 
 - `cc`: the resume list. `cc new [name]`: start a new session. `cc index`: refresh the
   index only. `cc --json`: print every session as JSON.
-- **List keys:** ↑↓ move · type to filter · space preview · enter resume · `o` open
-  folder · `w` change wrapper · `n` new · `q` quit. `n`, `o`, `w` and `q` are commands
-  while you are not typing a filter, so a filter that begins with one of those letters
-  starts with `/` (`/n`, `/queue`). Esc clears the filter.
+- **List keys:** ↑↓ move · type to filter · tab preview · enter resume · ctrl-n new ·
+  ctrl-o open folder · ctrl-w change wrapper · ctrl-q (or ctrl-c) quit. Every printable key,
+  letters and spaces included, goes to the filter; space opens the preview only while the
+  filter is empty. Esc clears the filter. The list is ordered by the time of each session's
+  last record, not by when its file was last touched.
 - **New session walk:** name, then a destination picker, then the wrapper. enter
   confirms or chooses, esc goes back (in the picker: to the root), ctrl-c quits. In the
   picker every letter, `q` included, filters the folders.

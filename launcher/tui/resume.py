@@ -27,8 +27,9 @@ _MIN_LOC_W = 8
 _MARK = "▶ "
 _ELLIPSIS = "…"
 _RULE = "─"
-COMMANDS = {"n": "new", "o": "open", "w": "wrapper", "q": "quit"}
-KEYS = "↑↓ move · type to filter · space preview · enter resume · o open folder · w wrapper · n new · q quit"
+# prompt_toolkit key names of the chords; every printable key goes to the filter instead
+CHORDS = {"c-n": "new", "c-o": "open", "c-w": "wrapper", "c-q": "quit", "c-c": "quit"}
+KEYS = "↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · ctrl-o folder · ctrl-w wrapper · ctrl-q quit"
 
 
 @dataclass
@@ -57,7 +58,7 @@ def spawn_detached(argv: list[str]) -> subprocess.Popen:
     return proc
 
 
-NEW = _Signal("NEW")  # `n`: start a new session (the cli hands over to the new-session flow)
+NEW = _Signal("NEW")  # ctrl-n: start a new session (the cli hands over to the new-session flow)
 FOCUSED = _Signal("FOCUSED")  # `enter` on a live row brought its window forward: exit quietly
 
 
@@ -148,7 +149,6 @@ class ResumeState:
         self._focus = focus
         self._popen = popen
         self.filter = ""
-        self.typing = False  # a filter is being typed: letters go to it, not to commands
         self.rows: list[Row] = index.rows()
         self.selected = 0
         self.top = 0
@@ -172,37 +172,39 @@ class ResumeState:
     # ---- typing ------------------------------------------------------------------------------------------------
 
     def type_char(self, ch: str) -> str | None:
-        """A printable key. While no filter is being typed, `n` `o` `w` `q` are commands (returned as 'new',
-        'open', 'wrapper', 'quit') and `/` starts an empty filter (so a filter can begin with one of those
-        letters); every other character, and every character once a filter is under way, goes to the filter."""
-        if not self.typing:
-            if ch in COMMANDS:
-                return COMMANDS[ch]
-            if ch == "/":
-                self.typing = True
-                self.status = ""
-                return None
-        self.typing = True
+        """A printable key: it goes to the filter, whatever it is (commands are chords, see `chord`). The one
+        exception is a space while the filter is empty, which opens the preview: 'preview' is returned and the
+        filter is left alone; a space after other text is part of the filter."""
+        if ch == " " and not self.filter:
+            return "preview"
         self.set_filter(self.filter + ch)
         return None
 
     def backspace(self) -> None:
         if self.filter:
             self.set_filter(self.filter[:-1])
-        if not self.filter:
-            self.typing = False
 
     def escape(self) -> bool:
-        """Clear the filter; False when there was none (esc then does nothing: only q and ctrl-c quit)."""
-        if not (self.typing or self.filter):
+        """Clear the filter; False when there was none (esc then does nothing: ctrl-q and ctrl-c quit)."""
+        if not self.filter:
             return False
-        self.typing = False
-        if self.filter:
-            self.set_filter("")
+        self.set_filter("")
         return True
 
+    def chord(self, key: str) -> str | None:
+        """A command chord by its prompt_toolkit name (`CHORDS`): ctrl-o and ctrl-w act here (open folder, cycle the
+        wrapper) and return None; 'new' and 'quit' are returned for the app to act on. None for any other key."""
+        command = CHORDS.get(key)
+        if command == "open":
+            self.open_folder()
+            return None
+        if command == "wrapper":
+            self.cycle_wrapper()
+            return None
+        return command
+
     def footer_status(self) -> str:
-        parts = [f"filter: {self.filter}▏"] if self.typing else []
+        parts = [f"filter: {self.filter}▏"] if self.filter else []
         if self.status:
             parts.append(self.status)
         return " · ".join(parts)

@@ -208,3 +208,30 @@ def test_clean_user_text():
     assert clean_user_text(s) == "real ask"
     assert clean_user_text("<local-command-stdout>out</local-command-stdout>") == ""
     assert clean_user_text("") == ""
+
+
+def test_last_ts_is_the_last_timestamp_in_the_tail_claude_and_qwen(fake_env):
+    cwd = fake_env.root / "cc"
+    p = write_claude_session(fake_env, cwd, "t1", [
+        {"type": "user", "timestamp": "2026-11-01T10:00:00.000Z", "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant", "timestamp": "2026-11-03T12:30:15.500Z",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "yo"}]}},
+        {"type": "ai-title", "aiTitle": "A title"},  # no timestamp: skipped
+    ])
+    from datetime import datetime, timezone
+    assert read_claude(p).last_ts == datetime(2026, 11, 3, 12, 30, 15, 500000, tzinfo=timezone.utc).timestamp()
+    q = write_qwen_session(fake_env, cwd, "t2", [
+        {"type": "user", "provenance": "real_user", "timestamp": "2026-08-19T14:02:54.267Z",
+         "message": {"role": "user", "parts": [{"text": "hello"}]}},
+        {"type": "assistant", "timestamp": "2026-08-19T14:03:10.000Z",
+         "message": {"role": "model", "parts": [{"text": "hi"}]}}])
+    assert read_qwen(q).last_ts == datetime(2026, 8, 19, 14, 3, 10, tzinfo=timezone.utc).timestamp()
+
+
+def test_last_ts_is_none_without_a_usable_timestamp(fake_env):
+    cwd = fake_env.root / "cc"
+    p = write_claude_session(fake_env, cwd, "t3", [_u("hi"), _a("yo")])
+    assert read_claude(p).last_ts is None
+    p2 = write_claude_session(fake_env, cwd, "t4", [
+        {"type": "user", "timestamp": "not a date", "message": {"role": "user", "content": "hi"}}])
+    assert read_claude(p2).last_ts is None

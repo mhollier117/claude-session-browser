@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 _HEAD_START = 65_536
@@ -36,6 +37,7 @@ class SessionFacts:
     assistant_msgs: int
     size: int
     mtime: float
+    last_ts: float | None = None  # epoch seconds of the last record with a `timestamp` in the tail read, else None
 
 
 def clean_user_text(s: str) -> str:
@@ -165,6 +167,36 @@ def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True)
         n = min(n * 2, cap)
 
 
+def _iso_to_epoch(value) -> float | None:
+    """Epoch seconds of an ISO 8601 `timestamp` (`2026-11-01T10:00:00.000Z`; no zone means UTC), else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00").replace("z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _last_ts(path: Path, size: int, tail_bytes: int) -> float | None:
+    """The `timestamp` (Claude and Qwen both write one on each record) of the last record that has one, read
+    backwards with the same doubling and cap as `_tail`; None when the tail holds none (the caller uses the file's
+    mtime then)."""
+    cap = max(TAIL_MAX_BYTES, 1)
+    n = min(max(tail_bytes, 1), cap)
+    while True:
+        for line in reversed(_tail_lines(path, size, n)):
+            got = _parse(line, lambda rec: None)
+            ts = _iso_to_epoch(got[0].get("timestamp")) if got is not None else None
+            if ts is not None:
+                return ts
+        if n >= size or n >= cap:
+            return None
+        n = min(n * 2, cap)
+
+
 def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, int, int, str | None, str | None]:
     """(user asks, assistant replies, end offset, last custom-title, last ai-title) from byte `start` on.
     Only lines naming a relevant type are parsed. With `whole_lines_only`, a last line without its newline (still
@@ -214,9 +246,10 @@ def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> Sessi
     parser = _PARSERS[store]
     cwd, first = _head(path, st.st_size, parser)
     last_ask, last_reply = _tail(path, st.st_size, parser, tail_bytes)
+    last_ts = _last_ts(path, st.st_size, tail_bytes)
     users, assistants, name = _count(path, parser) if count else (0, 0, None)
     return SessionFacts(store, path.stem, path, cwd, name, first, last_ask, last_reply,
-                        users, assistants, st.st_size, st.st_mtime)
+                        users, assistants, st.st_size, st.st_mtime, last_ts)
 
 
 def read_claude(path: Path, tail_bytes: int = 262_144, count: bool = True) -> SessionFacts:

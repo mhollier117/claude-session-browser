@@ -272,7 +272,7 @@ def test_empty_export_folders_do_not_fill_the_shortlist():
     family = _cand("work\\wf\\acme_user_creation", ["acme onboarding"], now - DAY)
     exports = [_cand(f"work\\wf\\acme_user_creation\\Acme_New_Hire_Workflow_2026-0{m}-01", sessions=0)
                for m in range(1, 10)]
-    elsewhere = [_cand(f"work\\wf\\Acme_Hire_Report_{i}", sessions=0) for i in range(6)]
+    elsewhere = [_cand(f"work\\wf\\Acme_Report_{i}", sessions=0) for i in range(6)]
     used = [_cand(f"work\\wf\\acme_task_{i}", [f"acme hire task {i}"], now - DAY) for i in range(16)]
     scored = rank("Acme new hire workflow", [family, *exports, *elsewhere, *used], now)
     rels = _rels(scored)
@@ -282,7 +282,7 @@ def test_empty_export_folders_do_not_fill_the_shortlist():
     fam = next(s for s in scored if s.cand.rel == "work\\wf\\acme_user_creation")
     assert fam.folded and fam.matched == ("acme",)  # the exports' score, but only its own words
     assert fam.score > sum(fam.weights) + 0.15  # more than its own words earn: the best export's score
-    assert not any(x.startswith("work\\wf\\Acme_Hire_Report") for x in rels)  # empty, weaker, slots are full
+    assert not any(x.startswith("work\\wf\\Acme_Report") for x in rels)  # empty, weaker, slots are full
     few = rank("Acme new hire workflow", [*elsewhere, used[0]], now)
     assert len(few) == 7  # fewer than k folders with sessions: the empty ones fill the slots
 
@@ -295,3 +295,17 @@ def test_a_folder_scored_by_a_folded_empty_sub_folder_is_never_strong():
     scored = rank("pxe boot tool", [container, empty, *others], now)
     assert _rels(scored) == ["cc\\improvements"] and scored[0].folded
     assert not strong(scored)
+
+
+def test_an_empty_folder_named_for_the_session_stays_in_the_shortlist():
+    """Zero-session candidates are dropped when enough folders with sessions scored, except one whose own folder
+    name matches two or more of the session name's words."""
+    now = 1_700_000_000.0
+    name = "teams migration channel mapping"
+    used = [_cand(f"work\\m365\\team_notes_{i}", ["teams migration channel mapping notes"], now - DAY)
+            for i in range(16)]
+    named = _cand("work\\m365\\teams_migration", sessions=0)
+    one_word = _cand("work\\m365\\teams_other", sessions=0)  # only one of the words in its own name
+    rels = _rels(rank(name, [*used, named, one_word], now))
+    assert len(rels) == 14 and "work\\m365\\teams_migration" in rels
+    assert "work\\m365\\teams_other" not in rels

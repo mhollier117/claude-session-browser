@@ -23,9 +23,10 @@ from .paths import Env
 _LAST_REPLY_CHARS = 400
 _FIRST_ASK_NAME_CHARS = 60
 _UNTITLED = "(untitled)"
+LAUNCH_WAIT_MS = 500  # how long `record_launch` waits for a lock: resuming must not sit behind another cc's refresh
 DB_TIMEOUT_S = 30.0  # how long a write waits for another process's write (another cc, the browser) to finish
 
-_SCHEMA_VERSION = 1  # bump when the columns change: an older cache is dropped and rebuilt
+_SCHEMA_VERSION = 2  # bump when the columns change: an older cache is dropped and rebuilt
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     store TEXT NOT NULL, sid TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT, name TEXT, display_name TEXT,
@@ -169,6 +170,7 @@ class Index:
         The file is shared by every `cc` and the browser: WAL lets readers go on while one of them refreshes, and a
         writer waits up to `timeout` seconds for another's write before sqlite raises `OperationalError`."""
         self.env = env
+        self._timeout = timeout
         self.db_path = Path(db_path) if db_path else env.data_dir / "index.sqlite"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
@@ -279,7 +281,7 @@ class Index:
         row = {"path": str(path), "cwd": facts.cwd, "name": custom or ai, "first_ask": facts.first_ask,
                "last_ask": last_ask, "last_reply": facts.last_reply[:_LAST_REPLY_CHARS],
                "user_msgs": users, "assistant_msgs": assistants, "size": facts.size, "mtime": facts.mtime,
-               "last_activity": facts.mtime, "counted_to": end, "custom_title": custom, "ai_title": ai}
+               "last_activity": facts.last_ts or facts.mtime, "counted_to": end, "custom_title": custom, "ai_title": ai}
         row["display_name"] = self._display_name(store, facts.sid, row, live, titles)
         cols = ", ".join(_FACT_COLS)
         self._db.execute(
@@ -356,9 +358,18 @@ class Index:
         return self._to_rows([rec])[0] if rec else None
 
     def record_launch(self, store: str, sid: str, wrapper: str) -> None:
-        """Remember which wrapper last launched this session (kept across refreshes)."""
-        self._db.execute("UPDATE sessions SET wrapper = ? WHERE store = ? AND sid = ?", (wrapper, store, sid))
-        self._db.commit()
+        """Remember which wrapper last launched this session (kept across refreshes). Waits at most
+        `LAUNCH_WAIT_MS` for the index lock; raises `sqlite3.OperationalError` when it stays busy (the caller treats
+        this as best-effort)."""
+        self._db.execute(f"PRAGMA busy_timeout = {LAUNCH_WAIT_MS}")
+        try:
+            self._db.execute("UPDATE sessions SET wrapper = ? WHERE store = ? AND sid = ?", (wrapper, store, sid))
+            self._db.commit()
+        except sqlite3.OperationalError:
+            self._db.rollback()
+            raise
+        finally:
+            self._db.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
 
     def folder_stats(self, rel_path: str) -> FolderStats:
         """Sessions whose cwd is `env.root / rel_path` or below it (case-insensitive, whole path components)."""

@@ -143,8 +143,18 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
         return max(1, size().rows - chrome())
 
     @kb.add("c-c")
+    @kb.add("c-q")
     def _quit(event) -> None:
         event.app.exit(result=None)
+
+    @kb.add("c-n", filter=in_list)
+    def _new(event) -> None:
+        event.app.exit(result=NEW)
+
+    @kb.add("c-o", filter=in_list)
+    @kb.add("c-w", filter=in_list)
+    def _chord(event) -> None:
+        state.chord(event.key_sequence[0].key.value)  # open folder / cycle wrapper; the status line shows the result
 
     @kb.add("enter")
     def _enter(event) -> None:
@@ -170,8 +180,7 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
     def _pgdn(event) -> None:
         state.move(page())
 
-    @kb.add("space", filter=in_list)
-    def _preview(event) -> None:
+    def open_preview(event) -> None:
         if state.current() is None:
             return
         preview.document = Document(state.preview_text(size().columns), 0)
@@ -179,30 +188,28 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
         mode["preview"] = True
         event.app.layout.focus(preview)
 
+    @kb.add("tab", filter=in_list)
+    def _preview(event) -> None:
+        open_preview(event)  # tab always opens the preview; space does only while the filter is empty
+
     @kb.add("backspace", filter=in_list)
     def _backspace(event) -> None:
         state.backspace()
 
     @kb.add("escape", filter=in_list, eager=True)  # eager: arrows are decoded before this, so no wait
     def _escape(event) -> None:
-        state.escape()  # clears an active filter; only q and ctrl-c quit
+        state.escape()  # clears the filter; does nothing when it is empty (ctrl-q and ctrl-c quit)
 
     @kb.add("<any>", filter=in_list)
     def _typed(event) -> None:
         ch = event.data
         if len(ch) != 1 or not ch.isprintable():
             return
-        command = state.type_char(ch)
-        if command == "quit":
-            event.app.exit(result=None)
-        elif command == "new":
-            event.app.exit(result=NEW)
-        elif command == "open":
-            state.open_folder()
-        elif command == "wrapper":
-            state.cycle_wrapper()
+        if state.type_char(ch) == "preview":  # a space on an empty filter
+            open_preview(event)
 
     @kb.add("space", filter=in_preview)
+    @kb.add("tab", filter=in_preview)
     @kb.add("escape", filter=in_preview, eager=True)
     def _back(event) -> None:
         show_list(event)

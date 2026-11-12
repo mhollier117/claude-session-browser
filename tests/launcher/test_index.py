@@ -13,8 +13,11 @@ from launcher_helpers import write_claude_session, write_qwen_session
 T0 = 1_700_000_000.0
 
 
-def _u(text, cwd=None):
-    rec = {"type": "user", "timestamp": "2026-11-01T10:00:00Z", "message": {"role": "user", "content": text}}
+def _u(text, cwd=None, ts=None):
+    """A user record. Without `ts` it carries no timestamp, so a row's last activity is the file's mtime."""
+    rec = {"type": "user", "message": {"role": "user", "content": text}}
+    if ts is not None:
+        rec["timestamp"] = ts
     if cwd is not None:
         rec["cwd"] = str(cwd)
     return rec
@@ -393,3 +396,38 @@ def test_index_persists_across_instances(fake_env):
     idx2 = _index(fake_env)
     assert idx2.row("claude", "z1").first_ask == "ask"
     assert idx2.refresh() == 0
+
+
+def test_last_activity_is_the_last_record_date_not_the_file_mtime(fake_env):
+    """A transcript touched today (a copy, a sync) whose last record is a month old sorts by the record."""
+    from datetime import datetime, timezone
+    cwd = fake_env.root / "cc"
+    old = write_claude_session(fake_env, cwd, "old", [
+        _u("old work", cwd, ts="2026-10-01T10:00:00.000Z"), _a("done")])
+    recent = write_claude_session(fake_env, cwd, "recent", [_u("recent work", cwd, ts="2026-11-01T10:00:00.000Z")])
+    _touch(old, T0 + 5 * 86400)  # the old session's file has the newest mtime
+    _touch(recent, T0)
+    idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
+    idx.refresh()
+    rows = idx.rows()
+    assert [r.sid for r in rows] == ["recent", "old"]
+    assert rows[1].last_activity == datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc).timestamp()
+    assert rows[1].mtime == T0 + 5 * 86400  # mtime itself is still recorded
+    stamped = write_claude_session(fake_env, cwd, "plain", [_u("no stamps"), _a("x")])
+    _touch(stamped, T0 + 100)
+    idx.refresh()
+    assert idx.row("claude", "plain").last_activity == T0 + 100  # no timestamp: the mtime
+
+
+def test_older_schema_cache_is_dropped_and_rebuilt(fake_env):
+    import sqlite3
+    path = fake_env.data_dir / "index.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE sessions (store TEXT, sid TEXT, stale INTEGER)")
+    db.execute("INSERT INTO sessions VALUES ('claude', 'x', 1)")
+    db.execute("PRAGMA user_version = 1")
+    db.commit()
+    db.close()
+    idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
+    assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 2
