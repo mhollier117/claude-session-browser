@@ -22,6 +22,7 @@ import queue
 import shutil
 import base64
 import ctypes
+import gc
 import functools
 import logging
 import tempfile
@@ -2348,6 +2349,9 @@ class BuddyController:
 
     # ---- interner Thread ----
     def _run(self):
+        _run_tk_thread(self._run_tk)
+
+    def _run_tk(self):
         try:
             import tkinter as tk
         except Exception:
@@ -3218,6 +3222,21 @@ class BuddyController:
             self._pub_rect = None
 
 
+def _run_tk_thread(body, *args):
+    """Fuehrt einen tkinter-Thread aus und raeumt seine Fenster auf DIESEM Thread ab.
+
+    Die Tk-Wurzel haengt nach dem Schliessen noch in Referenz-Zyklen (Timer-
+    Funktionen wie slide/fade/tick rufen sich ueber ihre eigene Closure auf).
+    Raeumt der Garbage Collector sie spaeter auf einem anderen Thread weg,
+    bricht Tcl den ganzen Prozess ab ("Tcl_AsyncDelete: async handler deleted
+    by the wrong thread") - die App ist dann einfach weg. Deshalb: Rumpf
+    beenden (sein Frame ist dann frei) und hier sofort einsammeln."""
+    try:
+        body(*args)
+    finally:
+        gc.collect()
+
+
 # --------------------------------------------------------------------------- #
 #  Limit-Reset-Karte: schwebende Karte oben rechts, bleibt bis Klick weg
 # --------------------------------------------------------------------------- #
@@ -3303,6 +3322,9 @@ class LimitResetToast:
                                  outline=outline)
 
     def _run(self, title, subtitle, avoid=None):
+        _run_tk_thread(self._run_tk, title, subtitle, avoid)
+
+    def _run_tk(self, title, subtitle, avoid=None):
         try:
             import tkinter as tk
         except Exception:

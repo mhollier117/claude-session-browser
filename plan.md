@@ -3,7 +3,16 @@
 Repo: `mhollier117/claude-session-browser` (public; keep it public). Upstream: `juppeee/claude-session-browser`.
 No GitHub Actions workflows in this repo: pushes cost no CI minutes.
 
-## cc launcher round 2 (2026-11-12) - implemented and reviewed, not pushed, not released
+## Crash fix + release 1.7.0.0 (2026-11-12)
+- The app vanished without a message (7 APPCRASH events since 11-06, tcl86t `Tcl_PanicVA`, 0x80000003):
+  the buddy's and the limit-reset card's Tk roots stayed in reference cycles after closing (self-calling
+  `slide`/`fade`/`tick` closures) and were freed by the GC on another thread -> "Tcl_AsyncDelete: async handler
+  deleted by the wrong thread". Fix: `_run_tk_thread` runs each Tk thread body and `gc.collect()`s on that thread.
+  Test: `tests/test_tk_threads.py` (child process; crashes with 0x80000003 without the helper).
+- Released as 1.7.0.0 together with the launcher (launcher fast-forwarded into main).
+- Known, not fixed: the single-instance guard starts a second copy after 1.5 s if the first has no window yet.
+
+## cc launcher round 2 (2026-11-12) - implemented and reviewed, released in 1.7.0.0
 - Plan: `docs/superpowers/plans/2026-11-11-launcher-round2.md` (five tasks, all done). Commits `e58bbf6..2fc0414` on
   `launcher` (base `248da48`). Full suite on `2fc0414`: 718 passed. Ledger with rulings and parked items:
   `.superpowers\round2\ledger.md` (git-ignored).
