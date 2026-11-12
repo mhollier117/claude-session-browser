@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.0",
-  "notes": "cc launcher: one launcher for Claude and Qwen sessions in the terminal (cc) and a New session dialog in the app, with folder suggestions, remembered wrapper/GitHub choices and GitHub 'none'. Fix: the app no longer vanishes after the limit-reset card or the buddy closes (Tcl crash on the wrong thread).",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.0",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.0/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "c802b5c5f6a4b88d31576a4ac06fca97dc8abc5d67f6cbd9c2f4e37c98a95992"
+  "version": "1.7.0.1",
+  "notes": "Fix: only one copy of the app runs at a time. A second start brings the running window forward, or waits for it while it is still starting or updating, instead of starting a second copy.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.1",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.1/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "6f772f9a3f58f9cc53cc2e66f4696b0d5db81d6721b7102e46c78e5ae99d1247"
 }
