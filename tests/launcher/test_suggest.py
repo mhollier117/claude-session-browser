@@ -171,12 +171,21 @@ def test_validate_choice_place_slugs_or_drops_the_new_folder(fake_env):
     net = _number(prep.message, "work\\net")
     s = validate_choice(fake_env, {"choice": net, "new_folder": "FortiGate Cert", "confidence": "medium"}, prep, "qwen")
     assert s.path == r / "work" / "net" and s.new_folder == "fortigate_cert"
+    assert s.needs_name is False
     for bad in (".hidden", "..", 7, "", "null", "None"):
         s = validate_choice(fake_env, {"choice": net, "new_folder": bad}, prep, "qwen")
         assert s is not None and s.path == r / "work" / "net" and s.new_folder is None, bad
-    (r / "work" / "net" / "taken").mkdir()
-    s = validate_choice(fake_env, {"choice": net, "new_folder": "taken"}, prep, "qwen")
-    assert s.path == r / "work" / "net" and s.new_folder is None  # already exists: not proposed as new
+        assert s.needs_name is True, bad  # no usable name, and work\net has no sessions of its own
+
+
+def test_place_answer_naming_an_existing_child_leads_into_it(fake_env):
+    prep = _prep_with_projects(fake_env)
+    r = fake_env.root
+    (r / "work" / "net" / "Taken_One").mkdir()
+    net = _number(prep.message, "work\\net")
+    s = validate_choice(fake_env, {"choice": net, "new_folder": "taken one", "confidence": "high"}, prep, "qwen")
+    assert s.path == r / "work" / "net" / "Taken_One"  # the existing folder, on-disk spelling
+    assert s.new_folder is None and s.needs_name is False
 
 
 # ---- qwen ----------------------------------------------------------------------------------------------------------
@@ -637,11 +646,16 @@ def test_log_outcome_line_shape(fake_env):
     assert _log(fake_env)[-1]["match"] is False  # a new folder below the suggested project is not a match
 
 
-def test_place_with_null_new_folder_means_start_in_the_place(fake_env):
-    prep = _prep_with_projects(fake_env)
-    ai = _number(prep.message, "home\\ai")
+def test_place_with_null_new_folder_is_guarded_by_its_own_sessions(fake_env):
+    r, now = fake_env.root, fake_env.now()
+    rows = [make_row(r / "home" / "ai", "whisper bench", now - 60, "s1")]
+    prep = prepare(fake_env, rows, "whisper bench rerun")
+    ai, net = _number(prep.message, "home\\ai"), _number(prep.message, "work\\net")
     s = validate_choice(fake_env, {"choice": ai, "new_folder": None, "confidence": "high"}, prep, "qwen")
-    assert s.path == fake_env.root / "home" / "ai" and s.new_folder is None
+    assert s.path == r / "home" / "ai" and s.new_folder is None and s.needs_name is False  # start in the place
+    s = validate_choice(fake_env, {"choice": net, "new_folder": None, "confidence": "high"}, prep, "qwen")
+    assert s is not None and s.path == r / "work" / "net" and s.new_folder is None
+    assert s.needs_name is True  # no sessions in work\net itself: the UI asks for a folder name
 
 
 def test_unwritable_data_dir_never_raises(fake_env, index):
@@ -658,3 +672,16 @@ def test_unwritable_data_dir_never_raises(fake_env, index):
 
     assert stage_qwen(down)(env, index, "vpn", _soon()) is None
     assert not (blocker / "data").exists()
+
+
+def test_a_place_answer_without_a_name_does_not_fall_through_to_claude(fake_env, index, tmp_path):
+    _qwen_settings(fake_env)
+    exe = tmp_path / "claude.exe"
+    exe.write_text("")
+    runner = FakeRunner(_claude_out(_answer(r"home\ai")))
+    handle = suggest(fake_env, index, "zzz qqq", http=FakeHttp(_answer(r"work\net", None, "medium")), runner=runner,
+                     on_update=lambda s: None, claude_exe=exe)
+    got = handle.wait(5)
+    assert handle.join(5)
+    assert got.source == "qwen" and got.path == fake_env.root / "work" / "net" and got.needs_name is True
+    assert runner.calls == []

@@ -6,6 +6,7 @@ whole tree with session stats and the most recent sessions, answered with a free
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,7 +21,7 @@ SYSTEM_PROMPT = r"""You file a new coding-assistant session into an existing fol
 
 You get the session name and a numbered list of candidates of two kinds. A PROJECT is an existing project folder, shown with its session count and recent session names. A PLACE is an area, a bucket or a client folder where a new project folder can be made, shown with a note on what belongs there and, when sessions were started directly in it, how many and their names.
 
-Pick a PROJECT when the session is more work on that same project or the same system, even if the task itself is new. A bug in the Halo ticket list sync belongs in the existing ticket list sync project. Judge by the subject: a PROJECT that shares only one generic word with the session name (alert, review, app, report, workflow, user, sync) is not a match.
+Pick a PROJECT when the session is more work on that same project or the same system, even if the task itself is new. A bug in the Halo ticket list sync belongs in the existing ticket list sync project. A PROJECT whose own folder name is the subject of the session beats a PLACE whose description merely mentions that subject. Judge by the subject: a PROJECT that shares only one generic word with the session name (alert, review, app, report, workflow, user, sync) is not a match.
 Otherwise pick the PLACE that fits the subject and name a new folder for it: lower case, words joined by _, 2 to 4 words, no dates. Client work goes under that client's folder when it is listed. Personal or hobby work goes under home (or a home place), never under a work bucket. The reverse holds too: work for the MSP or its clients (FortiGate, VPN, certificates, Halo, Ninja, CIPP, Rewst, Microsoft 365) goes under work, not into a home or homelab project, unless the name says homelab.
 Always answer with one of the numbers. Never return {}. If the name means nothing to you, pick the most general fitting PLACE, invent a short folder name and say confidence low.
 
@@ -66,6 +67,21 @@ def _evidence(names: list[str], query: list[str], n: int = 2) -> list[str]:
     return [nm for _i, nm in sorted(enumerate(names), key=lambda p: (-hits(p[1]), p[0]))][:n]
 
 
+def _without_names(note: str, names: list[str]) -> str:
+    """`note` without any word or phrase that is exactly one of `names` (case-insensitive, whole words), and
+    without the commas and brackets that leaves dangling. A PLACE note must not advertise a subject that a listed
+    PROJECT folder is named after."""
+    for name in sorted({n for n in names if n}, key=len, reverse=True):
+        note = re.sub(rf"(?<![\w-]){re.escape(name)}(?![\w-])", "", note, flags=re.I)
+    note = re.sub(r"\(\s*[,/]?\s*\)", "", note)
+    note = re.sub(r"\s*,(\s*,)+", ",", note)
+    note = re.sub(r"([(:/])\s*,\s*", r"\1 ", note)
+    note = re.sub(r"\s*,\s*([)/])", r"\1", note)
+    note = re.sub(r"[\s,/]+$", "", note)
+    note = re.sub(r"\(\s+", "(", note)
+    return re.sub(r"\s{2,}", " ", note).strip()
+
+
 def build_user_message(name: str, scored: list[Scored], places: list[Place]) -> tuple[str, list[Choice]]:
     """The v2 user message and the choice each number stands for: the ranked PROJECT candidates (a folder that is
     also a PLACE is listed once, as the place), each with the two of its 3 most recent session names that best
@@ -82,12 +98,15 @@ def build_user_message(name: str, scored: list[Scored], places: list[Place]) -> 
         text = f"{len(choices)}. PROJECT  {c.rel}  · {c.stats.sessions} sessions"
         recent = ", ".join(json.dumps(n, ensure_ascii=False) for n in _evidence(c.stats.names or [], query))
         lines.append(text + (f" · recent: {recent}" if recent else ""))
+    leaves = [c.rel.rpartition("\\")[2] for c in choices]
     for p in places:
         choices.append(Choice("PLACE", p.rel, p.path))
-        text = f"{len(choices)}. PLACE    {p.rel}" + (f"  — {p.note}" if p.note else "")
+        note = _without_names(p.note, leaves)
+        text = f"{len(choices)}. PLACE    {p.rel}" + (f"  — {note}" if note else "")
         if p.sessions_here:
             recent = ", ".join(json.dumps(n, ensure_ascii=False) for n in p.names_here)
-            text += f" · {p.sessions_here} sessions here" + (f" · recent: {recent}" if recent else "")
+            here = "1 session here" if p.sessions_here == 1 else f"{p.sessions_here} sessions here"
+            text += f" · {here}" + (f" · recent: {recent}" if recent else "")
         lines.append(text)
     clean = " ".join(name.split())
     return f"Session name: {clean}\n\nCandidates:\n" + "\n".join(lines) + "\n", choices

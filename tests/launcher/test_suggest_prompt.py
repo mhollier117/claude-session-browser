@@ -151,5 +151,17 @@ def test_v2_place_line_shows_sessions_started_there(fake_env):
     msg, _ = build_user_message("x", [], [Place("home\\ai", r / "home" / "ai", "local AI", 3, ("a b", "c")),
                                           Place("home", r / "home", "", 1, ("solo",))])
     assert msg.splitlines()[-2:] == ['1. PLACE    home\\ai  — local AI · 3 sessions here · recent: "a b", "c"',
-                                     '2. PLACE    home · 1 sessions here · recent: "solo"']
+                                     '2. PLACE    home · 1 session here · recent: "solo"']
     assert "start in the place itself" in SYSTEM_PROMPT
+
+
+def test_v2_place_note_drops_a_listed_project_name(fake_env):
+    r = fake_env.root
+    scored = [_scored(r, "home\\traefik", 2, ["dash"])]
+    places = [Place("home\\homelab", r / "home" / "homelab", "homelab: PXE, Supermicro, Traefik"),
+              Place("work\\vendors", r / "work" / "vendors", "vendor tooling (Traefik, Keeper, Keepit)")]
+    msg, _ = build_user_message("traefik dashboard", scored, places)
+    lines = msg.splitlines()
+    assert lines[-2] == "2. PLACE    home\\homelab  — homelab: PXE, Supermicro"
+    assert lines[-1] == "3. PLACE    work\\vendors  — vendor tooling (Keeper, Keepit)"
+    assert "merely mentions" in SYSTEM_PROMPT

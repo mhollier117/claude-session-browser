@@ -55,6 +55,7 @@ class Suggestion:
     source: str  # qwen | claude | history | root
     alternatives: list[Path] = field(default_factory=list)  # the next two ranked projects (not this one's branch)
     strong: bool = False  # local answers only: clear enough to move the picker without a model
+    needs_name: bool = False  # a PLACE answer without a usable new-folder name: the UI must ask for one
 
 
 class Unreachable(OSError):
@@ -209,35 +210,49 @@ def _parse_json(text) -> dict | None:
     return None
 
 
-def _place_name(folder: Path, value) -> str | None:
-    """The model's proposed new folder name as a safe slug that does not exist yet in `folder`, else None."""
+def _place_answer(folder: Path, value) -> tuple[Path, str | None, bool]:
+    """Where a PLACE answer leads: (folder, new folder name, needs a name). A usable new name is slugged and
+    checked; a name that already exists as a child folder leads into that folder (the existing project, no new
+    folder); null, empty or unusable names give the place itself with no name."""
     if not isinstance(value, str) or value.strip().lower() in _NULLS:
-        return None
+        return folder, None, False
     name = slug(value.strip())
     try:
         check_name(name)
     except ValueError:
-        return None
-    return None if (folder / name).exists() else name
+        return folder, None, True
+    try:
+        existing = next((c for c in folder.iterdir() if c.is_dir() and c.name.lower() == name.lower()), None)
+    except OSError:
+        existing = None
+    if existing is not None:
+        return existing, None, False
+    return folder, name, False
 
 
 def validate_choice(env: Env, raw, prep: Prepared, source: str = "") -> Suggestion | None:
     """A v2 answer (`{"choice": n, "new_folder", "confidence", "reason"}`) as a Suggestion, or None unless `choice`
-    is an int naming one of the numbered candidates. A PROJECT never carries a new folder. A PLACE with
-    `new_folder` null means "start in the place itself"; a PLACE whose proposed name is unusable or already
-    exists keeps its place and drops the name (the same result)."""
+    is an int naming one of the numbered candidates. A PROJECT never carries a new folder. For a PLACE:
+    - a usable new name is proposed as given (slugged);
+    - a name that already exists as a child folder answers with that folder itself (no new folder);
+    - null means "start in the place itself", but only for a place that already has sessions of its own;
+      otherwise (and for an unusable name) the answer is the place with `needs_name` set, so the UI asks."""
     if not isinstance(raw, dict):
         return None
     n = raw.get("choice")
     if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= len(prep.choices):
         return None
     choice = prep.choices[n - 1]
-    new_folder = _place_name(choice.path, raw.get("new_folder")) if choice.kind == "PLACE" else None
+    path, new_folder, needs_name = choice.path, None, False
+    if choice.kind == "PLACE":
+        path, new_folder, needs_name = _place_answer(choice.path, raw.get("new_folder"))
+        if path == choice.path and new_folder is None and not needs_name:
+            place = next((p for p in prep.places if p.path == choice.path), None)
+            needs_name = place is None or place.sessions_here == 0
     confidence = raw.get("confidence") if raw.get("confidence") in _CONFIDENCE else "low"
     reason = " ".join(raw["reason"].split()) if isinstance(raw.get("reason"), str) else ""
-    return Suggestion(choice.path, new_folder, confidence, reason, source,
-                      alternatives=_alternatives(prep, choice.path))
-
+    return Suggestion(path, new_folder, confidence, reason, source, alternatives=_alternatives(prep, path),
+                      needs_name=needs_name)
 
 def _model_answer(env: Env, text, prep: Prepared, source: str) -> Suggestion:
     raw = _parse_json(text)

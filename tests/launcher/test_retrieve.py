@@ -13,7 +13,8 @@ def _rels(scored):
 
 def test_tokens_lower_split_length_and_stop_words():
     assert tokens("Ninja RMM Alert Review") == ["ninja", "rmm", "alert"]
-    assert tokens("fix the new VPN-cert_issue  for AI") == ["vpn", "cert"]  # 'ai' too short, stop words dropped
+    assert tokens("fix the new VPN-cert_issue  for ai") == ["vpn", "cert"]  # lower-case 'ai' too short, stop words
+    assert tokens("for AI") == ["ai"]  # a capitalised 2-letter acronym is kept (see test_short_acronyms)
     assert tokens("Halo ticket list sync bug") == ["halo", "ticket", "sync", "bug"]
     assert tokens("") == [] and tokens(None) == []
     assert tokens("sync sync SYNC") == ["sync"]  # distinct, first-seen order
@@ -231,3 +232,66 @@ def test_folder_walk_is_cached_for_a_minute_and_dropped_on_create(fake_env, monk
     create_folder(fake_env.root / "home", "fresh", "container", "x", runner=NoRun())
     rels = [c.rel for c in candidates(fake_env, None, [])]
     assert len(calls) == 3 and "home\\fresh" in rels  # create_folder dropped the cache
+
+
+# ---- round 3 --------------------------------------------------------------------------------------------------------
+
+def test_own_folder_name_words_survive_the_organisational_exclusion(fake_env):
+    r, now = fake_env.root, fake_env.now()
+    for rel in ("work/ninja/ninja_alerts", "work/ninja/other_tool", "work/halo/halo_reports",
+                "work/halo/views/sub"):
+        (r / rel).mkdir(parents=True)
+    rows = [make_row(r / "work" / "ninja" / "other_tool", "ninja thing", now - DAY, "s1"),
+            make_row(r / "work" / "halo" / "views" / "sub", "halo sub work", now - DAY, "s2")]
+    by_rel = {c.rel: c for c in candidates(fake_env, None, rows)}
+    assert "ninja" in by_rel["work\\ninja\\ninja_alerts"].tokens  # its own name says ninja
+    assert "halo" in by_rel["work\\halo\\halo_reports"].tokens
+    assert "ninja" not in by_rel["work\\ninja\\other_tool"].tokens  # only a session name above it says ninja
+    assert "halo" not in by_rel["work\\halo\\views\\sub"].tokens  # nor from the path above the leaf
+    rels = _rels(rank("ninja alerts", candidates(fake_env, None, rows), now))
+    assert rels[0] == "work\\ninja\\ninja_alerts"
+
+
+def test_short_acronyms():
+    assert tokens("CA policy for AD and VM, HR, IT") == ["ca", "policy", "ad", "vm", "hr", "it"]
+    assert tokens("ca policy, ad hoc") == ["policy", "hoc"]  # lower-case 2-letter words are still dropped
+    assert tokens("Ca") == [] and tokens("C2") == []  # capitals only, letters only
+    assert tokens("CA_Policy Script") == ["ca", "policy"]
+    assert not stem_match("ca", "cache") and not stem_match("ca", "calendar") and stem_match("ca", "ca")
+    now = 1_700_000_000.0
+    cands = [_cand("work\\m365\\CA Policy Script", ["CA rollout"], now - DAY),
+             _cand("work\\m365\\calendar_cache", ["cache stuff"], now - DAY),
+             _cand("home\\x")]
+    assert _rels(rank("CA report", cands, now)) == ["work\\m365\\CA Policy Script"]
+
+
+def test_empty_export_folders_do_not_fill_the_shortlist():
+    """A workflow family: one parent folder with sessions and many dated, empty export sub-folders, plus other
+    projects with sessions that share the name's words."""
+    now = 1_700_000_000.0
+    family = _cand("work\\wf\\acme_user_creation", ["acme onboarding"], now - DAY)
+    exports = [_cand(f"work\\wf\\acme_user_creation\\Acme_New_Hire_Workflow_2026-0{m}-01", sessions=0)
+               for m in range(1, 10)]
+    elsewhere = [_cand(f"work\\wf\\Acme_Hire_Report_{i}", sessions=0) for i in range(6)]
+    used = [_cand(f"work\\wf\\acme_task_{i}", [f"acme hire task {i}"], now - DAY) for i in range(16)]
+    scored = rank("Acme new hire workflow", [family, *exports, *elsewhere, *used], now)
+    rels = _rels(scored)
+    assert len(rels) == 14
+    assert not any("_2026-0" in x for x in rels)  # the exports folded into the family folder
+    assert "work\\wf\\acme_user_creation" in rels
+    fam = next(s for s in scored if s.cand.rel == "work\\wf\\acme_user_creation")
+    assert fam.folded and fam.matched == ("acme",)  # the exports' score, but only its own words
+    assert fam.score > sum(fam.weights) + 0.15  # more than its own words earn: the best export's score
+    assert not any(x.startswith("work\\wf\\Acme_Hire_Report") for x in rels)  # empty, weaker, slots are full
+    few = rank("Acme new hire workflow", [*elsewhere, used[0]], now)
+    assert len(few) == 7  # fewer than k folders with sessions: the empty ones fill the slots
+
+
+def test_a_folder_scored_by_a_folded_empty_sub_folder_is_never_strong():
+    now = 1_700_000_000.0
+    container = _cand("cc\\improvements", ["pxe notes"], now - DAY)  # scores on one word of its own
+    empty = _cand("cc\\improvements\\pxe_boot_tool", sessions=0)
+    others = [_cand(f"home\\filler{i}") for i in range(30)]
+    scored = rank("pxe boot tool", [container, empty, *others], now)
+    assert _rels(scored) == ["cc\\improvements"] and scored[0].folded
+    assert not strong(scored)

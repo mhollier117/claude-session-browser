@@ -29,9 +29,10 @@ RECENT_S = 30 * 86400.0
 RECENT_BONUS = 0.15
 # strong(): a token counts as rare when its IDF is at least RARE_IDF; the top result needs sessions, STRONG_TOKENS
 # rare tokens, an IDF sum of at least STRONG_SUM, and LEAD times the runner-up's score. Calibrated with
-# tools/suggest_eval.py on the real tree (about 2,540 folders): strong for 1 of 29 names (right). It was 3 of 15,
-# all right, before area/bucket/client words stopped counting for projects; never strong on a wrong top result
-# (without the sessions rule, the 0-session ninja_rmm_alert_renewal_review was).
+# tools/suggest_eval.py on the real tree (about 2,540 folders): strong for 4 of 29 names, 3 right; the fourth,
+# work\ninja\ninja_rmm_alert_renewal_review for "Ninja RMM Alert Review", holds a session of nearly that name,
+# though the eval expects the work\ninja place (a session of exactly that name started there). A top result whose
+# score came from a folded empty sub-folder is never strong.
 RARE_IDF = 1.5
 STRONG_TOKENS = 2
 STRONG_SUM = 4.0
@@ -73,6 +74,7 @@ class Scored:
     score: float
     matched: tuple[str, ...] = ()  # the name's tokens this folder matched, in name order
     weights: tuple[float, ...] = ()  # their IDF, same order
+    folded: bool = False  # the score came from an empty sub-folder folded into this one (see _collapse_empty)
 
 
 @dataclass(frozen=True)
@@ -87,16 +89,20 @@ class Place:
 # ---- tokens ---------------------------------------------------------------------------------------------------------
 
 def tokens(text: str | None) -> list[str]:
-    """Distinct lower-case words of `text` (split on non-alphanumerics), 3+ characters, stop words removed."""
+    """Distinct lower-case words of `text` (split on non-alphanumerics), stop words removed: 3+ characters, or
+    2 letters written in capitals in `text` (acronyms such as CA, AD, VM, HR; a lower-case "ca" is dropped)."""
     out: list[str] = []
-    for t in re.split(r"[^a-z0-9]+", (text or "").lower()):
-        if len(t) >= 3 and t not in STOP and t not in out:
+    for raw in re.split(r"[^A-Za-z0-9]+", text or ""):
+        t = raw.lower()
+        keep = len(t) >= 3 or (len(raw) == 2 and raw.isalpha() and raw.isupper())
+        if keep and t not in STOP and t not in out:
             out.append(t)
     return out
 
 
 def stem_match(a: str, b: str) -> bool:
-    """Equal, or both at least 5 characters and sharing their first 5."""
+    """Equal, or both at least 5 characters and sharing their first 5 (so a 2-letter acronym matches only
+    itself)."""
     return a == b or (len(a) >= 5 and len(b) >= 5 and a[:5] == b[:5])
 
 
@@ -165,8 +171,8 @@ def _org_prefix_len(parts: list[str]) -> int:
 
 def candidates(env: Env, index, rows: list) -> list[Cand]:
     """Every folder to depth 4 below work and home and depth 2 below cc (areas included), with its stats and tokens:
-    the words of its relative path below its organisational ancestors, plus its 3 most recent session names, minus
-    the words of those ancestors' names. A client's or bucket's name is no evidence for one project in it (the
+    the words of its own folder name (always), plus the words of its path between its organisational ancestors
+    and itself and of its 3 most recent session names, minus the words of those ancestors' names. A client's or bucket's name is no evidence for one project in it (the
     client is offered as a PLACE instead), and as a path word shared by every folder below it, it would crowd the
     shortlist with that client's folders. `index` is unused; it is kept for the signature `tree.children` shares."""
     stats = folder_stats_map(rows)
@@ -178,7 +184,9 @@ def candidates(env: Env, index, rows: list) -> list[Cand]:
         st = stats.get(root_key + tuple(p.lower() for p in parts), empty)
         cut = _org_prefix_len(parts)
         org_words = set(tokens(" ".join(parts[:cut])))
-        words = [t for t in tokens(" ".join(parts[cut:]) + " " + " ".join(st.names or [])) if t not in org_words]
+        own = tokens(parts[-1])  # the folder's own name always counts, even a word its client or bucket shares
+        rest = tokens(" ".join(parts[cut:-1]) + " " + " ".join(st.names or []))
+        words = own + [t for t in rest if t not in org_words]
         out.append(Cand(rel, Path(path), depth, FolderStats(st.sessions, st.last_activity, list(st.names)),
                         frozenset(words)))
     return out
@@ -254,10 +262,50 @@ def rank(name: str, cands: list[Cand], now: float, k: int = 14) -> list[Scored]:
         if c.stats.last_activity and now - c.stats.last_activity < RECENT_S:
             score += RECENT_BONUS
         scored.append(Scored(c, score, tuple(hits), weights))
-    scored = _one_per_branch_match(scored)
-    scored.sort(key=lambda s: (-round(s.score, 9), -(s.cand.stats.last_activity or 0.0), -s.cand.depth,
-                               s.cand.rel.lower()))
-    return scored[:k]
+    scored = _one_per_branch_match(_collapse_empty(scored))
+    scored.sort(key=_order)
+    return _prefer_used(scored, k)
+
+
+def _order(s: Scored):
+    return (-round(s.score, 9), -(s.cand.stats.last_activity or 0.0), -s.cand.depth, s.cand.rel.lower())
+
+
+def _collapse_empty(scored: list[Scored]) -> list[Scored]:
+    """Fold each zero-session candidate into its nearest non-organisational ancestor that also scored: one entry
+    per project subtree, on the ancestor's line, carrying the best score (A workflow family folder with sessions
+    would otherwise be buried under its own dated, empty export folders.) The ancestor keeps its own matched
+    words, so a container that only absorbed an empty project's words does not out-match a sibling project that
+    has its own work; `folded` marks a score taken from below, which `strong` never trusts."""
+    by_rel = {s.cand.rel.lower(): s for s in scored}
+    for s in sorted(scored, key=lambda s: -s.cand.depth):  # deepest first, so a chain folds all the way up
+        rel = s.cand.rel.lower()
+        if s.cand.stats.sessions or rel not in by_rel:
+            continue
+        anc = _parent(rel)
+        while anc and (organisational(anc) or anc not in by_rel):
+            anc = "" if organisational(anc) else _parent(anc)
+        if not anc:
+            continue
+        a, s = by_rel[anc], by_rel.pop(rel)
+        by_rel[anc] = Scored(a.cand, max(a.score, s.score), a.matched, a.weights,
+                             folded=a.folded or s.score > a.score)
+    return list(by_rel.values())
+
+
+def _prefer_used(scored: list[Scored], k: int) -> list[Scored]:
+    """The best `k`, where a zero-session folder is kept only when it scores at least as well as the best folder
+    with sessions, or to fill the slots that folders with sessions leave empty. `scored` is sorted best first."""
+    used = [s for s in scored if s.cand.stats.sessions]
+    if not used:
+        return scored[:k]
+    best = used[0].score
+    keep = [s for s in scored if s.cand.stats.sessions or s.score >= best][:k]
+    if len(keep) < k:
+        chosen = {id(s) for s in keep}
+        keep += [s for s in scored if id(s) not in chosen][:k - len(keep)]
+        keep.sort(key=_order)
+    return keep
 
 
 def _leaf_hits(s: Scored) -> int:
@@ -310,6 +358,8 @@ def strong(scored: list[Scored]) -> bool:
     top = scored[0]
     if top.cand.stats.sessions < 1:
         return False  # a folder never worked in is a guess from its name, not a project the user is continuing
+    if top.folded:
+        return False  # its best words are an empty sub-folder's, not evidence of this project's own work
     rare = [w for w in top.weights if w >= RARE_IDF]
     if len(rare) < STRONG_TOKENS or sum(rare) < STRONG_SUM:
         return False

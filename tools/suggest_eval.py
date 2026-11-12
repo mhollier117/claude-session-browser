@@ -43,7 +43,8 @@ CASES = [
     ("Keeper SSO rollout script", [("work\\clients\\bast\\Keeper", "PROJECT", False)], ""),
     ("homelab pxe boot order", [("home\\homelab\\pxe", "PROJECT", False)], ""),
     ("claude session browser launcher review",
-     [("cc\\claude_improvements\\claude-session-browser-main", "PROJECT", False)], ""),
+     [("cc\\claude_improvements\\claude-session-browser-main", "PROJECT", False),
+      ("cc\\claude_improvements\\csb-launcher", "PROJECT", False)], ""),
     ("brandito offboarding shared mailbox", [("work\\wf\\Rewst_Master_v3_Client_Offboarding_Emplo", None, "prefix"),
                                              ("work\\wf\\completion_handler_Brandito_offboarding", None, False),
                                              ("work\\clients\\brandito", None, True)], ""),
@@ -52,7 +53,8 @@ CASES = [
     # held out: never quoted in the system prompt, added after the prompt was written
     ("Huntress exclusion list update", [("work\\vendors\\huntress_exclusions", "PROJECT", False)], ""),
     ("keepit backup api paging", [("work\\vendors\\keepitapi", "PROJECT", False),
-                                  ("work\\vendors\\keepit_issues", "PROJECT", False)], ""),
+                                  ("work\\vendors\\keepit_issues", "PROJECT", False),
+                                  ("work\\rewst\\integrations\\keepit", "PROJECT", False)], ""),
     ("CA policy report for break glass accounts", [("work\\m365\\CA Policy Script", "PROJECT", False)], ""),
     ("teams migration channel mapping", [("work\\m365\\teams_migration", "PROJECT", False)], ""),
     ("traefik dashboard auth", [("home\\traefik", "PROJECT", False)], ""),
@@ -68,18 +70,44 @@ CASES = [
                                    ("work\\m365", "PLACE", False)], ""),
 ]
 # The names quoted as worked examples in the system prompt: their score is not evidence of generalisation.
+# "razer app decompile" is counted with them: it is a near-duplicate of a prompt example.
 IN_PROMPT = {"Halo ticket list sync bug", "Ninja RMM Alert Review", "razer synapse app reverse engineer",
-             "homelab pxe boot order"}
+             "homelab pxe boot order", "razer app decompile"}
 
 
 def _load_cases(path: str) -> list:
     """Extra cases from JSON: [{"name": "...", "accept": [["rel", "PROJECT"|"PLACE"|null, false|true|"prefix"]],
-    "note": "...", "in_prompt": false}]."""
+    "note": "...", "in_prompt": false}]. A bad file stops the run with one line naming the problem."""
     import json
-    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    return [(c["name"], [tuple(a) for a in c["accept"]], c.get("note", ""), bool(c.get("in_prompt", False)))
-            for c in data]
 
+    def bad(why: str):
+        raise SystemExit(f"--cases {path}: {why}")
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except OSError as e:
+        bad(f"cannot read the file ({type(e).__name__})")
+    except ValueError as e:
+        bad(f"not valid JSON ({e})")
+    if not isinstance(data, list):
+        bad("the top level must be a list of cases")
+    out = []
+    for i, c in enumerate(data, 1):
+        if not isinstance(c, dict):
+            bad(f"case {i} is not an object")
+        if not isinstance(c.get("name"), str) or not c["name"].strip():
+            bad(f"case {i} needs a non-empty string 'name'")
+        acc = c.get("accept")
+        if not isinstance(acc, list) or not acc:
+            bad(f"case {i} needs a non-empty list 'accept'")
+        for j, a in enumerate(acc, 1):
+            if not (isinstance(a, list) and len(a) == 3 and isinstance(a[0], str)
+                    and a[1] in ("PROJECT", "PLACE", None) and (isinstance(a[2], bool) or a[2] == "prefix")):
+                bad(f"case {i} accept entry {j} must be [rel, \"PROJECT\"|\"PLACE\"|null, true|false|\"prefix\"]")
+        if not isinstance(c.get("note", ""), str) or not isinstance(c.get("in_prompt", False), bool):
+            bad(f"case {i}: 'note' must be a string and 'in_prompt' a boolean")
+        out.append((c["name"], [tuple(a) for a in acc], c.get("note", ""), c.get("in_prompt", False)))
+    return out
 
 def _rel(env, path) -> str:
     rel = str(Path(path).relative_to(env.root))
@@ -152,7 +180,8 @@ def main() -> int:
             s = validate_choice(env, raw, prep, "qwen") if raw is not None else None
         kind = None
         if s is not None:
-            kind = next(c.kind for c in prep.choices if c.path == s.path)
+            # an existing child folder named by a PLACE answer is a PROJECT answer
+            kind = next((c.kind for c in prep.choices if c.path == s.path), "PROJECT")
         rel = _rel(env, s.path) if s else ""
         folder_ok, kind_ok = _accepts(accepted, rel, kind) if s else (False, False)
         if name == "SFDSDF" and s is not None:
@@ -164,7 +193,7 @@ def main() -> int:
         print(f"{i:2}. {mark}{name}" + ("   [in prompt]" if in_prompt else ""))
         if s is not None:
             print(f"      qwen  {ms:5} ms {usage} tok -> {kind} {rel}" + (f" + {s.new_folder}" if s.new_folder else "")
-                  + f"  [{s.confidence}] {s.reason[:110]}")
+                  + (" (needs a name)" if s.needs_name else "") + f"  [{s.confidence}] {s.reason[:110]}")
         else:
             print(f"      qwen  {ms:5} ms INVALID {err or ''} raw={str(raw_text)[:160]!r}")
         if top is not None:
