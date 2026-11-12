@@ -83,6 +83,32 @@ def fit(text: str | None, width: int) -> str:
     return text + " " * max(0, width - get_cwidth(text))
 
 
+def wrap_items(text: str, width: int, sep: str = " · ") -> list[str]:
+    """`text` (items joined by `sep`) broken into lines of at most `width` cells, only between items; an item wider
+    than the line on its own is cut. Shared by the resume list and the new-session footers."""
+    lines: list[str] = []
+    cur = ""
+    for item in text.split(sep):
+        joined = f"{cur}{sep}{item}" if cur else item
+        if cur and get_cwidth(joined) > width:
+            lines.append(cur)
+            cur = item
+        else:
+            cur = joined
+    lines.append(cur)
+    return [fit(x, width).rstrip() for x in lines]
+
+
+def footer_lines(width: int) -> list[str]:
+    """The key help wrapped to `width` (one to three lines)."""
+    return wrap_items(KEYS, max(1, width))
+
+
+def chrome_rows(width: int, status: bool = False) -> int:
+    """Screen lines around the session rows: header, two rules, the footer lines and the optional status line."""
+    return 3 + len(footer_lines(width)) + (1 if status else 0)
+
+
 def _loc_width(width: int) -> int:
     return max(_MIN_LOC_W, width - _FIXED)
 
@@ -114,7 +140,7 @@ def render_rows(rows: list[Row], width: int, now: float, selected: int, *, root:
         ("class:header", f"{fit('when', AGE_W)} {fit('session', NAME_W)} {fit('location', loc_w)} "
                          f"{fit('tool', TOOL_W)} {fit('', LIVE_W)}"), ("", "\n"),
         ("class:rule", _RULE * width), ("", "\n")]
-    chrome = 5 if status else 4
+    chrome = chrome_rows(width, bool(status))
     visible = len(rows) if height is None else max(1, height - chrome)
     first = scroll_top(top, selected, visible) if height is not None else 0
     shown = rows[first:first + visible]
@@ -131,7 +157,11 @@ def render_rows(rows: list[Row], width: int, now: float, selected: int, *, root:
                   (base + "class:live", fit("live" if row.live_pid else "", LIVE_W)), ("", "\n")]
     if height is not None:  # keep the footer at the bottom of the screen
         frags += [("", "\n")] * (visible - max(1, len(shown)))
-    frags += [("class:rule", _RULE * width), ("", "\n"), ("class:footer", KEYS)]
+    frags += [("class:rule", _RULE * width), ("", "\n")]
+    for n, text in enumerate(footer_lines(width)):
+        if n:
+            frags.append(("", "\n"))
+        frags.append(("class:footer", text))
     if status:
         frags += [("", "\n"), ("class:status", status)]
     return frags

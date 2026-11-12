@@ -31,7 +31,7 @@ class FakeRunner:
 
 
 def _enc(argv):
-    return bridge.encoded_command(bridge.ps_command(argv))
+    return bridge.encoded_command(bridge.CHILD_SESSION_PREFIX + bridge.ps_command(argv))
 
 
 def _settled(api, force=False):
@@ -250,7 +250,7 @@ def test_launcher_new_launches_wt_with_name_argv(fake_env, api):
     [(argv, _kw)] = api.popens
     assert argv[:9] == ["wt", "-w", "0", "nt", "-d", str(net), "pwsh", "-NoExit", "-EncodedCommand"]
     command = base64.b64decode(argv[9]).decode("utf-16-le")
-    assert command.startswith("& 'clauded' '-n' 'it''s a \"test\" $x; `y' '--session-id' '")
+    assert command.startswith(bridge.CHILD_SESSION_PREFIX + "& 'clauded' '-n' 'it''s a \"test\" $x; `y' '--session-id' '")
     sid = command.rsplit("'", 2)[1]
     launched = json.loads((fake_env.data_dir / LAUNCHED_FILE).read_text(encoding="utf-8"))
     assert launched == {f"claude:{sid}": "clauded"}

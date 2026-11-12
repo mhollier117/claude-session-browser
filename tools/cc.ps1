@@ -45,10 +45,21 @@ function cc {
     foreach ($w in @($j.warnings)) { if ($w) { Write-Warning $w } }
     try { Set-Location -LiteralPath $j.cd -ErrorAction Stop } catch { Write-Error $_; return }  # never resume elsewhere
     $run = @($j.run)
-    if ($run.Count -gt 1) {
-        $rest = $run[1..($run.Count - 1)]  # splat a variable: @(...) inline would pass one array argument
-        & $run[0] @rest
-    } else {
-        & $run[0]
+    # A launched session must not look like a child of another Claude session (it would not save its transcript):
+    # clear the marker and force persistence for the wrapper only, then put this shell's own values back.
+    $prevChild = $env:CLAUDE_CODE_CHILD_SESSION
+    $prevForce = $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE
+    $env:CLAUDE_CODE_CHILD_SESSION = $null
+    $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = '1'
+    try {
+        if ($run.Count -gt 1) {
+            $rest = $run[1..($run.Count - 1)]  # splat a variable: @(...) inline would pass one array argument
+            & $run[0] @rest
+        } else {
+            & $run[0]
+        }
+    } finally {
+        $env:CLAUDE_CODE_CHILD_SESSION = $prevChild
+        $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = $prevForce
     }
 }

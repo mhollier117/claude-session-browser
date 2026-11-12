@@ -1,6 +1,7 @@
 """The new-session walk: a pure state machine (`NewFlow`) and its renderer (`render_new`).
 
-Steps, in order: name → picker → folder name → kind → wrapper → GitHub account (project only) → done. The picker
+Steps, in order: name → picker → folder name → kind (new folders) → confirm (wrapper, and GitHub for a new project,
+preselected from `defaults`; `w` and `g` cycle them in place) → done. The picker
 walks the tree one level at a time; each level lists up to three suggestion rows (the model's answer `★` once it
 arrives, then the ranked alternatives `≈`), its child folders with session stats (most recent first, folded past
 `FOLD_AT`), `● start here` (not at the root) and `+ new folder here…`. Typed text filters the children and is
@@ -15,21 +16,22 @@ from pathlib import Path
 
 from prompt_toolkit.utils import get_cwidth
 
-from .. import flowlog
+from .. import defaults, flowlog
 from ..display import age, rel_or_abs
 from ..index import FolderStats, Index
-from ..launch import WRAPPERS, Launch, default_wrapper, new_command
+from ..launch import WRAPPERS, Launch, new_command
 from ..paths import Env
 from ..scaffold import Runner, check_name, create_folder
 from ..suggest import Pending, Suggestion, default_http, log_outcome, suggest
 from ..tree import Child, children, folder_stats_map, new_folder_kind_options, resolve_fragment, slug
-from .resume import fit
+from .resume import fit, wrap_items
 
 _KIND_LABELS = {"project": ("a project", "start the session in it · git init · .claude-project · plan.md"),
                 "container": ("a container", "a grouping folder only · then keep choosing inside it"),
                 "client": ("a client", "writes a CLAUDE.md stub naming the client"),
                 "organisational": ("organisational", "a grouping folder")}
-_GITHUB = (("personal", "personal", "mhollier117"), ("work", "work", "mhollierBPT"))
+_FOLDER_TEXT = {"project": "new project", "container": "new container", "client": "new client",
+                "organisational": "new folder"}
 _SEP = " › "
 _NAME_COL = 28
 FOLD_AT = 12  # a level with more children shows this many and a `… N more` row
@@ -40,6 +42,7 @@ PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspa
 HIDDEN_HINT = "suggestions hidden while filtering · backspace to clear"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
+CONFIRM_KEYS = "enter launch · w wrapper · g github · esc back · ctrl-c cancel"
 
 
 def _tools(rows) -> dict[tuple[str, ...], str]:
@@ -65,22 +68,6 @@ def _recent_first(c: Child) -> tuple:
     """Children by last activity, newest first; folders with no session last, alphabetical."""
     last = c.stats.last_activity if c.stats.sessions else None
     return (last is None, -(last or 0.0), c.name.lower())
-
-
-def wrap_items(text: str, width: int, sep: str = " · ") -> list[str]:
-    """`text` (items joined by `sep`) broken into lines of at most `width` cells, only between items; an item wider
-    than the line on its own is cut."""
-    lines: list[str] = []
-    cur = ""
-    for item in text.split(sep):
-        joined = f"{cur}{sep}{item}" if cur else item
-        if cur and get_cwidth(joined) > width:
-            lines.append(cur)
-            cur = item
-        else:
-            cur = joined
-    lines.append(cur)
-    return [fit(x, width).rstrip() for x in lines]
 
 
 class NewFlow:
@@ -116,8 +103,8 @@ class NewFlow:
         self._picker_key: tuple[str, str, str] | None = None  # the picker row last entered (restored by esc)
         self.new_name: str | None = None  # None: start here (no new folder)
         self.new_kind: str | None = None
-        self.wrapper: str | None = None
-        self.github: str | None = None
+        self.wrapper: str | None = None  # the confirm step's choices (preselected from `defaults`)
+        self.github: str | None = None  # personal | work | none; only a new project has one
         self.cwd: Path | None = None
         self.session_id: str | None = None
         self.warnings: list[str] = []
@@ -394,13 +381,11 @@ class NewFlow:
             self._back_to_picker()
         elif self.step == "kind":
             self._to_folder_name(self.new_name or "")
-        elif self.step == "wrapper":
+        elif self.step == "confirm":
             if self.new_name is None:  # start here
                 self._back_to_picker()
-            else:  # a project: back to its kind
+            else:  # a new project: back to its kind
                 self._to_kind()
-        elif self.step == "github":
-            self._to_wrapper()
 
     # ---- enter ------------------------------------------------------------------------------------------------------
 
@@ -415,12 +400,12 @@ class NewFlow:
             self._enter_picker()
         elif self.step == "folder_name":
             self.submit_folder_name(self.text)
-        elif self.step in ("kind", "wrapper", "github"):
+        elif self.step == "kind":
             opts = self.options()
             if opts:
-                value = opts[self.selected][0]
-                {"kind": self.choose_kind, "wrapper": self.choose_wrapper, "github": self.choose_github}[self.step](
-                    value)
+                self.choose_kind(opts[self.selected][0])
+        elif self.step == "confirm":
+            self._create()
 
     def _enter_picker(self) -> None:
         if not self.rows:
@@ -445,7 +430,7 @@ class NewFlow:
             self.selected = min(at, len(self.rows) - 1)  # the first child that was folded away
         elif kind == "start":
             self.new_name = self.new_kind = None
-            self._to_wrapper()
+            self._to_confirm()
         else:
             self._new_source = kind
             if kind == "new":
@@ -497,7 +482,7 @@ class NewFlow:
         self.new_kind = kind
         self._log("kind", value=kind, name=self.new_name)
         if kind == "project":
-            self._to_wrapper()
+            self._to_confirm()
         else:  # a container or client is a grouping folder: create it and keep walking inside it
             self._walk_into_new()
 
@@ -512,36 +497,53 @@ class NewFlow:
     def target(self) -> Path:
         return self.folder / self.new_name if self.new_name else self.folder
 
-    def _to_wrapper(self) -> None:
-        self.step = "wrapper"
-        values = [v for v, _l, _h in self._wrapper_options()]
-        want = self.wrapper or default_wrapper(self.env.root, self.target())
-        self.selected = values.index(want) if want in values else 0
+    def _to_confirm(self) -> None:
+        """The one step before a launch: wrapper (and GitHub for a new project) preselected from the bucket's
+        remembered choices; `w` and `g` change them."""
+        d = defaults.get(self.env, self.target())
+        self.step = "confirm"
+        self.error = ""
+        self.wrapper = d.wrapper
+        self.github = d.github if self._new_project() else None
+
+    def _new_project(self) -> bool:
+        return bool(self.new_name) and self.new_kind == "project"
 
     def _wrapper_options(self) -> list[tuple[str, str, str]]:
         # the Claude wrappers, then qwen as the other tool
         return [(w, w, "") for w in WRAPPERS if w != "qwen"] + [("qwen", "qwen", "the Qwen Code tool")]
 
     def choose_wrapper(self, wrapper: str) -> None:
+        """Set the wrapper on the confirm step (the launch happens on enter)."""
         if wrapper not in WRAPPERS:
             raise ValueError(f"unknown wrapper: {wrapper!r}")
         self.wrapper = wrapper
-        if self.new_name and self.new_kind == "project":
-            self.step = "github"
-            self.selected = [v for v, _l, _h in _GITHUB].index(self.github or "personal")
-        else:
-            self._create()
 
     def choose_github(self, account: str) -> None:
-        if account not in ("personal", "work"):
+        """Set the GitHub choice on the confirm step: personal, work or none (git init only)."""
+        if account not in defaults.GITHUB_CHOICES:
             raise ValueError(f"unknown GitHub account: {account!r}")
         self.github = account
-        self._create()
+
+    def cycle_wrapper(self) -> None:
+        """`w`: the next wrapper, in the order of the old wrapper step."""
+        values = [v for v, _l, _h in self._wrapper_options()]
+        now = values.index(self.wrapper) if self.wrapper in values else -1
+        self.wrapper = values[(now + 1) % len(values)]
+
+    def cycle_github(self) -> None:
+        """`g`: personal -> work -> none -> personal; only for a new project (otherwise nothing is created)."""
+        if not self._new_project():
+            return
+        values = defaults.GITHUB_CHOICES
+        now = values.index(self.github) if self.github in values else -1
+        self.github = values[(now + 1) % len(values)]
 
     def creating(self) -> Path | None:
         """The folder `enter` is about to create on this step (so the app can say so before git/gh block it)."""
-        if self.step == "github" or (self.step == "kind" and self.options()
-                                     and self.options()[self.selected][0] != "project"):
+        if self.step == "confirm" and self.new_name:
+            return self.target()
+        if self.step == "kind" and self.options() and self.options()[self.selected][0] != "project":
             return self.target()
         if self.step == "folder_name" and self._kind_values() == ["organisational"] \
                 and not self._name_problem(self.text.strip()):
@@ -552,7 +554,7 @@ class NewFlow:
         """`create_folder` for the pending new folder; on failure back to the folder-name step with the error."""
         try:
             created = create_folder(self.folder, self.new_name, self.new_kind, self.name, runner=self.runner,
-                                    github=self.github if self.new_kind == "project" else None)
+                                    github=self.github if self.github in ("personal", "work") else None)
         except (ValueError, OSError) as e:
             self.error = str(e) if isinstance(e, ValueError) else f"could not create the folder: {e}"
             self._to_folder_name(self.new_name)
@@ -579,6 +581,10 @@ class NewFlow:
             self.cwd = self.folder
         self.session_id = str(uuid.uuid4())
         self.step = "done"
+        try:
+            defaults.remember(self.env, self.cwd, self.wrapper, self.github if self._new_project() else None)
+        except (OSError, ValueError) as e:
+            self.warnings.append(f"could not remember the choices: {e}")
         self._log("launch", folder_kind=self.new_kind, new_folder=self.new_name, wrapper=self.wrapper, github=self.github,
                   cwd=self._rel(self.cwd))
         log_outcome(self.env, self.name, self.suggestion_in_effect(), self.folder, self.new_name)
@@ -593,28 +599,27 @@ class NewFlow:
     # ---- option steps -----------------------------------------------------------------------------------------------
 
     def options(self) -> list[tuple[str, str, str]]:
-        """(value, label, hint) for the kind, wrapper and GitHub steps; [] elsewhere."""
+        """(value, label, hint) for the kind step; [] elsewhere."""
         if self.step == "kind":
             return [(k, *_KIND_LABELS[k]) for k in self._kind_values()]
-        if self.step == "wrapper":
-            return self._wrapper_options()
-        if self.step == "github":
-            return list(_GITHUB)
         return []
+
+    def command_text(self) -> str:
+        """`cd <folder> ; <wrapper> -n "<name>" ...`: exactly what the launch runs (same flags as `new_command`)."""
+        argv = new_command(self.target(), self.name, self.wrapper or "").argv
+        run = " ".join(f'"{a}"' if a == self.name and i == 2 else a for i, a in enumerate(argv))
+        return f"cd {self.target()} ; {run}"
 
     def summary(self) -> list[str]:
         """The `→ mkdir …` / `→ cd … ; <wrapper> -n "…"` lines for what will run."""
         lines = []
         if self.new_name:
             extra = " ; git init ; plan.md" if self.new_kind == "project" else ""
-            if self.new_kind == "project" and self.github:
+            if self.new_kind == "project" and self.github in ("personal", "work"):
                 extra += f" ; GitHub ({self.github})"
             lines.append(f"→ mkdir {self.target()}{extra}")
-        if self.step in ("wrapper", "github", "done"):
-            wrapper = self.options()[self.selected][0] if self.step == "wrapper" else self.wrapper
-            argv = new_command(self.target(), self.name, wrapper).argv  # the same flags the launch will use
-            run = " ".join(f'"{a}"' if a == self.name and i == 2 else a for i, a in enumerate(argv))
-            lines.append(f"→ cd {self.target()} ; {run}")
+        if self.step in ("confirm", "done"):
+            lines.append(f"→ {self.command_text()}")
         return lines
 
 
@@ -645,6 +650,9 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
         _render_picker(flow, width, height, line)
         return frags
     new_folder = flow.new_name is not None or flow.step in ("folder_name", "kind")
+    if flow.step == "confirm":
+        _render_confirm(flow, width, line)
+        return frags
     line(("class:title", flow.breadcrumb()), ("class:dim", "  ·  new folder here" if new_folder else "  ·  start here"))
     line()
     if flow.step == "folder_name":
@@ -656,8 +664,7 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
         return frags
     if flow.new_name and flow.step != "kind":
         line(("class:title", "Folder name: "), ("", flow.new_name), ("class:dim", f"  ({flow.new_kind})"))
-    title = {"kind": "What is it?", "wrapper": "Launch with", "github": "GitHub account"}.get(flow.step, "")
-    line(("class:title", title))
+    line(("class:title", "What is it?"))
     opts = flow.options()
     label_w = max((len(lbl) for _v, lbl, _h in opts), default=0) + 2
     for i, (_v, label, hint) in enumerate(opts):
@@ -671,6 +678,38 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
         line(("class:live", s))
     line(("class:footer", OPTION_KEYS))
     return frags
+
+
+def _hanging(text: str, width: int, indent: int) -> list[str]:
+    """`text` cut into lines of at most `width` cells; the continuation lines are indented by `indent`."""
+    out: list[str] = []
+    cur, used = " " * indent, indent
+    for ch in text:
+        w = get_cwidth(ch)
+        if used + w > width:
+            out.append(cur)
+            cur, used = " " * indent, indent
+        cur += ch
+        used += w
+    out.append(cur)
+    return out
+
+
+def _render_confirm(flow: NewFlow, width: int, line) -> None:
+    """The confirm step: where, what is created, wrapper, GitHub (new project only) and the exact command."""
+    line(("class:title", flow.crumb(flow.target())))
+    new = flow.new_name is not None
+    what = _FOLDER_TEXT.get(flow.new_kind or "", "new folder") if new else "existing"
+    line(("class:dim", "folder   "), ("class:name", what), ("", f"   {flow.new_name}" if new else ""))
+    line(("class:dim", "wrapper  "), ("class:name", flow.wrapper or ""), ("class:dim", "   (w to change)"))
+    if flow.new_kind == "project" and new:
+        line(("class:dim", "github   "), ("class:name", flow.github or "none"), ("class:dim", "   (g to change)"))
+    for n, text in enumerate(_hanging(flow.command_text(), max(10, width), 9)):
+        line(*([("class:dim", "runs     ")] if n == 0 else []), ("class:live", text[9:] if n == 0 else text))
+    if flow.error:
+        line(("class:status", flow.error))
+    line()
+    line(("class:footer", CONFIRM_KEYS))
 
 
 def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:

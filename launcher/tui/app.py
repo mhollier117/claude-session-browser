@@ -27,7 +27,7 @@ from prompt_toolkit.widgets import TextArea
 from ..index import Index
 from ..paths import Env
 from .preview import FOOTER as PREVIEW_FOOTER
-from .resume import FOCUSED, NEW, Resume, ResumeState, render_rows, scroll_top
+from .resume import FOCUSED, NEW, Resume, ResumeState, chrome_rows, render_rows, scroll_top
 
 if TYPE_CHECKING:  # imported where used, so the resume list does not pay for the new-session modules
     from ..launch import Launch
@@ -111,7 +111,7 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
         return app.output.get_size()
 
     def chrome() -> int:
-        return 5 if state.footer_status() else 4
+        return chrome_rows(size().columns, bool(state.footer_status()))
 
     def list_fragments():
         s = size()
@@ -260,7 +260,7 @@ POLL_S = 0.25  # how often the picker looks for the model's suggestion
 def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Application:
     """Draw `render_new(flow)` and route keys to it; a 250 ms timer shows the model's suggestion via `flow.poll`
     (it never blocks: `Pending.wait(0)`, and never moves the picker). Exits with the flow's `Launch`, or None on
-    ctrl-c (or q on a choice step; in the picker q is a filter character), which the flow logs as a cancel."""
+    ctrl-c (or q on the kind step; in the picker q is a filter character, on the confirm step q does nothing), which the flow logs as a cancel."""
     from .new import render_new
     kb = KeyBindings()
     texty = Condition(lambda: flow.step in ("name", "folder_name"))
@@ -335,7 +335,12 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
             flow.error = ""
         elif flow.step == "picker":  # every printable key filters, q included (folder names start with q too)
             flow.type_filter(flow.filter + ch)
-        elif ch == "q":  # the kind, wrapper and GitHub choices have no text to type
+        elif flow.step == "confirm":  # w and g cycle the choices; q does not cancel here (ctrl-c does)
+            if ch.lower() == "w":
+                flow.cycle_wrapper()
+            elif ch.lower() == "g":
+                flow.cycle_github()
+        elif ch == "q":  # the kind choice has no text to type
             flow.cancel()
             event.app.exit(result=None)
 

@@ -8,7 +8,8 @@ from launcher import cli
 from launcher.index import Index, Row
 from launcher.launch import Launch, resume_command
 from launcher.tui.preview import render_preview
-from launcher.tui.resume import FOCUSED, KEYS, NEW, Resume, ResumeState, render_rows, scroll_top
+from launcher.tui.resume import (FOCUSED, KEYS, NEW, Resume, ResumeState, chrome_rows, footer_lines, render_rows,
+                                 scroll_top)
 from launcher_helpers import write_claude_session, write_qwen_session
 
 NOW = 1_700_000_000.0
@@ -67,8 +68,11 @@ def test_render_rows_columns_and_ellipsis(fake_env):
     assert second[5:33] == "n" * 27 + "…"
     assert second[34:34 + loc_w].rstrip() == r"work\…\a_rather_long_folder\stackjack_rip_qwen"
     assert second[34 + loc_w + 1:].rstrip() == "qwen"
-    assert lines[-1] == KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · "
-                                 "ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
+    assert KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · "
+                    "ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
+    assert lines[-2:] == footer_lines(WIDTH) == [
+        "↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · ctrl-o folder · ctrl-w wrapper",
+        "ctrl-q quit"]  # wrapped between items, as the picker footer is
 
 
 def test_render_rows_middle_ellipsis_on_narrow_terminal(fake_env):
@@ -98,9 +102,29 @@ def test_render_rows_window_and_status(fake_env):
     lines = _lines(render_rows(rows, WIDTH, NOW, 30, root=fake_env.root, top=25, height=12,
                                status="filter: ro"))
     body = [l for l in lines if l.startswith("now")]
-    assert len(body) == 12 - 5  # header, rule, rule, keys, status
+    assert len(body) == 12 - 6  # header, rule, rule, two key lines, status
+    assert chrome_rows(WIDTH, True) == 6
     assert "row 25" in body[0] and "▶ row 30" in body[5]
     assert lines[-1] == "filter: ro"
+
+
+@pytest.mark.parametrize("width, lines", [(120, 1), (100, 2), (60, 2), (40, 4)])
+def test_footer_wraps_between_items_and_loses_none(width, lines):
+    from prompt_toolkit.utils import get_cwidth
+    footer = footer_lines(width)
+    assert len(footer) == lines and all(get_cwidth(x) <= width for x in footer)
+    assert " · ".join(footer) == KEYS  # every item survives, in order, whole
+    assert chrome_rows(width) == 3 + lines
+
+
+@pytest.mark.parametrize("width", [120, 100, 60, 40])
+def test_footer_does_not_push_the_list_off_the_screen(fake_env, width):
+    rows = [make_row(sid=str(i), display_name=f"row {i}") for i in range(50)]
+    for height in (12, 20):
+        for status in ("", "filter: ro"):
+            lines = _lines(render_rows(rows, width, NOW, 49, root=fake_env.root, top=0, height=height, status=status))
+            assert len(lines) == height  # header, rules, footer lines, status and the visible rows fill the screen
+            assert "▶ row 49" in "".join(lines)  # the selection stays visible whatever the footer takes
 
 
 def test_render_rows_empty_list(fake_env):

@@ -20,6 +20,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import defaults
 from .index import Index, Row, remember_launch
 from .launch import WRAPPERS, Launch, default_wrapper, new_command
 from .paths import Env
@@ -29,7 +30,9 @@ from .tree import children, new_folder_kind_options
 
 SUGGEST_TTL_S = 60.0
 MODEL_IDLE_S = 1.5  # the browser starts the model stages only once the name has been left alone this long
-GITHUB_ACCOUNTS = (None, "personal", "work")
+GITHUB_ACCOUNTS = (None, "personal", "work", "none")  # None and "none": no GitHub repo, git init only
+# every browser launch clears the child-session marker and forces transcript persistence (see ps_command's caller)
+CHILD_SESSION_PREFIX = "$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; "
 _PS_QUOTES = "'‘’‚‛"  # PowerShell treats the typographic single quotes as `'` too
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -66,9 +69,9 @@ def wt_argv(cwd: Path, argv: list[str], shell: str) -> list[str]:
 
 
 def console_argv(argv: list[str], shell: str) -> list[str]:
-    """`shell` running `argv` and staying open; also the whole command for a new console window (when Windows
+    """`shell` running `argv` (after clearing the child-session marker) and staying open; also the whole command for a new console window (when Windows
     Terminal is not installed), run with cwd set."""
-    return [shell, "-NoExit", "-EncodedCommand", encoded_command(ps_command(argv))]
+    return [shell, "-NoExit", "-EncodedCommand", encoded_command(CHILD_SESSION_PREFIX + ps_command(argv))]
 
 
 # ---- paths ----------------------------------------------------------------------------------------------------------
@@ -131,6 +134,7 @@ def children_listing(env: Env, index: Index, folder: Path) -> dict:
         "start_here": folder != env.root,
         "kind_options": new_folder_kind_options(env.root, folder),
         "default_wrapper": default_wrapper(env.root, folder),
+        "defaults": asdict(defaults.get(env, folder)),  # {wrapper, github}: what the dialog preselects here
     }
 
 
@@ -199,7 +203,7 @@ def prepare_new(env: Env, payload, runner: Runner | None = None, session_id: str
         cwd, created, warnings = req.folder, False, []
         if req.new_folder is not None:
             made = create_folder(req.folder, req.new_folder, req.kind, req.name, runner=runner,
-                                 github=req.github if req.kind == "project" else None)
+                                 github=req.github if req.kind == "project" and req.github != "none" else None)
             cwd, created, warnings = made.path, True, list(made.warnings)
     except ValueError as e:
         return {"ok": False, "error": str(e)}, None
@@ -214,6 +218,10 @@ def prepare_new(env: Env, payload, runner: Runner | None = None, session_id: str
             remember_launch(env.data_dir, "qwen" if req.wrapper == "qwen" else "claude", sid, req.wrapper)
     except OSError as e:
         warnings.append(f"could not remember the wrapper: {e}")
+    try:  # the bucket's next dialog preselects these; GitHub only changes when a project was created
+        defaults.remember(env, cwd, req.wrapper, (req.github or "none") if created and req.kind == "project" else None)
+    except (OSError, ValueError) as e:
+        warnings.append(f"could not remember the choices: {e}")
     launch = new_command(cwd, req.name, req.wrapper, session_id=sid)
     warnings.extend(launch.warnings)
     return {**result, "launched": True}, launch

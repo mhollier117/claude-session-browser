@@ -201,7 +201,7 @@ def test_new_folder_deep_asks_project_or_container_default_project(fake_env, ind
     assert [(v, label) for v, label, _ in flow.options()] == [("project", "a project"), ("container", "a container")]
     assert flow.selected == 0
     flow.enter()
-    assert flow.new_kind == "project" and flow.step == "wrapper"
+    assert flow.new_kind == "project" and flow.step == "confirm"
 
 
 def test_bad_folder_name_is_shown_inline(fake_env, index):
@@ -280,7 +280,7 @@ def test_suggestion_ignored_after_the_picker(fake_env, index):
     _go(flow, fake_env.root / "home")
     _pick(flow, "start")
     flow.apply_suggestion(Suggestion(fake_env.root / "work" / "net", None, "high", "late", "qwen"))
-    assert flow.step == "wrapper" and flow.folder == fake_env.root / "home" and flow.offered is None
+    assert flow.step == "confirm" and flow.folder == fake_env.root / "home" and flow.offered is None
 
 
 def test_slash_fragment_resolves_from_the_root(fake_env, index):
@@ -352,19 +352,24 @@ def test_filter_back_and_esc(fake_env, index):
 
 # ---- wrapper, github, result -------------------------------------------------------------------------------------
 
-def test_wrapper_options_and_default_per_area(fake_env, index):
+def test_confirm_preselects_the_wrapper_per_area_and_w_cycles_in_order(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("tooling")
     _go(flow, fake_env.root / "cc")
     _pick(flow, "start")
-    assert flow.step == "wrapper"
-    values = [v for v, _l, _h in flow.options()]
-    assert values == ["claude", "clauded", "claude6", "claudeb", "claudew", "qwen"]
-    assert values[flow.selected] == "claude"
+    assert flow.step == "confirm" and flow.wrapper == "claude" and flow.github is None
+    seen = [flow.wrapper]
+    for _ in range(6):
+        flow.cycle_wrapper()
+        seen.append(flow.wrapper)
+    assert seen == ["claude", "clauded", "claude6", "claudeb", "claudew", "qwen", "claude"]
+    flow.cycle_github()  # start here creates nothing: there is no GitHub choice to cycle
+    assert flow.github is None
     flow.esc()
+    assert flow.step == "picker"
     _go(flow, fake_env.root / "home")
     _pick(flow, "start")
-    assert [v for v, _l, _h in flow.options()][flow.selected] == "clauded"
+    assert flow.wrapper == "clauded"
 
 
 def test_result_launch_start_here(fake_env, index):
@@ -373,6 +378,7 @@ def test_result_launch_start_here(fake_env, index):
     _go(flow, fake_env.root / "work" / "net")
     _pick(flow, "start")
     flow.choose_wrapper("claudeb")
+    flow.enter()
     assert flow.step == "done"
     launch = flow.result()
     assert launch.cwd == fake_env.root / "work" / "net"
@@ -387,11 +393,9 @@ def test_result_launch_for_new_project(fake_env, index):
     _go(flow, fake_env.root / "work" / "clients" / "bast" / "bifrost")
     _pick(flow, "new")
     flow.choose_new_folder("bifrost_api_v2", "project")
-    assert flow.step == "wrapper"
-    flow.choose_wrapper("clauded")
-    assert flow.step == "github"
-    assert [v for v, _l, _h in flow.options()] == ["personal", "work"] and flow.selected == 0
-    flow.choose_github("personal")
+    assert flow.step == "confirm" and (flow.wrapper, flow.github) == ("clauded", "personal")
+    assert not any(c[0] == "gh" for c in runner.calls)  # nothing is created before enter
+    flow.enter()
     assert flow.step == "done"
     target = fake_env.root / "work" / "clients" / "bast" / "bifrost" / "bifrost_api_v2"
     launch = flow.result()
@@ -410,6 +414,7 @@ def test_result_carries_scaffold_warnings(fake_env, index):
     flow.choose_new_folder("proj_x", "project")
     flow.choose_wrapper("clauded")
     flow.choose_github("personal")
+    flow.enter()
     launch = flow.result()
     assert any("git init failed" in w for w in launch.warnings)
 
@@ -431,6 +436,7 @@ def test_container_is_created_and_the_walk_continues_inside(fake_env, index):
     flow.choose_new_folder("inner", "project")
     flow.choose_wrapper("clauded")
     flow.choose_github("personal")
+    flow.enter()
     assert flow.result().cwd == group / "inner"
     assert not (group / ".git").exists() and not (group / "plan.md").exists()
 
@@ -444,6 +450,7 @@ def test_container_then_start_here_launches_in_it(fake_env, index):
     flow.choose_new_folder("group_y", "container")
     _pick(flow, "start")
     flow.choose_wrapper("clauded")
+    flow.enter()
     assert flow.result().cwd == fake_env.root / "home" / "group_y"
     assert not [c for c in runner.calls if c[0] in ("git", "gh")]
 
@@ -457,6 +464,7 @@ def test_folder_taken_at_create_returns_to_name_prompt(fake_env, index):
     (fake_env.root / "home" / "late").mkdir()  # someone else made it meanwhile
     flow.choose_wrapper("clauded")
     flow.choose_github("personal")
+    flow.enter()
     assert flow.step == "folder_name" and flow.error and flow.result() is None
     flow.submit_folder_name("late2")
     (fake_env.root / "home" / "late2").mkdir()
@@ -472,9 +480,9 @@ def test_summary_matches_the_launch_flags(fake_env, index):
     _pick(flow, "start")
     target = fake_env.root / "work" / "net"
     assert flow.summary() == [f'→ cd {target} ; clauded -n "net stuff"']
-    flow.selected = [v for v, _l, _h in flow.options()].index("qwen")
-    assert flow.summary() == [f"→ cd {target} ; qwen"]  # Qwen Code has no -n
     flow.choose_wrapper("qwen")
+    assert flow.summary() == [f"→ cd {target} ; qwen"]  # Qwen Code has no -n
+    flow.enter()
     assert flow.result().argv[:2] == ["qwen", "--session-id"]
 
 
@@ -735,6 +743,7 @@ def test_flow_log_and_outcome_for_a_typed_new_project(fake_env, index):
     flow.enter()  # project
     flow.choose_wrapper("clauded")
     flow.choose_github("personal")
+    flow.enter()
     assert flow.step == "done"
     events = _flowlog(fake_env)
     assert [e["event"] for e in events if e["event"] != "open"] == [
@@ -761,6 +770,7 @@ def test_outcome_uses_the_local_suggestion_before_a_model_answer(fake_env, index
     _go(flow, r / "home")
     _pick(flow, "start")
     flow.choose_wrapper("clauded")
+    flow.enter()
     out = _outcomes(fake_env)
     assert len(out) == 1 and out[0]["suggested"] == "work\\halo" and out[0]["chosen"] == "home"
     assert out[0]["new_folder"] is None and out[0]["match"] is False
@@ -819,8 +829,7 @@ def test_esc_back_to_the_picker_restores_the_row_the_user_left_from(fake_env, in
     flow.esc()
     assert flow.step == "picker" and flow.rows[flow.selected][0] == "new"
     _pick(flow, "start")
-    assert flow.step == "wrapper"
-    flow.selected = 0
+    assert flow.step == "confirm"
     flow.esc()
     assert flow.step == "picker" and flow.rows[flow.selected][0] == "start"
 
@@ -941,12 +950,13 @@ def test_cursor_goes_to_the_first_match_on_every_filter_keystroke(fake_env, inde
     assert on() == ("child", "beta")
 
 
-def test_q_on_a_choice_step_logs_one_cancel(fake_env, index):
+def test_q_on_the_kind_step_logs_one_cancel(fake_env, index):
     flow, _p = _flow_with(fake_env, index)
     flow.start("x")
-    _go(flow, fake_env.root / "home")
-    _pick(flow, "start")
-    assert flow.step == "wrapper"
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "new")
+    flow.enter()  # the folder name: the session-name slug
+    assert flow.step == "kind"
     assert _run_keys(flow, "q") is None
     assert [e["event"] for e in _flowlog(fake_env)].count("cancel") == 1
 
@@ -1002,6 +1012,7 @@ def test_cli_new_joins_name_words_and_writes_sidecar(fake_env, index, capsys):
         _go(flow, env.root / "home")
         _pick(flow, "start")
         flow.choose_wrapper("claudew")
+        flow.enter()
         return flow.result()
 
     assert cli.main(["new", "pxe", "boot", "order"], env=fake_env, index=index, new_app=new_app) == 0
@@ -1031,3 +1042,196 @@ def test_cli_n_from_resume_list_runs_new_flow(fake_env, index, capsys):
                     new_app=lambda e, i, name: launch) == 0
     assert json.loads(capsys.readouterr().out)["run"][0] == "qwen"
     assert json.loads((fake_env.data_dir / "launched.json").read_text(encoding="utf-8")) == {"qwen:q-1": "qwen"}
+
+
+# ---- the confirm step (round 2, task 4) ---------------------------------------------------------------------------
+
+CONFIRM_KEYS = "enter launch · w wrapper · g github · esc back · ctrl-c cancel"
+
+
+def _text(flow, width=100, height=30):
+    return "".join(t for _s, t in render_new(flow, width, height))
+
+
+def _to_new_project(flow, parent, name="export_job"):
+    _go(flow, parent)
+    _pick(flow, "new")
+    flow.choose_new_folder(name, "project")
+    assert flow.step == "confirm"
+
+
+def test_confirm_screen_for_start_here_in_an_existing_folder(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("net stuff")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "start")
+    target = fake_env.root / "work" / "net"
+    assert _text(flow, 400).splitlines() == [
+        "Session name: net stuff", "", "work › net", "folder   existing", "wrapper  clauded   (w to change)",
+        f'runs     cd {target} ; clauded -n "net stuff"', "", CONFIRM_KEYS]
+
+
+def test_confirm_screen_for_a_new_project_under_work_net(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("vpn export")
+    _to_new_project(flow, fake_env.root / "work" / "net", "vpn_export")
+    target = fake_env.root / "work" / "net" / "vpn_export"
+    assert _text(flow, 400).splitlines() == [
+        "Session name: vpn export", "", "work › net › vpn_export", "folder   new project   vpn_export",
+        "wrapper  clauded   (w to change)", "github   personal   (g to change)",
+        f'runs     cd {target} ; clauded -n "vpn export"', "", CONFIRM_KEYS]
+
+
+def test_confirm_runs_line_wraps_without_losing_text(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("a fairly long session name for a narrow terminal")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "start")
+    lines = _text(flow, width=40).splitlines()
+    start = next(i for i, x in enumerate(lines) if x.startswith("runs     "))
+    block = []
+    for x in lines[start:]:
+        if not x:
+            break
+        block.append(x)
+    assert len(block) > 1 and all(len(x) <= 40 for x in block)
+    assert block[0][9:] + "".join(x[9:] for x in block[1:]) == flow.command_text()
+
+
+def test_g_cycles_personal_work_none_and_w_changes_the_command(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai")
+    assert flow.github == "personal"
+    flow.cycle_github()
+    assert flow.github == "work"
+    flow.cycle_github()
+    assert flow.github == "none"
+    assert "github   none" in _text(flow)
+    flow.cycle_github()
+    assert flow.github == "personal"
+    flow.cycle_wrapper()
+    assert "wrapper  claude6" in _text(flow) and ' ; claude6 -n "x y"' in _text(flow)
+
+
+def test_github_none_creates_no_repo_and_personal_does(fake_env, index):
+    runner = FakeRunner()
+    flow = _flow(fake_env, index, runner=runner)
+    flow.start("a b")
+    _to_new_project(flow, fake_env.root / "home" / "ai", "plain")
+    flow.choose_github("none")
+    flow.enter()
+    assert flow.step == "done" and (fake_env.root / "home" / "ai" / "plain" / "plan.md").is_file()
+    assert ["git", "init", "-b", "main"] in runner.calls and not any(c[0] == "gh" for c in runner.calls)
+
+    runner2 = FakeRunner({"gh repo create": (0, "", "")})
+    flow2 = _flow(fake_env, index, runner=runner2)
+    flow2.start("a b")
+    _to_new_project(flow2, fake_env.root / "home" / "ai", "hosted")
+    assert flow2.github == "none"  # remembered for the home bucket by the launch above
+    flow2.choose_github("personal")
+    flow2.enter()
+    assert any(c[:3] == ["gh", "repo", "create"] for c in runner2.calls)
+
+
+def test_unknown_values_are_rejected(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    with pytest.raises(ValueError):
+        flow.choose_wrapper("bash")
+    with pytest.raises(ValueError):
+        flow.choose_github("gitlab")
+
+
+def test_work_wf_defaults_to_no_github_and_launch_remembers_the_buckets_choices(fake_env, index):
+    r = fake_env.root
+    (r / "work" / "wf").mkdir()
+    flow = _flow(fake_env, index)
+    flow.start("mediko export")
+    _to_new_project(flow, r / "work" / "wf", "mediko_export")
+    assert flow.github == "none"  # a workflow-export folder gets no repo unless asked
+    flow.choose_wrapper("claudeb")
+    flow.choose_github("work")
+    flow.enter()
+    saved = json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"work\\wf": {"wrapper": "claudeb", "github": "work"}}
+    again = _flow(fake_env, index)
+    again.start("second")
+    _to_new_project(again, r / "work" / "wf", "second_export")
+    assert (again.wrapper, again.github) == ("claudeb", "work")
+    other = _flow(fake_env, index)  # another bucket is untouched
+    other.start("third")
+    _go(other, r / "work" / "net")
+    _pick(other, "start")
+    assert other.wrapper == "clauded"
+
+
+def test_start_here_remembers_the_wrapper_but_keeps_the_github_choice(fake_env, index):
+    from launcher import defaults
+    r = fake_env.root
+    defaults.remember(fake_env, r / "home", "clauded", "work")
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, r / "home" / "ai")
+    _pick(flow, "start")
+    flow.choose_wrapper("claude6")
+    flow.enter()
+    assert defaults.get(fake_env, r / "home") == defaults.Defaults("claude6", "work")
+
+
+def test_esc_on_the_confirm_step_goes_back_to_kind_for_a_new_project(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai")
+    flow.esc()
+    assert flow.step == "kind" and flow.options()[flow.selected][0] == "project"
+    flow.enter()
+    assert flow.step == "confirm" and (flow.wrapper, flow.github) == ("clauded", "personal")
+
+
+def test_creating_names_the_folder_only_for_a_new_project(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai", "fresh")
+    assert flow.creating() == fake_env.root / "home" / "ai" / "fresh"
+    flow.esc()
+    flow.esc()
+    flow.esc()
+    _go(flow, fake_env.root / "home" / "ai")
+    _pick(flow, "start")
+    assert flow.step == "confirm" and flow.creating() is None
+
+
+def test_remembering_failure_is_a_warning_not_a_failed_launch(fake_env, index, monkeypatch):
+    from launcher import defaults
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(defaults, "remember", boom)
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    flow.enter()
+    assert flow.step == "done" and any("could not remember" in w for w in flow.result().warnings)
+
+
+def test_confirm_keys_in_the_app_w_g_cycle_q_does_not_cancel_enter_launches(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai", "keys")
+    launch = _run_keys(flow, "wwgqQ\r")
+    assert isinstance(launch, Launch) and launch.argv[0] == "claudeb"
+    assert flow.github == "work"  # personal, then g: work (two w: claude6, claudeb)
+
+
+def test_ctrl_c_cancels_from_the_confirm_step(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    assert _run_keys(flow, "w\x03") is None
+    assert flow.step == "confirm"
+    assert [e["event"] for e in _flowlog(fake_env)].count("cancel") == 1

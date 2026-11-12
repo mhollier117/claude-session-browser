@@ -97,7 +97,16 @@ def test_encoded_command_runs_as_pwsh_argument():
 # ---- terminal argv ----------------------------------------------------------------------------------------------
 
 def _enc(argv):
-    return bridge.encoded_command(bridge.ps_command(argv))
+    return bridge.encoded_command(bridge.CHILD_SESSION_PREFIX + bridge.ps_command(argv))
+
+
+def test_launched_command_clears_the_child_session_marker_and_forces_persistence():
+    argv = bridge.wt_argv(Path("C:/x"), ["clauded", "-n", "x"], "pwsh")
+    cmd = base64.b64decode(argv[-1]).decode("utf-16-le")
+    assert cmd == ("$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; "
+                   "& 'clauded' '-n' 'x'")
+    console = base64.b64decode(bridge.console_argv(["qwen"], "powershell")[-1]).decode("utf-16-le")
+    assert console.startswith("$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; ")
 
 
 def test_wt_argv_opens_a_tab_running_powershell(tmp_path):
@@ -190,6 +199,23 @@ def test_children_listing(fake_env):
     idx.close()
 
 
+def test_children_listing_carries_the_remembered_defaults(fake_env):
+    from launcher import defaults
+    idx = _index(fake_env)
+    r = fake_env.root
+    (r / "work" / "wf").mkdir()
+    assert bridge.children_listing(fake_env, idx, r / "work" / "wf")["defaults"] == {"wrapper": "clauded",
+                                                                                    "github": "none"}
+    assert bridge.children_listing(fake_env, idx, r / "work" / "net")["defaults"] == {"wrapper": "clauded",
+                                                                                     "github": "personal"}
+    assert bridge.children_listing(fake_env, idx, r / "cc")["defaults"] == {"wrapper": "claude",
+                                                                           "github": "personal"}
+    defaults.remember(fake_env, r / "work" / "net", "claudeb", "work")
+    assert bridge.children_listing(fake_env, idx, r / "work" / "net")["defaults"] == {"wrapper": "claudeb",
+                                                                                     "github": "work"}
+    idx.close()
+
+
 # ---- new-session payload ------------------------------------------------------------------------------------------
 
 def _payload(**over):
@@ -208,6 +234,11 @@ def test_parse_new_new_project(fake_env):
     req = bridge.parse_new(fake_env.root, _payload(rel="home/ai", new_folder="llm", kind="project",
                                                    github="personal"))
     assert (req.new_folder, req.kind, req.github, req.launches) == ("llm", "project", "personal", True)
+
+
+def test_parse_new_accepts_github_none(fake_env):
+    req = bridge.parse_new(fake_env.root, _payload(rel="home/ai", new_folder="llm", kind="project", github="none"))
+    assert req.github == "none" and req.launches is True
 
 
 def test_parse_new_container_does_not_launch_and_needs_no_wrapper(fake_env):
@@ -269,6 +300,24 @@ def test_prepare_new_creates_a_project_and_launches_in_it(fake_env):
     assert not any(c[0] == "gh" for c in runner.calls)
 
 
+def test_prepare_new_github_none_makes_no_gh_call_and_is_remembered(fake_env):
+    runner = FakeRunner()
+    result, launch = bridge.prepare_new(
+        fake_env, _payload(rel="work/net", new_folder="export_x", kind="project", github="none"), runner=runner)
+    assert result["ok"] and launch is not None
+    assert ["git", "init", "-b", "main"] in runner.calls and not any(c[0] == "gh" for c in runner.calls)
+    saved = json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"work\\net": {"wrapper": "clauded", "github": "none"}}
+
+
+def test_prepare_new_remembers_choices_and_start_here_keeps_the_github_choice(fake_env):
+    from launcher import defaults
+    bridge.prepare_new(fake_env, _payload(rel="home/ai", new_folder="a", kind="project", wrapper="claudeb",
+                                          github="work"), runner=FakeRunner())
+    bridge.prepare_new(fake_env, _payload(rel="home/homelab", wrapper="claude6"), runner=FakeRunner())
+    assert defaults.get(fake_env, fake_env.root / "home") == defaults.Defaults("claude6", "work")
+
+
 def test_prepare_new_container_creates_and_does_not_launch(fake_env):
     result, launch = bridge.prepare_new(
         fake_env, _payload(rel="home", new_folder="box", kind="container", wrapper=None), runner=FakeRunner())
@@ -277,6 +326,7 @@ def test_prepare_new_container_creates_and_does_not_launch(fake_env):
                       "warnings": [], "launched": False}
     assert (fake_env.root / "home" / "box").is_dir()
     assert not (fake_env.data_dir / LAUNCHED_FILE).exists()
+    assert not (fake_env.data_dir / "defaults.json").exists()  # nothing launched: nothing to remember
 
 
 def test_prepare_new_holds_the_index_lock_only_for_launched_json(fake_env, monkeypatch):
