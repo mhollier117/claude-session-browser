@@ -1235,3 +1235,78 @@ def test_ctrl_c_cancels_from_the_confirm_step(fake_env, index):
     assert _run_keys(flow, "w\x03") is None
     assert flow.step == "confirm"
     assert [e["event"] for e in _flowlog(fake_env)].count("cancel") == 1
+
+
+# ---- fix round 1 ----------------------------------------------------------------------------------------------------
+
+def test_back_from_confirm_keeps_w_and_g_within_the_same_bucket(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _to_new_project(flow, fake_env.root / "home" / "ai", "kept")
+    flow.cycle_wrapper()  # claude6
+    flow.cycle_github()
+    flow.cycle_github()  # none
+    flow.esc()
+    assert flow.step == "kind"
+    flow.enter()
+    assert flow.step == "confirm" and (flow.wrapper, flow.github) == ("claude6", "none")
+    text = _text(flow, 400)
+    assert "wrapper  claude6" in text and "github   none" in text
+    flow.enter()
+    assert flow.result().argv[0] == "claude6"
+    assert json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8")) == {
+        "home": {"wrapper": "claude6", "github": "none"}}
+
+
+def test_back_from_confirm_to_a_different_bucket_shows_that_buckets_defaults(fake_env, index):
+    from launcher import defaults
+    r = fake_env.root
+    defaults.remember(fake_env, r / "work" / "net", "claudew", "work")
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, r / "home")
+    _pick(flow, "start")
+    flow.cycle_wrapper()
+    assert flow.wrapper == "claude6"
+    flow.esc()
+    assert flow.step == "picker"
+    _go(flow, r / "work" / "net")
+    _pick(flow, "start")
+    assert flow.step == "confirm" and flow.wrapper == "claudew"
+    assert "wrapper  claudew" in _text(flow, 400)
+
+
+def test_start_here_then_back_and_new_project_in_the_same_bucket_gets_a_github_default(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home" / "ai")
+    _pick(flow, "start")
+    flow.cycle_wrapper()
+    flow.esc()
+    _pick(flow, "new")
+    flow.choose_new_folder("fresh", "project")
+    assert (flow.wrapper, flow.github) == ("claude6", "personal")
+
+
+@pytest.mark.parametrize("width", [40, 60, 100])
+def test_every_step_footer_wraps_between_items(fake_env, index, width):
+    from prompt_toolkit.utils import get_cwidth
+    from launcher.tui.new import CONFIRM_KEYS, OPTION_KEYS, TEXT_KEYS
+    from launcher.tui.resume import wrap_items
+    flow = _flow(fake_env, index)
+    steps = {"name": (_text(flow, width), TEXT_KEYS)}
+    flow.start("net stuff")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "new")
+    steps["folder_name"] = (_text(flow, width), TEXT_KEYS)
+    flow.submit_folder_name("brand_new")
+    steps["kind"] = (_text(flow, width), OPTION_KEYS)
+    flow.choose_kind("project")
+    steps["confirm"] = (_text(flow, width), CONFIRM_KEYS)
+    for step, (text, keys) in steps.items():
+        lines = text.splitlines()
+        footer = lines[-len(wrap_items(keys, width)):]
+        assert all(get_cwidth(x) <= width for x in footer), (step, width)
+        assert " · ".join(footer) == keys, (step, width)  # nothing split, nothing lost
+        assert lines[0].startswith("Session name: ")  # the body above is still there, not pushed off
+    assert len(wrap_items(CONFIRM_KEYS, 40)) > 1 and len(wrap_items(CONFIRM_KEYS, 100)) == 1

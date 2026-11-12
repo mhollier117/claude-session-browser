@@ -448,3 +448,20 @@ def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp
         for h in handles:
             h.cancel()
         idx.close()
+
+
+def test_prepare_new_still_launches_with_a_warning_when_remembering_fails(fake_env, monkeypatch):
+    def boom(*a, **k):
+        raise PermissionError("sharing violation")
+    monkeypatch.setattr(bridge.defaults, "remember", boom)
+    result, launch = bridge.prepare_new(fake_env, _payload(), runner=FakeRunner())
+    assert result["ok"] is True and result["launched"] is True and launch is not None
+    assert any("could not remember the choices" in w for w in result["warnings"])
+
+
+def test_prefix_is_pinned_literally_in_wt_and_console_commands(tmp_path):
+    literal = "$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; "
+    wt = bridge.wt_argv(tmp_path, ["clauded", "-n", "x"], "pwsh")
+    assert base64.b64decode(wt[-1]).decode("utf-16-le") == literal + "& 'clauded' '-n' 'x'"
+    console = bridge.console_argv(["qwen", "-r", "s1"], "powershell")
+    assert base64.b64decode(console[-1]).decode("utf-16-le") == literal + "& 'qwen' '-r' 's1'"

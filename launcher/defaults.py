@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,7 @@ FILE = "defaults.json"
 GITHUB_CHOICES = ("personal", "work", "none")  # the order `g` cycles through
 _NO_REPO_BUCKETS = ("work\\wf",)
 _OUTSIDE = "other"
+_RETRY_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -41,11 +44,35 @@ def bucket_key(root: Path, folder: Path) -> str:
 
 
 def _load(env: Env) -> dict:
+    """The stored buckets; any failure at all means none (for `get`, which then uses the built-ins)."""
     try:
-        data = json.loads((env.data_dir / FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return _read(env)
+    except OSError:
         return {}
-    return data if isinstance(data, dict) else {}
+
+
+def _read(env: Env) -> dict:
+    """The stored buckets. A missing file, a broken one or a top level that is not an object is `{}`; any other
+    OSError (a sharing violation while another writer replaces the file) is retried once, then raised."""
+    path = env.data_dir / FILE
+    for attempt in (1, 2):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except UnicodeDecodeError:
+            return {}
+        except OSError:
+            if attempt == 2:
+                raise
+            time.sleep(_RETRY_S)
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
 
 
 def get(env: Env, folder: Path) -> Defaults:
@@ -68,15 +95,22 @@ def remember(env: Env, folder: Path, wrapper: str, github: str | None = None) ->
         raise ValueError(f"unknown wrapper: {wrapper!r}")
     if github is not None and github not in GITHUB_CHOICES:
         raise ValueError(f"unknown GitHub choice: {github!r}")
-    data = _load(env)
     key = bucket_key(env.root, folder)
+    env.data_dir.mkdir(parents=True, exist_ok=True)
+    data = _read(env)  # raises when the file cannot be read: writing now would erase the other buckets
     entry = data.get(key) if isinstance(data.get(key), dict) else {}
     entry = {**entry, "wrapper": wrapper}
     if github is not None:
         entry["github"] = github
     data[key] = entry
-    env.data_dir.mkdir(parents=True, exist_ok=True)
     path = env.data_dir / FILE
-    tmp = path.with_name(FILE + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{FILE}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise

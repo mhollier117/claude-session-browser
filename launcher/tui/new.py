@@ -104,6 +104,7 @@ class NewFlow:
         self.new_name: str | None = None  # None: start here (no new folder)
         self.new_kind: str | None = None
         self.wrapper: str | None = None  # the confirm step's choices (preselected from `defaults`)
+        self._confirm_bucket: str | None = None  # the bucket whose defaults the wrapper and GitHub values came from
         self.github: str | None = None  # personal | work | none; only a new project has one
         self.cwd: Path | None = None
         self.session_id: str | None = None
@@ -500,11 +501,18 @@ class NewFlow:
     def _to_confirm(self) -> None:
         """The one step before a launch: wrapper (and GitHub for a new project) preselected from the bucket's
         remembered choices; `w` and `g` change them."""
+        bucket = defaults.bucket_key(self.env.root, self.target())
         d = defaults.get(self.env, self.target())
         self.step = "confirm"
         self.error = ""
-        self.wrapper = d.wrapper
-        self.github = d.github if self._new_project() else None
+        if bucket != self._confirm_bucket or self.wrapper is None:  # first entry, or another bucket: its defaults
+            self.wrapper = d.wrapper
+            self.github = None
+        self._confirm_bucket = bucket  # the same bucket after esc and back keeps what `w` and `g` chose
+        if not self._new_project():
+            self.github = None
+        elif self.github is None:
+            self.github = d.github
 
     def _new_project(self) -> bool:
         return bool(self.new_name) and self.new_kind == "project"
@@ -641,7 +649,7 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
         if flow.error:
             line(("class:status", flow.error))
         line()
-        line(("class:footer", TEXT_KEYS))
+        _footer(line, TEXT_KEYS, width)
         return frags
 
     line(("class:title", "Session name: "), ("", flow.name))
@@ -660,7 +668,7 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
         if flow.error:
             line(("class:status", flow.error))
         line()
-        line(("class:footer", TEXT_KEYS))
+        _footer(line, TEXT_KEYS, width)
         return frags
     if flow.new_name and flow.step != "kind":
         line(("class:title", "Folder name: "), ("", flow.new_name), ("class:dim", f"  ({flow.new_kind})"))
@@ -676,8 +684,14 @@ def render_new(flow: NewFlow, width: int, height: int) -> list[tuple[str, str]]:
     line()
     for s in flow.summary():
         line(("class:live", s))
-    line(("class:footer", OPTION_KEYS))
+    _footer(line, OPTION_KEYS, width)
     return frags
+
+
+def _footer(line, keys: str, width: int) -> None:
+    """The key help wrapped between items to `width`, as the picker footer is."""
+    for text in wrap_items(keys, max(1, width)):
+        line(("class:footer", text))
 
 
 def _hanging(text: str, width: int, indent: int) -> list[str]:
@@ -709,7 +723,7 @@ def _render_confirm(flow: NewFlow, width: int, line) -> None:
     if flow.error:
         line(("class:status", flow.error))
     line()
-    line(("class:footer", CONFIRM_KEYS))
+    _footer(line, CONFIRM_KEYS, width)
 
 
 def _render_picker(flow: NewFlow, width: int, height: int, line) -> None:
