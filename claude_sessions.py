@@ -10034,6 +10034,7 @@ def _migrate_from_selfinstall():
 
 # --------------------------------------------------------------------------- #
 _SINGLE_INSTANCE_MUTEX = "Local\\ClaudeSessionBrowser_SingleInstance_juppeee"
+_SINGLE_INSTANCE_LOCKNAME = "ClaudeSessionBrowser.instance.lock"
 _SINGLE_INSTANCE_LOCKFILE = None  # wird beim Acquire gesetzt
 
 
@@ -10057,14 +10058,16 @@ def _acquire_single_instance():
     mutex_says_first = True
     handle = None
     try:
-        k = ctypes.windll.kernel32
+        # Eigene kernel32-Instanz mit use_last_error: ctypes sichert den
+        # Fehlercode direkt nach dem Aufruf. Ein spaeteres GetLastError() ueber
+        # windll las ihn unzuverlaessig (0 statt 183) -> zweite Kopie startete.
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
         ERROR_ALREADY_EXISTS = 183
-        # kernel32 mit use_last_error damit GetLastError korrekt lesbar ist
-        k.SetLastError(0)
-        # CreateMutexW: (SECURITY_ATTRS, bInitialOwner, lpName)
         k.CreateMutexW.restype = ctypes.c_void_p
+        k.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        # CreateMutexW: (SECURITY_ATTRS, bInitialOwner, lpName)
         handle = k.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
-        err = k.GetLastError()
+        err = ctypes.get_last_error()
         if handle and err == ERROR_ALREADY_EXISTS:
             mutex_says_first = False
     except Exception:
@@ -10075,22 +10078,28 @@ def _acquire_single_instance():
     file_says_first = True
     try:
         lad = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        lock_path = os.path.join(lad, "ClaudeSessionBrowser.instance.lock")
-        # Auf Windows brauchen wir msvcrt.locking() fuer exklusive Sperre.
-        # Wenn ein anderer Prozess die Datei schon offen und gelockt hat,
-        # bekommen wir hier eine OSError.
+        lock_path = os.path.join(lad, _SINGLE_INSTANCE_LOCKNAME)
         import msvcrt
-        lf = open(lock_path, "wb")
+        # Nicht "wb": das kuerzt die Datei, und Kuerzen eines gesperrten
+        # Bereichs scheitert - der Fehler wurde frueher als "erste Instanz"
+        # gewertet. "a+b" kuerzt nicht; gesperrt wird Byte 0.
         try:
-            msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
-            _SINGLE_INSTANCE_LOCKFILE = lf  # in globals halten -> lock bleibt
-        except OSError:
-            # Datei gelockt - andere Instanz laeuft
-            file_says_first = False
+            lf = open(lock_path, "a+b")
+        except PermissionError:
+            lf = None
+            file_says_first = False      # Datei von der laufenden Instanz belegt
+        if lf is not None:
             try:
-                lf.close()
-            except Exception:
-                pass
+                lf.seek(0)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+                _SINGLE_INSTANCE_LOCKFILE = lf  # in globals halten -> lock bleibt
+            except OSError:
+                # Datei gelockt - andere Instanz laeuft
+                file_says_first = False
+                try:
+                    lf.close()
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -10261,6 +10270,40 @@ def _fit_main_window_now():
         return False
 
 
+def _startup_log_path():
+    lad = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(lad, "ClaudeSessionBrowser", "startup.log")
+
+
+def _log_startup(outcome, **fields):
+    """Eine Zeile je App-Start: wer hat uns gestartet, und laufen wir oder haben
+    wir an die laufende Instanz uebergeben? Damit laesst sich klaeren, woher eine
+    zweite Kopie kam. Nie ein Fehler nach aussen; Datei bleibt unter 256 KB."""
+    try:
+        import psutil
+        me = psutil.Process()
+        parent = me.parent()
+        others = [p.pid for p in psutil.process_iter(["name"])
+                  if p.info["name"] == os.path.basename(sys.executable) and p.pid != me.pid]
+        row = {"at": dt.datetime.now().isoformat(timespec="seconds"), "outcome": outcome,
+               "pid": me.pid, "version": VERSION, "argv": sys.argv[1:],
+               "parent": parent.pid if parent else None,
+               "parent_name": parent.name() if parent else None,
+               "parent_cmd": " ".join(parent.cmdline())[:300] if parent else None,
+               "other_copies": others, **fields}
+        path = _startup_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                keep = f.readlines()[-200:]
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _close_handle(handle):
     """Mutex-Handle einer zweiten Instanz schliessen. Bliebe es offen, hielte es
     den Mutex am Leben, auch wenn die erste Instanz laengst beendet ist - dann
@@ -10387,11 +10430,14 @@ def main():
     # Doppel-Klick bringt die bestehende (evtl. im Tray versteckte) Instanz
     # nach vorne statt eine neue zu starten.
     owned, mutex_handle = _acquire_single_instance()
+    first_try = owned
     if not owned:
         _close_handle(mutex_handle)
         owned, mutex_handle = _wait_for_instance_slot()
         if not owned:
+            _log_startup("handed over")
             return  # die laufende Instanz ist vorne (oder startet noch) -> wir nicht
+    _log_startup("running", first_try=first_try)
     # Handle in Modul-Scope halten bis Prozess-Ende (Mutex faellt sonst weg)
     globals()["_SINGLE_INSTANCE_HANDLE"] = mutex_handle
     api = Api()
