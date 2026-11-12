@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.1",
-  "notes": "Fix: only one copy of the app runs at a time. A second start brings the running window forward, or waits for it while it is still starting or updating, instead of starting a second copy.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.1",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.1/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "6f772f9a3f58f9cc53cc2e66f4696b0d5db81d6721b7102e46c78e5ae99d1247"
+  "version": "1.7.0.2",
+  "notes": "Fix: the Fable limit notice comes once per account per reset period, not on every usage check.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.2",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.2/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "bee634d0d86c3d70b11ad8c093175fe0a2bc0f6238d9e310c44ecf3124c12433"
 }
