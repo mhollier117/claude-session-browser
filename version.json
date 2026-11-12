@@ -1,7 +1,7 @@
 {
-  "version": "1.6.1.10",
-  "notes": "Combines both PCs' work: everything in 1.6.1.9 (Clawdmeter reconnect, installer runs the app as the original user) plus account store folders that inherit your profile's permissions on Windows, so running the app as administrator no longer breaks a normal run with 'PermissionError: Access is denied ... signin.bin'.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.6.1.10",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.6.1.10/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "c8920670e98d3c7c70aa8f0c3c1262926de5c4d5781e0480df835149e2cff1f6"
+  "version": "1.7.0.0",
+  "notes": "cc launcher: one launcher for Claude and Qwen sessions in the terminal (cc) and a New session dialog in the app, with folder suggestions, remembered wrapper/GitHub choices and GitHub 'none'. Fix: the app no longer vanishes after the limit-reset card or the buddy closes (Tcl crash on the wrong thread).",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.0",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.0/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "c802b5c5f6a4b88d31576a4ac06fca97dc8abc5d67f6cbd9c2f4e37c98a95992"
 }
