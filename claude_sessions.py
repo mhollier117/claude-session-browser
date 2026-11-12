@@ -4489,34 +4489,45 @@ class Api:
 
     @_launcher_api
     def launcher_suggest(self, name):
-        """The local suggestion for session `name` at once. The model stages start only once the name has been idle
-        for bridge.MODEL_IDLE_S (a newer call cancels this one first), run in the background, and their first
-        answer is fetched with launcher_suggest_poll(token)."""
+        """The local suggestion for the finished session `name` at once, with its chips (bridge.suggestion_chips).
+        The dialog calls this once per finished name (Enter or leaving the field); the model stages start at once
+        in the background (a newer call cancels this one), and their first answer is fetched with
+        launcher_suggest_poll(token) for up to `wait_ms`."""
         from launcher import bridge
         from launcher.suggest import default_http, suggest
+        name = str(name or "").strip()
         with self._launcher_state():
             env = self._launcher_env
-            pending = suggest(env, self._launcher_idx(), str(name or "").strip(),
+            pending = suggest(env, self._launcher_idx(), name,
                               http=_LAUNCHER_HTTP or default_http, runner=_LAUNCHER_RUNNER,
-                              on_update=lambda s: None, defer_models=True)
-        token = self._launcher_suggestions.supersede(pending)
-        return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token}
+                              on_update=lambda s: None)
+        token = self._launcher_suggestions.supersede(pending, name)
+        bridge.log_start(env, name, pending.local)
+        return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token,
+                "chips": bridge.suggestion_chips(env.root, pending.local), "wait_ms": bridge.SUGGEST_WAIT_MS}
 
     @_launcher_api
     def launcher_suggest_poll(self, token):
-        """The model's suggestion once it has answered (handed out once), else None."""
+        """The model's suggestion once it has answered (handed out once) with the chips that replace the local
+        ones, else None."""
         from launcher import bridge
         self._launcher_state()
-        s = self._launcher_suggestions.poll(str(token or ""))
-        return None if s is None else bridge.suggestion_dict(self._launcher_env.root, s)
+        token = str(token or "")
+        local = self._launcher_suggestions.local(token)
+        s = self._launcher_suggestions.poll(token)
+        if s is None:
+            return None
+        root = self._launcher_env.root
+        return {**bridge.suggestion_dict(root, s), "chips": bridge.suggestion_chips(root, local, s)}
 
     @_launcher_api
     def launcher_new(self, payload):
-        """Create the new folder if any and start the session in a new terminal tab (bridge.prepare_new)."""
+        """Create the new folder if any and start the session in a new terminal tab (bridge.prepare_new, which also
+        writes the flow log and the suggestion outcome)."""
         from launcher import bridge
         lock = self._launcher_state()
         result, launch = bridge.prepare_new(self._launcher_env, payload, runner=_LAUNCHER_RUNNER,
-                                            index_lock=lock)
+                                            index_lock=lock, suggestions=self._launcher_suggestions)
         if launch is None:
             return result
         started = launch_in_terminal(launch.cwd, launch.argv)
@@ -6716,6 +6727,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .ln-sugg:hover{background:rgba(62,207,142,.2)}
   .ln-sugg.none{background:transparent; color:var(--muted); border-color:var(--border); cursor:default}
   .ln-sugg .wait{opacity:.7}
+  #ln-sugg{display:flex; flex-wrap:wrap; gap:0 6px}
+  .ln-sugg.alt{background:transparent; color:var(--fg)}
   .ln-cols{display:flex; height:260px; overflow-x:auto; background:var(--bg);
     border:1px solid var(--border); border-radius:10px}
   .ln-col{flex:0 0 210px; overflow-y:auto; padding:6px 0; border-right:1px solid var(--border)}
@@ -9301,9 +9314,12 @@ function repollQwen(){
 // ---- New session dialog
 // LN.cols: one listing (api.launcher_children) per open column, root first;
 // the last column is the selected folder. LN.nf: the new-folder form, opened
-// on the column whose folder gets the new one.
-const LN = {openId:0, cols:[], loading:false, nf:null, wrapper:null, wrapperSet:false,
-            sugg:null, suggWaiting:false, seq:0, navSeq:0, pollT:null, debT:null, busy:false, msg:null};
+// on the column whose folder gets the new one. LN.wrapper / LN.github: the
+// chosen chips, preselected from the bucket's defaults (an explicit click wins
+// until the bucket changes). LN.suggName: the name the chips were asked for.
+const LN = {openId:0, cols:[], loading:false, nf:null, wrapper:null, wrapperSet:false, github:null,
+            githubSet:false, defBucket:null, sugg:null, chips:[], suggName:'', suggWaiting:false, seq:0,
+            navSeq:0, pollT:null, busy:false, msg:null};
 
 function lnIsOpen(){ return document.getElementById('overlay-launcher').classList.contains('show'); }
 function lnName(){ return document.getElementById('ln-name').value; }
@@ -9326,9 +9342,10 @@ function lnAge(ts){
 
 function lnOpen(){
   if(lnIsOpen()) return;
-  clearTimeout(LN.debT); clearTimeout(LN.pollT);
+  clearTimeout(LN.pollT);
   Object.assign(LN, {openId:LN.openId+1, cols:[], loading:false, nf:null, wrapper:null, wrapperSet:false,
-                     sugg:null, suggWaiting:false, seq:LN.seq+1, navSeq:LN.navSeq+1, busy:false, msg:null});
+                     github:null, githubSet:false, defBucket:null, sugg:null, chips:[], suggName:'',
+                     suggWaiting:false, seq:LN.seq+1, navSeq:LN.navSeq+1, busy:false, msg:null});
   const inp=document.getElementById('ln-name'); inp.value='';
   document.getElementById('overlay-launcher').classList.add('show');
   lnRender();
@@ -9338,7 +9355,7 @@ function lnOpen(){
 // Cancel always works, also while a request runs: its answer is then ignored
 // (only a started session is still reported).
 function lnClose(){
-  clearTimeout(LN.debT); clearTimeout(LN.pollT);
+  clearTimeout(LN.pollT);
   LN.seq++; LN.navSeq++; LN.openId++; LN.busy=false;
   closeOverlay('overlay-launcher');
 }
@@ -9383,7 +9400,7 @@ async function lnGoto(rel){
   }catch(e){
     if(my===LN.navSeq) lnSetMsg(e.message, 'err');
   }finally{
-    if(my===LN.navSeq){ LN.loading=false; lnApplyDefaultWrapper(); lnRender(); lnScrollCols(); }
+    if(my===LN.navSeq){ LN.loading=false; lnApplyDefaults(); lnRender(); lnScrollCols(); }
   }
 }
 function lnPick(i, j){
@@ -9394,43 +9411,48 @@ function lnPick(i, j){
 }
 function lnScrollCols(){ const el=document.getElementById('ln-cols'); if(el) el.scrollLeft=el.scrollWidth; }
 
-// ---- suggestion: the local answer at once, then the model's (polled)
+// ---- suggestion: asked once per finished name (Enter in the name field, or
+// leaving it), never while typing. The local answer's chips at once, then the
+// model's (polled). A suggestion is only ever a chip: it never moves the columns.
 function lnOnName(){
-  const name=lnName();
-  if(LN.nf && !LN.nf.touched){
-    LN.nf.name=lnSlug(name);
-    const f=document.getElementById('ln-nf-name'); if(f) f.value=LN.nf.name;
+  if(LN.nf && !LN.nf.touched){   // an untouched folder name follows the session name
+    LN.nf.name=lnSlug(lnName());
+    const f=document.getElementById('ln-nf-name'); if(f){ f.value=LN.nf.name; f.placeholder=LN.nf.name; }
   }
   if(LN.msg && LN.msg.kind==='err') lnClearMsg();
-  LN.seq++; clearTimeout(LN.pollT);   // an answer for the previous name must not land meanwhile
-  if(LN.suggWaiting){ LN.suggWaiting=false; lnRenderSugg(); }
-  clearTimeout(LN.debT);
-  LN.debT=setTimeout(()=>lnSuggest(name), 400);
+}
+function lnNameDone(){
+  if(!lnIsOpen()) return;   // the field also loses focus when the dialog closes
+  const name=lnName().trim();
+  if(name===LN.suggName) return;   // Enter then blur, or focus without an edit: asked already
+  LN.suggName=name;
+  lnSuggest(name);
 }
 async function lnSuggest(name){
   const my=++LN.seq;
   clearTimeout(LN.pollT);
-  if(!name.trim()){ LN.sugg=null; LN.suggWaiting=false; lnRenderSugg(); return; }
+  if(!name.trim()){ LN.sugg=null; LN.chips=[]; LN.suggWaiting=false; lnRenderSugg(); return; }
   let r;
   try{ r=await api.launcher_suggest(name); }catch(e){ r={ok:false, error:String(e)}; }
   if(my!==LN.seq || !lnIsOpen()) return;
   if(!r || r.ok===false || !r.local){
-    LN.sugg={error: (r && r.error) || t('Das hat nicht geklappt.')}; LN.suggWaiting=false; lnRenderSugg(); return;
+    LN.sugg={error: (r && r.error) || t('Das hat nicht geklappt.')}; LN.chips=[]; LN.suggWaiting=false;
+    lnRenderSugg(); return;
   }
-  LN.sugg=r.local; LN.suggWaiting=!!r.token; lnRenderSugg();
+  LN.sugg=r.local; LN.chips=r.chips || []; LN.suggWaiting=!!r.token; lnRenderSugg();
   if(!r.token) return;
-  const started=Date.now();
+  const started=Date.now(), limit=r.wait_ms || 27000;
   const tick=async ()=>{
     if(my!==LN.seq || !lnIsOpen()) return;
     let s=null;
     try{ s=await api.launcher_suggest_poll(r.token); }catch(e){ s={ok:false}; }
     if(my!==LN.seq || !lnIsOpen()) return;
-    if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }   // keep the local answer
-    if(s && typeof s.path==='string'){   // a model answer replaces the local one; anything else keeps it
-      if(s.source==='qwen' || s.source==='claude') LN.sugg=s;
+    if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }   // keep the local chips
+    if(s && typeof s.path==='string'){   // a model answer replaces the local chips; anything else keeps them
+      if(s.source==='qwen' || s.source==='claude'){ LN.sugg=s; LN.chips=s.chips || LN.chips; }
       LN.suggWaiting=false; lnRenderSugg(); return;
     }
-    if(Date.now()-started>=22000){ LN.suggWaiting=false; lnRenderSugg(); return; }   // 1.5 s idle + Claude's 20 s
+    if(Date.now()-started>=limit){ LN.suggWaiting=false; lnRenderSugg(); return; }
     LN.pollT=setTimeout(tick, 500);
   };
   LN.pollT=setTimeout(tick, 500);
@@ -9438,34 +9460,47 @@ async function lnSuggest(name){
 function lnSourceName(src){
   return ({qwen:'Qwen', claude:'Claude', history:t('deinem Verlauf'), keywords:t('Stichwörtern')})[src] || src;
 }
+// ★ the model's answer, ≈ the local best and the alternatives (as the terminal rows)
+function lnChipPath(c){ return lnPathText(c.rel, c.new_folder || (c.needs_name ? t('neuer Ordner…') : '')); }
 function lnRenderSugg(){
   const el=document.getElementById('ln-sugg'), s=LN.sugg;
   if(!s){ el.innerHTML=''; return; }
   const wait=LN.suggWaiting ? ` <span class="wait">${esc(t('· Modell denkt nach…'))}</span>` : '';
   if(s.error){ el.innerHTML=`<span class="ln-sugg none">${esc(t('Kein Vorschlag: {grund}', {grund: s.error}))}</span>`; return; }
-  if(s.source==='root'){ el.innerHTML=`<span class="ln-sugg none">${esc(t('Noch kein Vorschlag'))}${wait}</span>`; return; }
-  const vars={quelle: lnSourceName(s.source), pfad: lnPathText(s.path, s.new_folder), grund: s.reason};
-  const text=s.reason ? t('Vorschlag von {quelle}: {pfad} ({grund})', vars) : t('Vorschlag von {quelle}: {pfad}', vars);
-  el.innerHTML=`<button class="ln-sugg" onclick="lnUseSugg()" title="${esc(text + '\n' + t('Spalten bis zu diesem Ordner öffnen'))}">${esc(text)}${wait}</button>`;
+  if(!LN.chips.length){ el.innerHTML=`<span class="ln-sugg none">${esc(t('Noch kein Vorschlag'))}${wait}</span>`; return; }
+  const open=t('Spalten bis zu diesem Ordner öffnen');
+  el.innerHTML=LN.chips.map((c,i)=>{
+    if(c.mark==='alt')
+      return `<button class="ln-sugg alt" onclick="lnUseChip(${i})" title="${esc(open)}">${esc('≈ ' + lnChipPath(c))}</button>`;
+    const vars={quelle: lnSourceName(c.source), pfad: lnChipPath(c), grund: c.reason};
+    const text=c.reason ? t('Vorschlag von {quelle}: {pfad} ({grund})', vars) : t('Vorschlag von {quelle}: {pfad}', vars);
+    const mark=c.mark==='model' ? '★ ' : '≈ ';
+    return `<button class="ln-sugg" onclick="lnUseChip(${i})" title="${esc(text + '\n' + open)}">${esc(mark + text)}${wait}</button>`;
+  }).join('');
 }
-async function lnUseSugg(){
-  const s=LN.sugg;
-  if(!s || s.error || s.source==='root') return;
+// A click opens the columns at the chip's folder; it never launches. A
+// proposed new folder opens the parent with the new-folder form filled in; a
+// place that still needs a name opens the form for the user to name it.
+async function lnUseChip(i){
+  const c=LN.chips[i];
+  if(!c) return;
   LN.nf=null; lnClearMsg();
-  await lnGoto(s.path);
+  await lnGoto(c.rel);
   const cur=lnCur();
-  if(s.new_folder && cur && lnSame(cur.rel, s.path) && !LN.loading){
-    lnOpenNewFolder(LN.cols.length-1);
-    LN.nf.name=s.new_folder; LN.nf.touched=true;
-    lnRender();
-  }
+  if(!cur || !lnSame(cur.rel, c.rel) || LN.loading) return;
+  if(c.new_folder) lnOpenNewFolder(LN.cols.length-1, c.new_folder);
+  else if(c.needs_name) lnOpenNewFolder(LN.cols.length-1);
 }
 
-// ---- wrappers
-function lnApplyDefaultWrapper(){
-  if(LN.wrapperSet) return;
-  const c=LN.nf ? LN.cols.find(x=>x.rel===LN.nf.rel) : lnCur();
-  if(c && c.default_wrapper) LN.wrapper=c.default_wrapper;
+// ---- wrapper and GitHub: the bucket's remembered defaults (bridge
+// children_listing), until the user clicks a chip; another bucket re-applies.
+function lnApplyDefaults(){
+  const c=LN.nf ? LN.cols.find(x=>lnSame(x.rel, LN.nf.rel)) : lnCur();
+  if(!c) return;
+  if(c.bucket!==LN.defBucket){ LN.defBucket=c.bucket; LN.wrapperSet=false; LN.githubSet=false; }
+  const d=c.defaults || {};
+  if(!LN.wrapperSet && (d.wrapper || c.default_wrapper)) LN.wrapper=d.wrapper || c.default_wrapper;
+  if(!LN.githubSet) LN.github=d.github || 'personal';
 }
 function lnWrapperList(){ return LN_WRAPPERS.length ? LN_WRAPPERS : (LN.wrapper ? [LN.wrapper] : []); }
 function lnSetWrapperAt(i){ const w=lnWrapperList()[i]; if(w){ LN.wrapper=w; LN.wrapperSet=true; lnRenderWrappers(); } }
@@ -9486,20 +9521,31 @@ function lnKindHint(k){
            client:t('ein Kundenordner mit CLAUDE.md · danach darin weiter wählen'),
            organisational:t('ein Ordnungsordner · danach darin weiter wählen')})[k] || '';
 }
-function lnOpenNewFolder(i){
+// LN.nf.name: what the folder-name field holds. Typed text wins (slugged as the
+// terminal's typed filter is); while the field is empty or untouched the
+// session-name slug is the name. LN.nf.via: how the name came about, for the
+// flow log (new, new_named from a suggestion, new_typed).
+function lnOpenNewFolder(i, proposed){
   const col=LN.cols[i]; if(!col) return;
   LN.navSeq++; LN.loading=false;
   LN.cols=LN.cols.slice(0, i+1);
   const kinds=col.kind_options || [];
-  LN.nf={rel: col.rel, name: lnSlug(lnName()), touched:false, kind: kinds[0] || null, github:'personal'};
-  lnClearMsg(); lnApplyDefaultWrapper(); lnRender();
+  LN.nf={rel: col.rel, name: proposed || lnSlug(lnName()), touched: !!proposed, via: proposed ? 'new_named' : 'new',
+         kind: kinds[0] || null};
+  lnClearMsg(); lnApplyDefaults(); lnRender();
   setTimeout(()=>{ const f=document.getElementById('ln-nf-name'); if(f){ f.focus(); f.select(); } }, 30);
 }
-function lnBackFromNf(){ LN.nf=null; lnClearMsg(); lnApplyDefaultWrapper(); lnRender(); }
-function lnNfName(v){ if(LN.nf){ LN.nf.name=v; LN.nf.touched=true; } }
+function lnBackFromNf(){ LN.nf=null; lnClearMsg(); lnApplyDefaults(); lnRender(); }
+function lnNfName(v){
+  if(!LN.nf) return;
+  LN.nf.name=v;
+  LN.nf.touched=!!v.trim();
+  LN.nf.via=LN.nf.touched ? 'new_typed' : 'new';
+}
+function lnNfFolder(){ const nf=LN.nf; return nf ? lnSlug(nf.touched ? nf.name : lnName()) : ''; }
 function lnNfKinds(){ const c=LN.nf && LN.cols.find(x=>x.rel===LN.nf.rel); return (c && c.kind_options) || []; }
 function lnSetKindAt(i){ const k=lnNfKinds()[i]; if(LN.nf && k){ LN.nf.kind=k; lnRender(); } }
-function lnSetGithub(g){ if(LN.nf){ LN.nf.github=g; lnRenderNf(); } }
+function lnSetGithub(g){ LN.github=g; LN.githubSet=true; lnRenderNf(); }
 
 // ---- create / start
 function lnStartHere(){
@@ -9508,11 +9554,11 @@ function lnStartHere(){
 }
 function lnCreate(){
   const nf=LN.nf; if(!nf) return;
-  const folder=(nf.name||'').trim();
+  const folder=lnNfFolder();
   if(!folder){ lnSetMsg(t('Bitte gib einen Ordnernamen ein.'), 'err'); return; }
   const project=nf.kind==='project';
-  lnSubmit({name: lnName(), rel: nf.rel, new_folder: folder, kind: nf.kind,
-            wrapper: project ? LN.wrapper : null, github: project ? nf.github : null});
+  lnSubmit({name: lnName(), rel: nf.rel, new_folder: folder, kind: nf.kind, via: nf.via,
+            wrapper: project ? LN.wrapper : null, github: project ? LN.github : null});
 }
 async function lnSubmit(payload){
   if(LN.busy) return;
@@ -9611,14 +9657,17 @@ function lnRenderNf(){
         onchange="lnSetKindAt(${i})"><span>${esc(lnKindLabel(k))}</span><span class="h">${esc(lnKindHint(k))}</span></label>`).join('');
   const github=nf.kind!=='project' ? '' :
     `<div class="ln-field"><div class="ln-lbl">${esc(t('GitHub-Repo'))}</div><div class="ln-chips">`
-    + [['personal', t('persönlich')], ['work', t('Arbeit')]].map(([g,label])=>
-        `<button class="ln-chip${nf.github===g?' on':''}" onclick="lnSetGithub('${g}')">${esc(label)}</button>`).join('')
+    + [['personal', t('persönlich'), ''], ['work', t('Arbeit'), ''], ['none', t('keins'), t('kein GitHub-Repo, nur git init')]]
+        .map(([g,label,tip])=>`<button class="ln-chip${LN.github===g?' on':''}" onclick="lnSetGithub('${g}')"`
+          + (tip ? ` title="${esc(tip)}"` : '') + `>${esc(label)}</button>`).join('')
     + `</div></div>`;
   el.innerHTML=`<h4>${esc(t('Neuer Ordner in {ordner}', {ordner: lnPathText(nf.rel)}))}</h4>`
     + `<div class="ln-field"><label for="ln-nf-name">${esc(t('Ordnername'))}</label>`
-    + `<input class="modal-input" id="ln-nf-name" autocomplete="off" spellcheck="false" oninput="lnNfName(this.value)"></div>`
+    + `<input class="modal-input" id="ln-nf-name" autocomplete="off" spellcheck="false" oninput="lnNfName(this.value)"`
+    + ` onchange="if(LN.nf && LN.nf.touched){ this.value=lnNfFolder(); lnNfName(this.value); }"></div>`
     + `<div class="ln-field"><div class="ln-lbl">${esc(t('Was ist es?'))}</div>${kindHtml}</div>${github}`;
-  document.getElementById('ln-nf-name').value=nf.name;
+  const f=document.getElementById('ln-nf-name');
+  f.value=nf.name; f.placeholder=lnSlug(lnName());
 }
 function lnRenderWrappers(){
   document.getElementById('ln-wrap-field').hidden=!lnLaunches();
@@ -9660,6 +9709,8 @@ document.addEventListener('keydown',e=>{
 });
 document.getElementById('search').addEventListener('input',render);
 document.getElementById('ln-name').addEventListener('input',lnOnName);
+document.getElementById('ln-name').addEventListener('keydown',e=>{ if(e.key==='Enter') lnNameDone(); });
+document.getElementById('ln-name').addEventListener('blur',lnNameDone);
 document.addEventListener('pointermove',e=>{ if(CPdrag) cpPick(e); });
 document.addEventListener('pointerup',()=>{ CPdrag=false; });
 document.addEventListener('pointercancel',()=>{ CPdrag=false; });

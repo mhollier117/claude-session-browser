@@ -141,7 +141,7 @@ class NewFlow:
 
     def _log(self, event: str, kind: str | None = None, **extra) -> None:
         flowlog.log(self.env, event, folder=self._rel(self.folder), kind=kind, filter=self.filter, step=self.step,
-                    **extra)
+                    ui="terminal", **extra)
 
     def cancel(self) -> None:
         """The user quit the walk (ctrl-c, or q on a choice step): logged only."""

@@ -749,6 +749,7 @@ def test_flow_log_and_outcome_for_a_typed_new_project(fake_env, index):
     assert [e["event"] for e in events if e["event"] != "open"] == [
         "start", "filter-enter", "new-folder", "kind", "launch"]
     assert all({"ts", "event", "folder", "kind", "filter", "step"} <= set(e) for e in events)
+    assert all(e["ui"] == "terminal" for e in events)  # the browser writes the same events with ui "browser"
     fe = next(e for e in events if e["event"] == "filter-enter")
     assert fe["folder"] == "work\\ninja" and fe["kind"] == "new_typed" and fe["filter"] == "alert review"
     nf = next(e for e in events if e["event"] == "new-folder")

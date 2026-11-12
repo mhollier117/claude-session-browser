@@ -518,51 +518,26 @@ def log_outcome(env: Env, name: str, suggestion: Suggestion | None, chosen: Path
 
 class Pending:
     """The result of `suggest()`: `.local` at once; `.wait()` for the first valid model answer; `.join()` for the
-    background work to finish. With `defer_models` the model stages start only once `release_models()` is called
-    (directly or by `release_after`); `cancel()` drops the answer and keeps stages that have not started from
-    starting."""
+    background work to finish. `cancel()` drops the answer and keeps stages that have not started from starting."""
 
-    def __init__(self, local: Suggestion, defer_models: bool = False):
+    def __init__(self, local: Suggestion):
         self.local = local
         self._answer: Suggestion | None = None
         self._lock = threading.Lock()
         self._settled = threading.Event()  # first model answer delivered, every model stage finished, or cancelled
-        self._release = threading.Event()  # the coordinator may start the model stages
         self._cancelled = False
-        self._timer: threading.Timer | None = None
         self._thread: threading.Thread | None = None
-        if not defer_models:
-            self._release.set()
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled
 
-    def release_models(self) -> None:
-        """Let the coordinator start the model stages (no effect once cancelled or already released)."""
-        self._release.set()
-
-    def release_after(self, delay: float) -> None:
-        """Release the model stages in `delay` seconds unless `cancel()` comes first."""
-        with self._lock:
-            if self._cancelled:
-                return
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(delay, self.release_models)
-            self._timer.daemon = True
-            self._timer.start()
-
     def cancel(self) -> None:
-        """Discard any model answer (no `on_update`; `wait()` returns None) and do not start the model stages if
-        they have not started yet. Stages already running finish in the background; their answer is dropped."""
+        """Discard any model answer (no `on_update`; `wait()` returns None) and do not start a model stage that has
+        not started yet. A stage already running finishes in the background; its answer is dropped."""
         with self._lock:
             self._cancelled = True
             self._answer = None
-            timer, self._timer = self._timer, None
-        if timer is not None:
-            timer.cancel()
-        self._release.set()  # wake a waiting coordinator, which sees the flag and stops
         self._settled.set()
 
     def wait(self, timeout: float | None = None) -> Suggestion | None:
@@ -608,10 +583,9 @@ class _Rows:
 
 def _run_models(env: Env, rows: _Rows, name: str, prep: Prepared | None, http: Http, runner: Runner | None,
                 claude_exe: Path | None, pending: Pending, on_update: Callable[[Suggestion], None]) -> None:
-    """Background thread: wait until the model stages are released (at once unless deferred), then run Qwen and,
-    only when Qwen gave no valid answer, Claude, one after the other. A cancelled request starts nothing more."""
+    """Background thread: run Qwen and, only when Qwen gave no valid answer, Claude, one after the other. A cancelled
+    request starts nothing more."""
     try:
-        pending._release.wait()
         if pending.cancelled or prep is None:
             return
         stages = [(stage_qwen(http, prepared=prep), QWEN_TOTAL_S),
@@ -633,13 +607,11 @@ def _run_models(env: Env, rows: _Rows, name: str, prep: Prepared | None, http: H
 
 
 def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, runner: Runner | None = None,
-            on_update: Callable[[Suggestion], None], claude_exe: Path | None = None,
-            defer_models: bool = False) -> Pending:
+            on_update: Callable[[Suggestion], None], claude_exe: Path | None = None) -> Pending:
     """Return at once with the local answer (the top-ranked folder, else the root) and start one daemon thread that
     asks Qwen, then Claude only if Qwen gave no valid answer; `on_update` gets the model answer, once, from that
     thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection is
-    single-threaded), and the retrieval and prompt are worked out here too. `defer_models`: the thread waits for
-    `Pending.release_models()` (or `cancel()`) before starting the model stages."""
+    single-threaded), and the retrieval and prompt are worked out here too."""
     try:
         rows = _Rows(index.rows())
     except Exception as e:  # noqa: BLE001 - suggest() never raises: carry on with no history
@@ -654,7 +626,7 @@ def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, run
         prep = None
     local = ((stage_history(env, rows, name, 0.0, prepared=prep) if prep is not None else None)
              or stage_root(env, rows, name, 0.0))
-    pending = Pending(local, defer_models=defer_models)
+    pending = Pending(local)
     pending._thread = threading.Thread(
         target=_run_models, args=(env, rows, name, prep, http, runner, claude_exe, pending, on_update),
         name="suggest", daemon=True)

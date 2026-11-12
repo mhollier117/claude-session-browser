@@ -20,16 +20,19 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import defaults
+from . import defaults, flowlog
 from .index import Index, Row, remember_launch
+from .display import rel_or_abs
 from .launch import WRAPPERS, Launch, default_wrapper, new_command
 from .paths import Env
 from .scaffold import Runner, check_name, create_folder
-from .suggest import Pending, Suggestion, _resolve
+from .suggest import CLAUDE_TOTAL_S, QWEN_TOTAL_S, Pending, Suggestion, _resolve, log_outcome
 from .tree import children, new_folder_kind_options
 
 SUGGEST_TTL_S = 60.0
-MODEL_IDLE_S = 1.5  # the browser starts the model stages only once the name has been left alone this long
+# how long the dialog polls for the model's answer: Qwen, then Claude when Qwen failed, plus a margin
+SUGGEST_WAIT_MS = int((QWEN_TOTAL_S + CLAUDE_TOTAL_S) * 1000) + 1000
+MAX_ALT_CHIPS = 2
 GITHUB_ACCOUNTS = (None, "personal", "work", "none")  # None and "none": no GitHub repo, git init only
 # every browser launch clears the child-session marker and forces transcript persistence (see ps_command's caller)
 CHILD_SESSION_PREFIX = "$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; "
@@ -107,6 +110,47 @@ def suggestion_dict(root: Path, s: Suggestion) -> dict:
             "reason": s.reason, "source": s.source}
 
 
+def suggestion_chips(root: Path, local: Suggestion | None, model: Suggestion | None = None) -> list[dict]:
+    """The dialog's suggestion chips, as the terminal's suggestion rows: first the model's answer (`mark` "model",
+    the terminal's ★) or, while no model has answered, the local best (`mark` "local", ≈); then up to
+    `MAX_ALT_CHIPS` ranked alternatives (`mark` "alt", ≈): the model's own when it gave some, otherwise the local
+    best and its alternatives. Duplicates (by folder) and folders outside the root are left out; a local answer
+    at the root is no suggestion. Each chip: {rel, mark, source, reason, new_folder, needs_name}."""
+    chips: list[dict] = []
+    seen: set[str] = set()
+
+    def add(path: Path, mark: str, s: Suggestion | None) -> None:
+        key = str(path).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        try:
+            rel = rel_of(root, Path(path))
+        except ValueError:
+            return
+        if not rel:
+            return
+        chips.append({"rel": rel, "mark": mark, "source": s.source if s else None, "reason": s.reason if s else "",
+                      "new_folder": s.new_folder if s else None, "needs_name": bool(s and s.needs_name)})
+
+    has_local = local is not None and local.source != "root"
+    if model is not None:
+        add(model.path, "model", model)
+    if not chips and has_local:
+        add(local.path, "local", local)
+    if not chips:
+        return []
+    if model is not None and model.alternatives:
+        ranked = list(model.alternatives)
+    else:
+        ranked = [local.path, *local.alternatives] if has_local else []
+    for p in ranked:
+        if len(chips) > MAX_ALT_CHIPS:
+            break
+        add(p, "alt", None)
+    return chips
+
+
 def row_dict(row: Row) -> dict:
     """An Index row for the browser, with `tool` (claude | qwen)."""
     return {**asdict(row), "tool": row.store}
@@ -135,6 +179,7 @@ def children_listing(env: Env, index: Index, folder: Path) -> dict:
         "kind_options": new_folder_kind_options(env.root, folder),
         "default_wrapper": default_wrapper(env.root, folder),
         "defaults": asdict(defaults.get(env, folder)),  # {wrapper, github}: what the dialog preselects here
+        "bucket": defaults.bucket_key(env.root, folder),  # a change of bucket re-applies its defaults
     }
 
 
@@ -191,17 +236,61 @@ def parse_new(root: Path, payload) -> NewRequest:
     return req
 
 
+def _log_rel(root: Path, path: Path) -> str:
+    """`path` as the terminal flow logs folders: relative with `\\`, '' for the root."""
+    rel = rel_or_abs(root, path)
+    return "" if rel == "." else rel
+
+
+def _flow(env: Env, event: str, folder: Path, step: str, kind: str | None = None, **extra) -> None:
+    """One `flow.log` event with the fields the terminal flow writes (`NewFlow._log`); the browser has no filter."""
+    flowlog.log(env, event, folder=_log_rel(env.root, folder), kind=kind, filter="", step=step, ui="browser", **extra)
+
+
+def log_start(env: Env, name: str, local: Suggestion) -> None:
+    """The dialog asked for a suggestion for a finished name: the terminal's `start` event. Never raises."""
+    try:
+        found = local.source != "root"
+        _flow(env, "start", env.root, "picker", name=name, suggested=_log_rel(env.root, local.path) if found else None,
+              source=local.source, strong=bool(found and local.strong))
+    except Exception:  # noqa: BLE001 - diagnostic only
+        pass
+
+
+def _log_new(env: Env, req: NewRequest, via: str | None) -> None:
+    """The terminal's `new-folder` and `kind` events for a new folder the dialog is about to create."""
+    _flow(env, "new-folder", req.folder, "folder_name", kind=via, name=req.new_folder)
+    _flow(env, "kind", req.folder, "kind", value=req.kind, name=req.new_folder)
+
+
+def _log_launch(env: Env, req: NewRequest, cwd: Path, suggestion: Suggestion | None) -> None:
+    """The terminal's `launch` event and the `suggest.log` outcome (the folder chosen against the suggestion)."""
+    project = req.new_folder is not None and req.kind == "project"
+    _flow(env, "launch", req.folder, "done", folder_kind=req.kind, new_folder=req.new_folder, wrapper=req.wrapper,
+          github=(req.github or "none") if project else None, cwd=_log_rel(env.root, cwd))
+    log_outcome(env, req.name, suggestion, req.folder, req.new_folder)
+
+
+NEW_FOLDER_SOURCES = ("new", "new_named", "new_typed")  # how the dialog's folder name came about (as the rows)
+
+
 def prepare_new(env: Env, payload, runner: Runner | None = None, session_id: str | None = None,
-                index_lock=None) -> tuple[dict, Launch | None]:
+                index_lock=None, suggestions: PendingSuggestions | None = None) -> tuple[dict, Launch | None]:
     """Validate, create the new folder if any, and (when the request starts a session) remember its wrapper and
     build the launch. Returns (result for the browser, the Launch to run or None). A grouping folder is only
     created, so the dialog can walk into it; any validation or creation failure is `{ok: False, error}`.
     `index_lock` (held only while `launched.json` is written, not while git/gh run) keeps that write apart from
-    an `Index.refresh` consuming the file."""
+    an `Index.refresh` consuming the file. The walk is logged like the terminal's (`flow.log`, and the outcome
+    against `suggestions.in_effect(name)` in `suggest.log`); logging never fails or stops a launch."""
     try:
         req = parse_new(env.root, payload)
         cwd, created, warnings = req.folder, False, []
         if req.new_folder is not None:
+            via = payload.get("via") if payload.get("via") in NEW_FOLDER_SOURCES else None
+            try:
+                _log_new(env, req, via)
+            except Exception:  # noqa: BLE001 - diagnostic only
+                pass
             made = create_folder(req.folder, req.new_folder, req.kind, req.name, runner=runner,
                                  github=req.github if req.kind == "project" and req.github != "none" else None)
             cwd, created, warnings = made.path, True, list(made.warnings)
@@ -222,6 +311,10 @@ def prepare_new(env: Env, payload, runner: Runner | None = None, session_id: str
         defaults.remember(env, cwd, req.wrapper, (req.github or "none") if created and req.kind == "project" else None)
     except (OSError, ValueError) as e:
         warnings.append(f"could not remember the choices: {e}")
+    try:
+        _log_launch(env, req, cwd, suggestions.in_effect(req.name) if suggestions is not None else None)
+    except Exception:  # noqa: BLE001 - diagnostic only: never fails the launch
+        pass
     launch = new_command(cwd, req.name, req.wrapper, session_id=sid)
     warnings.extend(launch.warnings)
     return {**result, "launched": True}, launch
@@ -238,6 +331,7 @@ class PendingSuggestions:
         self._clock = clock
         self._items: dict[str, tuple[float, Pending]] = {}
         self._current: Pending | None = None  # the request `supersede` issued last
+        self._current_name: str | None = None  # the session name it was for
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -255,17 +349,30 @@ class PendingSuggestions:
             self._items[token] = (self._clock(), pending)
         return token
 
-    def supersede(self, pending: Pending, idle: float | None = None) -> str:
-        """Add `pending` (made with `defer_models=True`) as the dialog's current request: the one issued before it
-        is cancelled (its model stages never start if they had not), and `pending`'s model stages are released
-        after `idle` seconds unless a newer request supersedes it first. So typing runs the models once, for the
-        name the user paused on."""
+    def supersede(self, pending: Pending, name: str | None = None) -> str:
+        """Add `pending` (the suggestion for session `name`) as the dialog's current request; the one issued before
+        it is cancelled (a model stage it had not started never starts, and its answer is dropped)."""
         with self._lock:
             previous, self._current = self._current, pending
-        if previous is not None:
+            self._current_name = (name or "").strip()
+        if previous is not None and previous is not pending:
             previous.cancel()
-        pending.release_after(MODEL_IDLE_S if idle is None else idle)
         return self.add(pending)
+
+    def in_effect(self, name: str) -> Suggestion | None:
+        """The suggestion the dialog shows for session `name`: the model's answer once there, else the local one;
+        None when the current request was for another name (or there is none)."""
+        with self._lock:
+            pending, current_name = self._current, self._current_name
+        if pending is None or current_name != (name or "").strip():
+            return None
+        return pending.wait(0) or pending.local
+
+    def local(self, token: str) -> Suggestion | None:
+        """The local answer of the request behind `token` (None for an unknown or expired token)."""
+        with self._lock:
+            entry = self._items.get(token)
+        return None if entry is None else entry[1].local
 
     def poll(self, token: str) -> Suggestion | None:
         """The model's answer once it is there (then the entry is dropped); None while waiting, or for an unknown or

@@ -216,6 +216,54 @@ def test_children_listing_carries_the_remembered_defaults(fake_env):
     idx.close()
 
 
+def test_children_listing_names_the_bucket(fake_env):
+    """The dialog re-applies the defaults when the chosen folder's bucket changes, and only then."""
+    idx = _index(fake_env)
+    r = fake_env.root
+    assert bridge.children_listing(fake_env, idx, r / "work" / "net")["bucket"] == "work\\net"
+    assert bridge.children_listing(fake_env, idx, r / "home" / "ai")["bucket"] == "home"
+    assert bridge.children_listing(fake_env, idx, r / "home")["bucket"] == "home"
+    idx.close()
+
+
+# ---- suggestion chips ---------------------------------------------------------------------------------------------
+
+def test_chips_local_best_then_its_alternatives(fake_env):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "matches halo", "history",
+                       alternatives=[r / "work" / "net", r / "home" / "ai"])
+    assert bridge.suggestion_chips(r, local) == [
+        {"rel": "work/halo", "mark": "local", "source": "history", "reason": "matches halo", "new_folder": None,
+         "needs_name": False},
+        {"rel": "work/net", "mark": "alt", "source": None, "reason": "", "new_folder": None, "needs_name": False},
+        {"rel": "home/ai", "mark": "alt", "source": None, "reason": "", "new_folder": None, "needs_name": False}]
+
+
+def test_chips_model_answer_first_with_at_most_two_alternatives(fake_env):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history", alternatives=[r / "work" / "net"])
+    model = Suggestion(r / "work" / "net", "forti_tool", "high", "vpn", "qwen",
+                       alternatives=[r / "work" / "halo", r / "home" / "ai", r / "cc"])
+    chips = bridge.suggestion_chips(r, local, model)
+    assert [(c["rel"], c["mark"]) for c in chips] == [("work/net", "model"), ("work/halo", "alt"), ("home/ai", "alt")]
+    assert chips[0]["new_folder"] == "forti_tool" and chips[0]["source"] == "qwen"
+
+
+def test_chips_model_without_alternatives_falls_back_to_the_local_ranking(fake_env):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history", alternatives=[r / "work" / "net"])
+    model = Suggestion(r / "work" / "net", None, "high", "vpn", "claude", needs_name=True)
+    chips = bridge.suggestion_chips(r, local, model)
+    assert [(c["rel"], c["mark"]) for c in chips] == [("work/net", "model"), ("work/halo", "alt")]  # no duplicate
+    assert chips[0]["needs_name"] is True
+
+
+def test_chips_none_for_a_root_answer(fake_env):
+    root = Suggestion(fake_env.root, None, "low", "no suggestion; start at the root", "root")
+    assert bridge.suggestion_chips(fake_env.root, root) == []
+    assert bridge.suggestion_chips(fake_env.root, None) == []
+
+
 # ---- new-session payload ------------------------------------------------------------------------------------------
 
 def _payload(**over):
@@ -395,59 +443,143 @@ def test_pending_suggestions_unknown_token():
     assert bridge.PendingSuggestions().poll("nope") is None
 
 
-def test_rapid_suggest_calls_run_the_models_once_for_the_last_name(fake_env, tmp_path):
-    """Three names typed in quick succession (the dialog's 400 ms debounce fired three times): each call returns
-    its local answer, but only the last one's model stages run, once the name has been idle."""
-    import threading
-    import time
-    from launcher.suggest import suggest
-    (fake_env.qwen_home / "settings.json").write_text(json.dumps({
-        "model": {"name": "m", "baseUrl": "http://qwen.test:8000/v1"},
-        "modelProviders": {"openai": [{"id": "m", "envKey": "K"}]}, "env": {"K": "secret"}}), encoding="utf-8")
-    exe = tmp_path / "claude.exe"
-    exe.write_text("")
-    lock, posts = threading.Lock(), []
+class FakeHandle(FakePending):
+    """A `Pending` stand-in for `supersede`: records `cancel()`."""
 
-    def http(method, url, headers, body, timeout):
-        if method == "POST":
-            with lock:
-                posts.append(body["messages"][1]["content"])
-            return 200, {"choices": [{"message": {"content": json.dumps({"choice": 1})}}]}
-        return 200, {"data": [{"id": "m-current"}]}
+    def __init__(self, local=None, answer=None):
+        super().__init__(answer)
+        self.local = local
+        self.cancelled = False
 
-    class Runner:
-        def __init__(self):
-            self.inputs = []
+    def cancel(self):
+        self.cancelled = True
+        self.answer = None
 
-        def run(self, args, cwd, env=None, timeout=60, input=None):
-            with lock:
-                self.inputs.append(input)
-            return Result(1, "", "not run in tests")
 
-    runner, idx, store = Runner(), _index(fake_env), bridge.PendingSuggestions()
-    try:
-        handles, tokens = [], []
-        for name in ("fix", "fix the", "fix the vpn tunnel"):
-            p = suggest(fake_env, idx, name, http=http, runner=runner, claude_exe=exe, on_update=lambda s: None,
-                        defer_models=True)
-            handles.append(p)
-            tokens.append(store.supersede(p, idle=0.3))
-        assert handles[2].local.source == "root"  # nothing in the (empty) index matches
-        time.sleep(0.1)
-        assert posts == [] and runner.inputs == []  # still within the idle time: no model call yet
-        deadline = time.monotonic() + 5
-        while store.poll(tokens[2]) is None and time.monotonic() < deadline:
-            time.sleep(0.02)
-        for h in handles:
-            assert h.join(5)
-        assert handles[0].cancelled and handles[1].cancelled and not handles[2].cancelled
-        assert len(posts) == 1 and "fix the vpn tunnel" in posts[0]
-        assert runner.inputs == []  # Qwen answered: Claude only runs when Qwen fails
-        assert store.poll(tokens[0]) is None and store.poll(tokens[1]) is None
-    finally:
-        for h in handles:
-            h.cancel()
-        idx.close()
+def test_supersede_cancels_the_previous_request_at_once():
+    store = bridge.PendingSuggestions()
+    first, second = FakeHandle(answer="A"), FakeHandle()
+    t1 = store.supersede(first, "fix vpn")
+    t2 = store.supersede(second, "fix vpn tunnel")
+    assert first.cancelled and not second.cancelled
+    assert store.poll(t1) is None
+    second.answer = "B"
+    assert store.poll(t2) == "B"
+
+
+def test_in_effect_is_the_model_answer_else_the_local_one_for_the_same_name(fake_env):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history")
+    model = Suggestion(r / "work" / "net", None, "high", "vpn", "qwen")
+    store = bridge.PendingSuggestions()
+    handle = FakeHandle(local)
+    token = store.supersede(handle, "  fix vpn ")
+    assert store.local(token) is local and store.local("nope") is None
+    assert store.in_effect("fix vpn") is local
+    handle.answer = model
+    assert store.in_effect("fix vpn") is model
+    assert store.in_effect("another name") is None
+    assert bridge.PendingSuggestions().in_effect("fix vpn") is None
+
+
+def test_suggest_has_no_deferred_model_path():
+    """The dialog asks once per finished name, so the model stages start at once: the 1.5 s idle timer and
+    `defer_models` are gone."""
+    import inspect
+    from launcher import suggest
+    assert "defer_models" not in inspect.signature(suggest.suggest).parameters
+    assert not hasattr(suggest.Pending, "release_after") and not hasattr(bridge, "MODEL_IDLE_S")
+    assert bridge.SUGGEST_WAIT_MS == int((suggest.QWEN_TOTAL_S + suggest.CLAUDE_TOTAL_S) * 1000) + 1000
+
+
+# ---- flow log and outcome -------------------------------------------------------------------------------------------
+
+def _flow_events(env):
+    path = env.data_dir / "flow.log"
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+def _outcomes(env):
+    path = env.data_dir / "suggest.log"
+    lines = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [x for x in lines if x.get("stage") == "outcome"]
+
+
+_FLOW_FIELDS = {"ts", "event", "folder", "kind", "filter", "step", "ui"}
+
+
+def test_prepare_new_start_here_logs_launch_and_outcome(fake_env):
+    r = fake_env.root
+    store = bridge.PendingSuggestions()
+    store.supersede(FakeHandle(Suggestion(r / "work" / "net", None, "medium", "vpn", "history")), "fix vpn")
+    bridge.prepare_new(fake_env, _payload(), runner=FakeRunner(), suggestions=store)
+    [launch] = _flow_events(fake_env)
+    assert _FLOW_FIELDS <= set(launch)
+    assert {k: launch[k] for k in ("event", "folder", "kind", "filter", "step", "ui", "folder_kind", "new_folder",
+                                   "wrapper", "github", "cwd")} == {
+        "event": "launch", "folder": "work\\net", "kind": None, "filter": "", "step": "done", "ui": "browser",
+        "folder_kind": None, "new_folder": None, "wrapper": "clauded", "github": None, "cwd": "work\\net"}
+    assert _outcomes(fake_env) == [{"ts": fake_env.now(), "stage": "outcome", "name": "fix vpn",
+                                    "suggested": "work\\net", "suggested_source": "history", "chosen": "work\\net",
+                                    "new_folder": None, "match": True}]
+
+
+def test_prepare_new_project_logs_new_folder_kind_and_launch_like_the_terminal(fake_env):
+    r = fake_env.root
+    store = bridge.PendingSuggestions()
+    handle = FakeHandle(Suggestion(r / "work" / "halo", None, "medium", "halo", "history"))
+    store.supersede(handle, "fix vpn")
+    handle.answer = Suggestion(r / "work" / "net", "vpn_fix", "high", "vpn", "qwen")
+    bridge.prepare_new(fake_env, _payload(new_folder="alert_review", kind="project", github="none", via="new_typed"),
+                       runner=FakeRunner(), suggestions=store)
+    events = _flow_events(fake_env)
+    assert [e["event"] for e in events] == ["new-folder", "kind", "launch"]
+    assert all(_FLOW_FIELDS <= set(e) and e["ui"] == "browser" for e in events)
+    assert events[0]["kind"] == "new_typed" and events[0]["name"] == "alert_review" and events[0]["step"] == "folder_name"
+    assert events[1]["value"] == "project" and events[1]["name"] == "alert_review" and events[1]["step"] == "kind"
+    assert events[2]["github"] == "none" and events[2]["cwd"] == "work\\net\\alert_review"
+    [out] = _outcomes(fake_env)
+    assert out["suggested"] == "work\\net" and out["suggested_source"] == "qwen" and out["chosen"] == "work\\net"
+    assert out["new_folder"] == "alert_review" and out["match"] is False  # suggested vpn_fix
+
+
+def test_prepare_new_container_logs_the_new_folder_but_no_launch(fake_env):
+    bridge.prepare_new(fake_env, _payload(rel="home", new_folder="box", kind="container", wrapper=None, via="bogus"),
+                       runner=FakeRunner())
+    events = _flow_events(fake_env)
+    assert [e["event"] for e in events] == ["new-folder", "kind"]
+    assert events[0]["kind"] is None  # an unknown `via` is not logged
+    assert _outcomes(fake_env) == []
+
+
+def test_prepare_new_without_a_suggestion_logs_no_suggested_folder(fake_env):
+    store = bridge.PendingSuggestions()
+    store.supersede(FakeHandle(Suggestion(fake_env.root / "work" / "net", None, "medium", "x", "history")), "other")
+    bridge.prepare_new(fake_env, _payload(), runner=FakeRunner(), suggestions=store)
+    [out] = _outcomes(fake_env)
+    assert out["suggested"] is None and out["match"] is False
+
+
+def test_prepare_new_launches_when_logging_fails(fake_env, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("log broken")
+    monkeypatch.setattr(bridge.flowlog, "log", boom)
+    monkeypatch.setattr(bridge, "log_outcome", boom)
+    result, launch = bridge.prepare_new(fake_env, _payload(new_folder="x1", kind="project"), runner=FakeRunner())
+    assert result["ok"] is True and result["launched"] is True and launch is not None
+    assert result["warnings"] == []
+
+
+def test_log_start_mirrors_the_terminal_start_event(fake_env):
+    r = fake_env.root
+    bridge.log_start(fake_env, "fix vpn", Suggestion(r / "work" / "net", None, "medium", "vpn", "history", strong=True))
+    bridge.log_start(fake_env, "zzz", Suggestion(r, None, "low", "root", "root"))
+    first, second = _flow_events(fake_env)
+    assert _FLOW_FIELDS <= set(first)
+    assert (first["event"], first["folder"], first["step"], first["ui"], first["name"], first["suggested"],
+            first["source"], first["strong"]) == ("start", "", "picker", "browser", "fix vpn", "work\\net",
+                                                  "history", True)
+    assert second["suggested"] is None and second["strong"] is False
 
 
 def test_prepare_new_still_launches_with_a_warning_when_remembering_fails(fake_env, monkeypatch):

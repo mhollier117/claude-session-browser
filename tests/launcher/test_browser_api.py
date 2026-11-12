@@ -264,6 +264,12 @@ def test_launcher_new_project_runs_the_scaffold_through_the_hook(fake_env, api):
     assert api.runner.calls[0] == ["git", "init", "-b", "main"]
     [(argv, _kw)] = api.popens
     assert argv[5] == str(fake_env.root / "home" / "ai" / "llm")
+    command = base64.b64decode(argv[-1]).decode("utf-16-le")
+    assert command.startswith(bridge.CHILD_SESSION_PREFIX)  # clears the child-session marker, forces persistence
+    saved = json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))
+    assert saved == {"home": {"wrapper": "clauded", "github": "none"}}  # the next dialog preselects these
+    assert api.launcher_children("home/ai")["defaults"] == {"wrapper": "clauded", "github": "none"}
+    assert api.launcher_children("home/ai")["bucket"] == "home"
 
 
 def test_launcher_new_container_creates_without_launching(fake_env, api):
@@ -333,20 +339,25 @@ def test_launcher_suggest_returns_local_then_poll(fake_env, api, monkeypatch):
     res = api.launcher_suggest("fix the vpn tunnel")
     assert res["local"] == {"path": "", "new_folder": None, "confidence": "low",
                             "reason": "no suggestion; start at the root", "source": "root"}  # no history yet
+    assert res["chips"] == [] and res["wait_ms"] == bridge.SUGGEST_WAIT_MS
     token = res["token"]
     got, deadline = None, time.monotonic() + 10
     while got is None and time.monotonic() < deadline:
         got = api.launcher_suggest_poll(token)
         time.sleep(0.02)
+    chips = got.pop("chips")
     assert got == {"path": "work/halo", "new_folder": None, "confidence": "high", "reason": "tickets",
                    "source": "qwen"}
+    assert chips[0] == {"rel": "work/halo", "mark": "model", "source": "qwen", "reason": "tickets",
+                        "new_folder": None, "needs_name": True}  # a place with no sessions of its own
+    assert len(chips) <= 3 and all(c["mark"] == "alt" for c in chips[1:])
     assert api.launcher_suggest_poll(token) is None  # handed out once
     assert http_calls[0] == ("GET", "http://qwen.test:8000/v1/models")
 
 
-def test_launcher_suggest_runs_the_models_only_for_the_latest_name(fake_env, api, monkeypatch):
+def test_launcher_suggest_starts_the_models_at_once_and_a_newer_name_supersedes(fake_env, api, monkeypatch):
+    """No idle timer any more: each finished name asks the model at once; only the latest answer is handed out."""
     _qwen_settings(fake_env)
-    monkeypatch.setattr(bridge, "MODEL_IDLE_S", 0.3)
     posts = []
 
     def http(method, url, headers, body, timeout):
@@ -355,17 +366,111 @@ def test_launcher_suggest_runs_the_models_only_for_the_latest_name(fake_env, api
         posts.append(body["messages"][1]["content"])
         return 200, {"choices": [{"message": {"content": json.dumps({"choice": 1})}}]}
     monkeypatch.setattr(cs, "_LAUNCHER_HTTP", http)
-    tokens = [api.launcher_suggest(n)["token"] for n in ("vpn", "vpn tun", "vpn tunnel")]
-    assert posts == []  # nothing before the name has been idle
+    first = api.launcher_suggest("vpn")["token"]
+    deadline = time.monotonic() + 10
+    while not posts and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert posts and "vpn" in posts[0]  # started without waiting for an idle time
+    last = api.launcher_suggest("vpn tunnel")["token"]
     got, deadline = None, time.monotonic() + 10
     while got is None and time.monotonic() < deadline:
-        got = api.launcher_suggest_poll(tokens[-1])
+        got = api.launcher_suggest_poll(last)
         time.sleep(0.02)
     assert got["source"] == "qwen"
-    time.sleep(0.5)  # a superseded request would have released by now
-    assert len(posts) == 1 and "vpn tunnel" in posts[0]
-    assert api.launcher_suggest_poll(tokens[0]) is None
+    assert api.launcher_suggest_poll(first) is None  # superseded: cancelled, never handed out
+
+
+def test_launcher_suggest_logs_the_start_event(fake_env, api):
+    api.launcher_suggest("fix the vpn tunnel")
+    lines = [json.loads(x) for x in (fake_env.data_dir / "flow.log").read_text(encoding="utf-8").splitlines()]
+    assert [(e["event"], e["ui"], e["name"]) for e in lines] == [("start", "browser", "fix the vpn tunnel")]
+
+
+def test_launcher_new_logs_the_outcome_against_the_suggestion_shown(fake_env, api):
+    api.launcher_suggest("fix vpn")
+    res = api.launcher_new({"name": "fix vpn", "rel": "home/ai", "new_folder": "vpn", "kind": "project",
+                            "wrapper": "clauded", "github": "none", "via": "new_typed"})
+    assert res["ok"] and res["launched"]
+    events = [json.loads(x) for x in (fake_env.data_dir / "flow.log").read_text(encoding="utf-8").splitlines()]
+    assert [e["event"] for e in events] == ["start", "new-folder", "kind", "launch"]
+    outcomes = [json.loads(x) for x in (fake_env.data_dir / "suggest.log").read_text(encoding="utf-8").splitlines()
+                if '"outcome"' in x]
+    assert len(outcomes) == 1 and outcomes[0]["name"] == "fix vpn" and outcomes[0]["chosen"] == "home\\ai"
+    assert outcomes[0]["new_folder"] == "vpn"
+
+
+def test_launcher_new_launch_survives_a_broken_log(fake_env, api, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(bridge.flowlog, "log", boom)
+    monkeypatch.setattr(bridge, "log_outcome", boom)
+    res = api.launcher_new({"name": "x", "rel": "work/net", "wrapper": "clauded"})
+    assert res["ok"] is True and res["launched"] is True and len(api.popens) == 1
 
 
 def test_launcher_suggest_poll_unknown_token(api):
     assert api.launcher_suggest_poll("nope") is None
+
+
+# ---- the dialog's page contract (no JS runner: pin the script's wiring) ----------------------------------------------
+
+@pytest.fixture(scope="module")
+def page():
+    return cs.build_html()
+
+
+def _js_fn(page, name):
+    """The source of the dialog's JS function `name` (up to the next top-level function or comment)."""
+    import re
+    m = re.search(rf"^(?:async )?function {name}\(.*?(?=^(?:async )?function |^// |^/\*)", page, re.M | re.S)
+    assert m, name
+    return m.group(0)
+
+
+def test_page_asks_once_per_finished_name_not_while_typing(page):
+    assert "debT" not in page and "setTimeout(()=>lnSuggest" not in page  # the 400 ms typing pause is gone
+    assert "addEventListener('input',lnOnName)" in page
+    assert "addEventListener('keydown',e=>{ if(e.key==='Enter') lnNameDone(); })" in page
+    assert "addEventListener('blur',lnNameDone)" in page
+    assert "lnSuggest" not in _js_fn(page, "lnOnName")
+    done = _js_fn(page, "lnNameDone")
+    assert "name===LN.suggName" in done and "lnSuggest(name)" in done  # Enter then blur asks once
+
+
+def test_page_chips_open_the_columns_and_never_move_or_launch_by_themselves(page):
+    render = _js_fn(page, "lnRenderSugg")
+    assert "LN.chips.map" in render and "lnUseChip(${i})" in render and "'★ '" in render and "'≈ '" in render
+    suggest = _js_fn(page, "lnSuggest")
+    assert "LN.chips=r.chips" in suggest and "LN.chips=s.chips" in suggest
+    assert "lnGoto" not in suggest and "lnPick" not in suggest  # a suggestion is only ever a chip
+    use = _js_fn(page, "lnUseChip")
+    assert "lnGoto(c.rel)" in use and "lnOpenNewFolder(LN.cols.length-1, c.new_folder)" in use
+    assert "c.needs_name" in use and "lnSubmit" not in use and "launcher_new" not in use
+
+
+def test_page_typed_folder_name_wins_over_the_session_slug(page):
+    from launcher.tree import slug
+    assert "replace(/[^a-z0-9._-]+/g,'_').replace(/^_+|_+$/g,'')" in _js_fn(page, "lnSlug")  # = tree.slug
+    assert slug("Alert Review!") == "alert_review"
+    assert "lnSlug(nf.touched ? nf.name : lnName())" in _js_fn(page, "lnNfFolder")
+    typed = _js_fn(page, "lnNfName")
+    assert "LN.nf.touched=!!v.trim()" in typed and "'new_typed'" in typed
+    create = _js_fn(page, "lnCreate")
+    assert "lnNfFolder()" in create and "via: nf.via" in create
+
+
+def test_page_preselects_the_bucket_defaults_and_offers_github_none(page):
+    apply = _js_fn(page, "lnApplyDefaults")
+    assert "c.bucket!==LN.defBucket" in apply and "LN.wrapperSet=false" in apply and "LN.githubSet=false" in apply
+    assert "c.defaults" in apply and "!LN.githubSet" in apply and "!LN.wrapperSet" in apply
+    assert "LN.githubSet=true" in _js_fn(page, "lnSetGithub")
+    nf = _js_fn(page, "lnRenderNf")
+    assert "['none', t('keins'), t('kein GitHub-Repo, nur git init')]" in nf
+    assert "github: project ? LN.github : null" in _js_fn(page, "lnCreate")
+    assert "lnApplyDefaultWrapper" not in page
+
+
+def test_page_new_strings_are_translated(page):
+    import i18n
+    for key in ("keins", "kein GitHub-Repo, nur git init", "neuer Ordner…"):
+        assert f"t('{key}')" in page and key in i18n.TRANSLATIONS["en"]
