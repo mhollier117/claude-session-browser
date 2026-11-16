@@ -4527,9 +4527,10 @@ class Api:
                               http=_LAUNCHER_HTTP or default_http, runner=_LAUNCHER_RUNNER,
                               on_update=lambda s: None)
         token = self._launcher_suggestions.supersede(pending, name)
-        bridge.log_start(env, name, pending.local)
+        bridge.log_start(env, name, None)
+        # No chips yet: Qwen, then Claude, and the local match only once both failed (it arrives through the poll).
         return {"local": bridge.suggestion_dict(env.root, pending.local), "token": token,
-                "chips": bridge.suggestion_chips(env.root, pending.local), "wait_ms": bridge.SUGGEST_WAIT_MS}
+                "chips": [], "wait_ms": bridge.SUGGEST_WAIT_MS}
 
     @_launcher_api
     def launcher_suggest_poll(self, token):
@@ -4543,6 +4544,8 @@ class Api:
         if s is None:
             return None
         root = self._launcher_env.root
+        if s is local:  # the local fallback: both models failed
+            return {**bridge.suggestion_dict(root, s), "chips": bridge.suggestion_chips(root, local)}
         return {**bridge.suggestion_dict(root, s), "chips": bridge.suggestion_chips(root, local, s)}
 
     @_launcher_api
@@ -9490,9 +9493,9 @@ async function lnSuggest(name){
     let s=null;
     try{ s=await api.launcher_suggest_poll(r.token); }catch(e){ s={ok:false}; }
     if(my!==LN.seq || !lnIsOpen()) return;
-    if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }   // keep the local chips
-    if(s && typeof s.path==='string'){   // a model answer replaces the local chips; anything else keeps them
-      if(s.source==='qwen' || s.source==='claude'){ LN.sugg=s; LN.chips=s.chips || LN.chips; }
+    if(s && s.ok===false){ LN.suggWaiting=false; lnRenderSugg(); return; }
+    if(s && typeof s.path==='string'){   // Qwen's or Claude's answer, or the local match once both failed
+      LN.sugg=s; LN.chips=s.chips || [];
       LN.suggWaiting=false; lnRenderSugg(); return;
     }
     if(Date.now()-started>=limit){ LN.suggWaiting=false; lnRenderSugg(); return; }

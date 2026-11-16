@@ -231,9 +231,11 @@ def test_weak_local_suggestion_is_a_row_at_the_root(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("pxe boot rework")
     assert flow.pending.local.path == pxe and not flow.pending.local.strong
-    assert flow.folder == r and flow.banner() == ""  # round 2: only a strong local answer moves the picker
+    assert flow.folder == r and flow.banner() == ""
+    assert "alt" not in _kinds(flow)  # strict order: nothing local while the models are asked
+    assert flow.pending.join(10)       # no Qwen, no Claude in the test: both fail
+    assert flow.poll() is True
     assert flow.rows[0] == ("alt", "≈ home\\homelab\\pxe", pxe) and flow.rows[flow.selected][0] == "child"
-    flow.pending.join(5)
 
 
 def test_suggestion_is_offered_not_forced_after_user_moved(fake_env, index):
@@ -541,8 +543,8 @@ def test_render_new_shows_breadcrumb_banner_and_rows(fake_env, index):
 class _FakePending:
     """A `suggest()` result with a fixed local answer and (optionally) a model answer, no thread."""
 
-    def __init__(self, local, model=None):
-        self.local, self.model = local, model
+    def __init__(self, local, model=None, failed=False):
+        self.local, self.model, self.failed = local, model, failed  # failed: Qwen and Claude both gave no answer
 
     def wait(self, timeout=None):
         return self.model
@@ -550,9 +552,12 @@ class _FakePending:
     def join(self, timeout=None):
         return True
 
+    def fallback(self):
+        return self.local if self.failed and self.model is None and self.local.source != "root" else None
 
-def _flow_with(env, index, local=None, model=None, runner=None):
-    pending = _FakePending(local or Suggestion(env.root, None, "low", "no suggestion", "root"), model)
+
+def _flow_with(env, index, local=None, model=None, runner=None, failed=False):
+    pending = _FakePending(local or Suggestion(env.root, None, "low", "no suggestion", "root"), model, failed)
     flow = NewFlow(env, index, runner or FakeRunner(), FakeHttp(), suggest_fn=lambda *a, **k: pending)
     return flow, pending
 
@@ -654,9 +659,10 @@ def test_suggestions_block_local_alternatives_then_model(fake_env, index):
     r = fake_env.root
     a, b, c, d = (r / "work" / "halo", r / "home" / "ai", r / "home" / "homelab", r / "cc")
     local = Suggestion(a, None, "medium", "matches halo", "history", alternatives=[b, c])
-    flow, pending = _flow_with(fake_env, index, local=local)
+    flow, pending = _flow_with(fake_env, index, local=local, failed=True)
     flow.start("halo thing")
-    assert flow.folder == r  # not strong: the picker opens at the root
+    assert flow.folder == r and "alt" not in _kinds(flow)  # nothing local before the models are done
+    assert flow.poll() is True
     assert flow.rows[:3] == [("alt", "≈ work\\halo", a), ("alt", "≈ home\\ai", b), ("alt", "≈ home\\homelab", c)]
     assert flow.rows[3][0] == "child" and flow.selected == 3
     flow.selected = 1
@@ -669,15 +675,20 @@ def test_suggestions_block_local_alternatives_then_model(fake_env, index):
     assert flow.poll() is False
 
 
-def test_strong_local_opens_the_picker_there(fake_env, index):
+def test_a_strong_local_match_waits_for_qwen_and_claude(fake_env, index):
+    """Strict order: Qwen, then Claude, then the local match only once both failed. A strong local match neither
+    moves the picker nor shows while the models work."""
     r = fake_env.root
     local = Suggestion(r / "work" / "net", None, "high", "matches forti, vpn", "history", strong=True)
-    flow, _p = _flow_with(fake_env, index, local=local)
+    flow, pending = _flow_with(fake_env, index, local=local)
     flow.start("forti vpn")
-    assert flow.folder == r / "work" / "net"
-    assert flow.banner() == "suggested by history · matches forti, vpn"
-    flow.esc()
-    assert flow.rows[0] == ("alt", "≈ work\\net", r / "work" / "net")
+    assert flow.folder == r and flow.banner() == ""
+    assert not [k for k in _kinds(flow) if k in ("alt", "suggested")]
+    assert flow.poll() is False and flow.suggestion_in_effect() is None
+    pending.failed = True
+    assert flow.poll() is True
+    assert flow.folder == r and flow.rows[0] == ("alt", "≈ work\\net", r / "work" / "net")
+    assert flow.suggestion_in_effect() is local
 
 
 def test_children_are_ordered_by_last_activity(fake_env, index):
@@ -764,11 +775,12 @@ def test_flow_log_and_outcome_for_a_typed_new_project(fake_env, index):
                                     "chosen": "work\\ninja", "new_folder": "alert_review", "match": True}]
 
 
-def test_outcome_uses_the_local_suggestion_before_a_model_answer(fake_env, index):
+def test_outcome_uses_the_local_suggestion_once_both_models_failed(fake_env, index):
     r = fake_env.root
     local = Suggestion(r / "work" / "halo", None, "medium", "matches halo", "history")
-    flow, _p = _flow_with(fake_env, index, local=local)
+    flow, _p = _flow_with(fake_env, index, local=local, failed=True)
     flow.start("halo")
+    flow.poll()
     _go(flow, r / "home")
     _pick(flow, "start")
     flow.choose_wrapper("clauded")
@@ -819,8 +831,9 @@ def test_filter_never_keeps_new_or_start_selected(fake_env, index):
 def test_esc_back_to_the_picker_restores_the_row_the_user_left_from(fake_env, index):
     r = fake_env.root
     local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history", alternatives=[r / "home" / "ai"])
-    flow, _p = _flow_with(fake_env, index, local=local)
+    flow, _p = _flow_with(fake_env, index, local=local, failed=True)
     flow.start("halo thing")
+    flow.poll()
     _go(flow, r / "work" / "net")
     assert _kinds(flow)[:2] == ["alt", "alt"]
     _pick(flow, "new")
@@ -840,8 +853,9 @@ def test_cursor_on_alt_follows_to_the_star_for_the_same_folder(fake_env, index):
     r = fake_env.root
     a, b = r / "work" / "halo", r / "home" / "ai"
     local = Suggestion(a, None, "medium", "halo", "history", alternatives=[b])
-    flow, pending = _flow_with(fake_env, index, local=local)
+    flow, pending = _flow_with(fake_env, index, local=local, failed=True)
     flow.start("halo thing")
+    flow.poll()
     flow.selected = 0
     assert flow.rows[0] == ("alt", "≈ work\\halo", a)
     pending.model = Suggestion(a, None, "high", "halo", "qwen")  # no alternatives of its own
@@ -891,8 +905,9 @@ def test_backspace_and_esc_at_the_root_do_nothing(fake_env, index):
 def test_filter_shows_the_suggestions_hidden_line(fake_env, index):
     r = fake_env.root
     local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history")
-    flow, _p = _flow_with(fake_env, index, local=local)
+    flow, _p = _flow_with(fake_env, index, local=local, failed=True)
     flow.start("halo")
+    flow.poll()
     hint = "suggestions hidden while filtering · backspace to clear"
     assert hint not in "".join(t for _s, t in render_new(flow, 100, 30))
     flow.type_filter("w")
@@ -1316,7 +1331,7 @@ def test_outcome_logs_the_model_answer_only_once_its_row_was_drawn(fake_env, ind
                                model=Suggestion(r / "work" / "net", None, "high", "vpn", "qwen"))
     flow.start("x y")
     flow.poll()  # applied, but never drawn
-    assert flow.suggestion_in_effect() is local
+    assert flow.suggestion_in_effect() is None  # and the local match was never offered (the model answered)
     _text(flow)
     assert flow.suggestion_in_effect().source == "qwen"
 

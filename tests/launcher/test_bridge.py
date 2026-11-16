@@ -411,11 +411,15 @@ def test_prepare_new_mkdir_failure_is_an_error(fake_env, monkeypatch):
 # ---- pending suggestions ------------------------------------------------------------------------------------------
 
 class FakePending:
-    def __init__(self, answer=None):
+    def __init__(self, answer=None, fallback=None):
         self.answer = answer
+        self.local_fallback = fallback  # what `fallback()` returns once both models failed
 
     def wait(self, timeout=None):
         return self.answer
+
+    def fallback(self):
+        return None if self.answer is not None else self.local_fallback
 
 
 def test_pending_suggestions_return_the_answer_once():
@@ -446,8 +450,8 @@ def test_pending_suggestions_unknown_token():
 class FakeHandle(FakePending):
     """A `Pending` stand-in for `supersede`: records `cancel()`."""
 
-    def __init__(self, local=None, answer=None):
-        super().__init__(answer)
+    def __init__(self, local=None, answer=None, fallback=None):
+        super().__init__(answer, fallback)
         self.local = local
         self.cancelled = False
 
@@ -475,14 +479,26 @@ def test_in_effect_is_the_model_answer_once_handed_to_the_page_else_the_local_on
     handle = FakeHandle(local)
     token = store.supersede(handle, "  fix vpn ")
     assert store.local(token) is local and store.local("nope") is None
-    assert store.in_effect("fix vpn") is local
+    assert store.in_effect("fix vpn") is None  # strict order: nothing is suggested while the models work
     handle.answer = model
-    assert store.in_effect("fix vpn") is local  # answered, but the page has not been shown it yet
+    assert store.in_effect("fix vpn") is None  # answered, but the page has not been shown it yet
     assert store.poll(token) is model
     assert store.in_effect("fix vpn") is model
     assert store.in_effect("another name") is None
     assert bridge.PendingSuggestions().in_effect("fix vpn") is None
-    store.supersede(FakeHandle(local), "fix vpn")  # a new request for the same name starts from its local answer
+    store.supersede(FakeHandle(local), "fix vpn")  # a new request for the same name starts with nothing shown
+    assert store.in_effect("fix vpn") is None
+
+
+def test_the_local_match_is_offered_only_once_both_models_failed(fake_env):
+    r = fake_env.root
+    local = Suggestion(r / "work" / "halo", None, "medium", "halo", "history")
+    store = bridge.PendingSuggestions()
+    handle = FakeHandle(local)
+    token = store.supersede(handle, "fix vpn")
+    assert store.poll(token) is None  # Qwen and Claude still working: no local chip
+    handle.local_fallback = local     # both failed
+    assert store.poll(token) is local
     assert store.in_effect("fix vpn") is local
 
 
@@ -515,7 +531,9 @@ _FLOW_FIELDS = {"ts", "event", "folder", "kind", "filter", "step", "ui"}
 def test_prepare_new_start_here_logs_launch_and_outcome(fake_env):
     r = fake_env.root
     store = bridge.PendingSuggestions()
-    store.supersede(FakeHandle(Suggestion(r / "work" / "net", None, "medium", "vpn", "history")), "fix vpn")
+    local = Suggestion(r / "work" / "net", None, "medium", "vpn", "history")
+    handle = FakeHandle(local, fallback=local)  # both models failed, so the page was shown the local match
+    store.poll(store.supersede(handle, "fix vpn"))
     bridge.prepare_new(fake_env, _payload(), runner=FakeRunner(), suggestions=store)
     [launch] = _flow_events(fake_env)
     assert _FLOW_FIELDS <= set(launch)

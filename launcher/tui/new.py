@@ -102,6 +102,7 @@ class NewFlow:
         self.offered: Suggestion | None = None  # the model's answer, shown as the ★ row
         self.shown: Suggestion | None = None  # `offered` once its ★ row has been drawn (the outcome log's suggestion)
         self._model_applied = False
+        self._fallback_applied = False  # both models failed and the local match is shown as ≈ rows
         self._preselect: str | None = None  # `+ new folder: <name>` from a suggestion, for self.folder only
         self._expanded: set[Path] = set()  # folded levels the user asked to see in full
         self._new_source: str | None = None  # the picker row kind that led to the folder-name step
@@ -118,8 +119,9 @@ class NewFlow:
     # ---- name -------------------------------------------------------------------------------------------------------
 
     def start(self, name: str) -> NewFlow:
-        """Begin the walk for session `name` (required). The picker opens at the root, or at the local answer when
-        it is strong; the model stages run in the background (see `poll`)."""
+        """Begin the walk for session `name` (required). The picker opens at the root with no suggestion: the order
+        is strict (Qwen, then Claude, then the local match only if both failed), so nothing is suggested while a
+        model is still working (see `poll`)."""
         name = (name or "").strip()
         if not name:
             raise ValueError("a session name is required")
@@ -128,12 +130,9 @@ class NewFlow:
         self.error = ""
         self.pending = self._suggest(self.env, self.index, name, http=self.http, runner=self.runner,
                                      on_update=lambda s: None)
-        local = self.pending.local
-        sure = local.strong and local.source != "root"
-        self.suggestion = local if sure else None
-        self._log("start", name=name, suggested=self._rel(local.path) if local.source != "root" else None,
-                  source=local.source, strong=sure)
-        self._open(local.path if sure else self.env.root, via="start")
+        self.suggestion = None
+        self._log("start", name=name, suggested=None, source="models")
+        self._open(self.env.root, via="start")
         return self
 
     # ---- flow log ---------------------------------------------------------------------------------------------------
@@ -157,7 +156,7 @@ class NewFlow:
         answer (None before `start`)."""
         if self.shown is not None:
             return self.shown
-        return self.pending.local if self.pending is not None else None
+        return self.pending.local if self._fallback_applied and self.pending is not None else None
 
     def note_shown(self) -> None:
         """The renderer drew the ★ row: from now on the model's answer is the suggestion in effect."""
@@ -171,7 +170,11 @@ class NewFlow:
             return False
         s = self.pending.wait(0)
         if s is None:
-            return False
+            if self._fallback_applied or self.pending.fallback() is None:
+                return False
+            self._fallback_applied = True  # Qwen and Claude both failed: now the local match may show
+            self._refresh()
+            return True
         self._model_applied = True
         self.apply_suggestion(s)
         return True
@@ -254,8 +257,8 @@ class NewFlow:
 
     def _suggestion_rows(self) -> list[tuple[str, str, Path | None]]:
         """Up to `MAX_SUGGESTIONS` rows: the model's answer (★), then the ranked alternatives (≈): the model's
-        alternatives when it gave some, otherwise the local top candidate and its alternatives. The current folder
-        and duplicates (such as a local ≈ for the ★ folder) are left out."""
+        alternatives when it gave some, otherwise the local top candidate and its alternatives, but those only once
+        both models failed (strict order). The current folder and duplicates are left out."""
         rows: list[tuple[str, str, Path | None]] = []
         seen: set[str] = set()
 
@@ -268,7 +271,7 @@ class NewFlow:
                 rows.append((kind, label, Path(path)))
 
         model = self.offered
-        local = self.pending.local if self.pending is not None else None
+        local = self.pending.local if self.pending is not None and (model is not None or self._fallback_applied) else None
         ranked = [local.path, *local.alternatives] if local is not None and local.source != "root" else []
         if model is not None:
             add("suggested", model.path, self._star_label(model))

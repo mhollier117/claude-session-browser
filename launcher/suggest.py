@@ -557,6 +557,15 @@ class Pending:
             return not self._thread.is_alive()
         return True
 
+    def fallback(self) -> Suggestion | None:
+        """The local answer, but only once Qwen and Claude have both finished without a valid answer: the order is
+        strict (Qwen, then Claude, then local), so nothing local is offered while a model is still working. None
+        while waiting, after a model answered, after `cancel()`, or when the local answer is the root."""
+        if self._cancelled or self.local.source == "root" or not self.join(0):
+            return None
+        with self._lock:
+            return None if self._answer is not None or self._cancelled else self.local
+
 
 def _offer(env: Env, name: str, pending: Pending, s: Suggestion | None,
            on_update: Callable[[Suggestion], None]) -> None:
@@ -612,7 +621,8 @@ def _run_models(env: Env, rows: _Rows, name: str, prep: Prepared | None, http: H
 
 def suggest(env: Env, index: Index, name: str, *, http: Http = default_http, runner: Runner | None = None,
             on_update: Callable[[Suggestion], None], claude_exe: Path | None = None) -> Pending:
-    """Return at once with the local answer (the top-ranked folder, else the root) and start one daemon thread that
+    """Return at once with the local answer (the top-ranked folder, else the root; offered only through
+    `Pending.fallback` once both models failed) and start one daemon thread that
     asks Qwen, then Claude only if Qwen gave no valid answer; `on_update` gets the model answer, once, from that
     thread. `index.rows()` is read exactly once, here on the calling thread (its sqlite connection is
     single-threaded), and the retrieval and prompt are worked out here too."""

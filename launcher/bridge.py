@@ -247,9 +247,13 @@ def _flow(env: Env, event: str, folder: Path, step: str, kind: str | None = None
     flowlog.log(env, event, folder=_log_rel(env.root, folder), kind=kind, filter="", step=step, ui="browser", **extra)
 
 
-def log_start(env: Env, name: str, local: Suggestion) -> None:
-    """The dialog asked for a suggestion for a finished name: the terminal's `start` event. Never raises."""
+def log_start(env: Env, name: str, local: Suggestion | None = None) -> None:
+    """The dialog asked for a suggestion for a finished name: the terminal's `start` event (nothing is suggested yet:
+    the models answer first, `local` None). Never raises."""
     try:
+        if local is None:
+            _flow(env, "start", env.root, "picker", name=name, suggested=None, source="models")
+            return
         found = local.source != "root"
         _flow(env, "start", env.root, "picker", name=name, suggested=_log_rel(env.root, local.path) if found else None,
               source=local.source, strong=bool(found and local.strong))
@@ -378,13 +382,14 @@ class PendingSuggestions:
         return self.add(pending)
 
     def in_effect(self, name: str) -> Suggestion | None:
-        """The suggestion the dialog showed for session `name`: the model's answer once `poll` has handed it to the
-        page, else the local one; None when the current request was for another name (or there is none)."""
+        """The suggestion the dialog showed for session `name`: what `poll` handed to the page (the model's answer,
+        or the local fallback once both models failed); None before that, or when the current request was for
+        another name (or there is none)."""
         with self._lock:
             pending, current_name, shown = self._current, self._current_name, self._current_shown
         if pending is None or current_name != (name or "").strip():
             return None
-        return shown or pending.local
+        return shown
 
     def local(self, token: str) -> Suggestion | None:
         """The local answer of the request behind `token` (None for an unknown or expired token)."""
@@ -393,14 +398,14 @@ class PendingSuggestions:
         return None if entry is None else entry[1].local
 
     def poll(self, token: str) -> Suggestion | None:
-        """The model's answer once it is there (then the entry is dropped); None while waiting, or for an unknown or
-        expired token."""
+        """The model's answer once it is there, or the local fallback once Qwen and Claude both failed (then the
+        entry is dropped); None while a model is still working, or for an unknown or expired token."""
         with self._lock:
             self._purge()
             entry = self._items.get(token)
             if entry is None:
                 return None
-            answer = entry[1].wait(0)
+            answer = entry[1].wait(0) or entry[1].fallback()
             if answer is not None:
                 del self._items[token]
                 if entry[1] is self._current:
