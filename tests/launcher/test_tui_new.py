@@ -354,17 +354,17 @@ def test_filter_back_and_esc(fake_env, index):
 
 # ---- wrapper, github, result -------------------------------------------------------------------------------------
 
-def test_confirm_preselects_the_wrapper_per_area_and_w_cycles_in_order(fake_env, index):
+def test_confirm_preselects_clauded_in_every_area_and_w_cycles_in_order(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("tooling")
     _go(flow, fake_env.root / "cc")
     _pick(flow, "start")
-    assert flow.step == "confirm" and flow.wrapper == "claude" and flow.github is None
+    assert flow.step == "confirm" and flow.wrapper == "clauded" and flow.github is None  # no cc exception
     seen = [flow.wrapper]
     for _ in range(6):
         flow.cycle_wrapper()
         seen.append(flow.wrapper)
-    assert seen == ["claude", "clauded", "claude6", "claudeb", "claudew", "qwen", "claude"]
+    assert seen == ["clauded", "claude6", "claudeb", "claudew", "qwen", "claude", "clauded"]
     flow.cycle_github()  # start here creates nothing: there is no GitHub choice to cycle
     assert flow.github is None
     flow.esc()
@@ -1063,8 +1063,10 @@ def test_cli_n_from_resume_list_runs_new_flow(fake_env, index, capsys):
 
 # ---- the confirm step (round 2, task 4) ---------------------------------------------------------------------------
 
-CONFIRM_KEYS = "enter launch · ctrl-w wrapper · ctrl-g github · esc back · ctrl-c cancel"
-CONFIRM_HERE_KEYS = "enter launch · ctrl-w wrapper · type to name a new folder · esc back · ctrl-c cancel"
+CONFIRM_KEYS = ("enter launch · ctrl-p launch asking permissions · ctrl-w wrapper · ctrl-g github · esc back · "
+                "ctrl-c cancel")
+CONFIRM_HERE_KEYS = ("enter launch · ctrl-p launch asking permissions · ctrl-w wrapper · type to name a new folder · "
+                     "esc back · ctrl-c cancel")
 
 
 def _text(flow, width=100, height=30):
@@ -1163,7 +1165,7 @@ def test_unknown_values_are_rejected(fake_env, index):
         flow.choose_github("gitlab")
 
 
-def test_work_wf_defaults_to_no_github_and_launch_remembers_the_buckets_choices(fake_env, index):
+def test_work_wf_defaults_to_no_github_and_launch_remembers_the_buckets_github_choice(fake_env, index):
     r = fake_env.root
     (r / "work" / "wf").mkdir()
     flow = _flow(fake_env, index)
@@ -1178,7 +1180,7 @@ def test_work_wf_defaults_to_no_github_and_launch_remembers_the_buckets_choices(
     again = _flow(fake_env, index)
     again.start("second")
     _to_new_project(again, r / "work" / "wf", "second_export")
-    assert (again.wrapper, again.github) == ("claudeb", "work")
+    assert (again.wrapper, again.github) == ("clauded", "work")  # the wrapper is not remembered, the GitHub choice is
     other = _flow(fake_env, index)  # another bucket is untouched
     other.start("third")
     _go(other, r / "work" / "net")
@@ -1186,7 +1188,7 @@ def test_work_wf_defaults_to_no_github_and_launch_remembers_the_buckets_choices(
     assert other.wrapper == "clauded"
 
 
-def test_start_here_remembers_the_wrapper_but_keeps_the_github_choice(fake_env, index):
+def test_start_here_keeps_the_github_choice_and_does_not_restore_the_wrapper(fake_env, index):
     from launcher import defaults
     r = fake_env.root
     defaults.remember(fake_env, r / "home", "clauded", "work")
@@ -1196,7 +1198,7 @@ def test_start_here_remembers_the_wrapper_but_keeps_the_github_choice(fake_env, 
     _pick(flow, "start")
     flow.choose_wrapper("claude6")
     flow.enter()
-    assert defaults.get(fake_env, r / "home") == defaults.Defaults("claude6", "work")
+    assert defaults.get(fake_env, r / "home") == defaults.Defaults("clauded", "work")
 
 
 def test_esc_on_the_confirm_step_goes_back_to_kind_for_a_new_project(fake_env, index):
@@ -1357,7 +1359,7 @@ def test_back_from_confirm_keeps_w_and_g_within_the_same_bucket(fake_env, index)
         "home": {"wrapper": "claude6", "github": "none"}}
 
 
-def test_back_from_confirm_to_a_different_bucket_shows_that_buckets_defaults(fake_env, index):
+def test_back_from_confirm_to_a_different_bucket_shows_that_buckets_defaults_and_clauded(fake_env, index):
     from launcher import defaults
     r = fake_env.root
     defaults.remember(fake_env, r / "work" / "net", "claudew", "work")
@@ -1371,8 +1373,8 @@ def test_back_from_confirm_to_a_different_bucket_shows_that_buckets_defaults(fak
     assert flow.step == "picker"
     _go(flow, r / "work" / "net")
     _pick(flow, "start")
-    assert flow.step == "confirm" and flow.wrapper == "claudew"
-    assert "wrapper  claudew" in _text(flow, 400)
+    assert flow.step == "confirm" and flow.wrapper == "clauded"  # the stored wrapper is ignored
+    assert "wrapper  clauded" in _text(flow, 400)
 
 
 def test_start_here_then_back_and_new_project_in_the_same_bucket_gets_a_github_default(fake_env, index):
@@ -1408,4 +1410,99 @@ def test_every_step_footer_wraps_between_items(fake_env, index, width):
         assert all(get_cwidth(x) <= width for x in footer), (step, width)
         assert " · ".join(footer) == keys, (step, width)  # nothing split, nothing lost
         assert lines[0].startswith("Session name: ")  # the body above is still there, not pushed off
-    assert len(wrap_items(CONFIRM_KEYS, 40)) > 1 and len(wrap_items(CONFIRM_KEYS, 100)) == 1
+    assert len(wrap_items(CONFIRM_KEYS, 40)) > 1 and len(wrap_items(CONFIRM_KEYS, 100)) == 2
+    assert len(wrap_items(CONFIRM_KEYS, 160)) == 1
+    assert "ctrl-p launch asking permissions" in CONFIRM_KEYS
+
+
+# ---- ctrl-p: launch asking permissions ------------------------------------------------------------------------------
+
+def test_ask_permissions_maps_the_wrapper_and_only_works_on_the_confirm_step(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    flow.ask_permissions()  # not on the confirm step: nothing to change
+    assert flow.step == "name" or flow.step == "picker"
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    assert flow.wrapper == "clauded"
+    flow.ask_permissions()
+    assert flow.wrapper == "claude" and flow.step == "confirm"  # it only sets the wrapper; enter launches
+    flow.ask_permissions()
+    assert flow.wrapper == "claude"
+    flow.choose_wrapper("claudeb")
+    flow.ask_permissions()
+    assert flow.wrapper == "claudeb"
+    flow.choose_wrapper("claude6")
+    flow.ask_permissions()
+    assert flow.wrapper == "claude"
+
+
+def test_confirm_footers_offer_ctrl_p():
+    from launcher.tui.new import CONFIRM_HERE_KEYS as here, CONFIRM_KEYS as new
+    assert "ctrl-p launch asking permissions" in new.split(" · ")
+    assert "ctrl-p launch asking permissions" in here.split(" · ")
+
+
+def test_ctrl_p_on_a_start_here_confirm_launches_claude_in_that_folder(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("net stuff")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "start")
+    launch = _run_keys(flow, "\x10")
+    target = fake_env.root / "work" / "net"
+    assert isinstance(launch, Launch) and launch.cwd == target
+    assert launch.argv[:3] == ["claude", "-n", "net stuff"] and launch.argv[3] == "--session-id"
+    assert launch.argv[4] == flow.session_id and flow.step == "done"
+
+
+def test_ctrl_p_after_ctrl_w_maps_the_chosen_wrapper(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    launch = _run_keys(flow, "\x17\x17\x10")  # ctrl-w twice (claudeb), ctrl-p: claudeb never bypasses
+    assert launch.argv[0] == "claudeb"
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    _go(flow, fake_env.root / "home")
+    _pick(flow, "start")
+    launch = _run_keys(flow, "\x17\x10")  # claude6 maps to plain claude
+    assert launch.argv[0] == "claude"
+
+
+def test_ctrl_p_on_a_new_project_confirm_creates_the_folder_then_launches_with_claude(fake_env, index):
+    runner = FakeRunner({"gh repo create": (0, "", ""), "git rev-parse HEAD": (0, "abc123\n", "")})
+    flow = _flow(fake_env, index, runner=runner)
+    flow.start("vpn export")
+    _to_new_project(flow, fake_env.root / "work" / "net", "vpn_export")
+    target = fake_env.root / "work" / "net" / "vpn_export"
+    assert not target.exists()  # nothing is created before the key
+    launch = _run_keys(flow, "\x10")
+    assert target.is_dir() and (target / "plan.md").is_file()
+    assert isinstance(launch, Launch) and launch.cwd == target
+    assert launch.argv[:3] == ["claude", "-n", "vpn export"] and launch.argv[3] == "--session-id"
+    assert ["gh", "repo", "create", "vpn_export", "--private", "--source", ".", "--push"] in runner.calls
+
+
+def test_ctrl_p_is_ignored_off_the_confirm_step(fake_env, index):
+    flow = _flow(fake_env, index)
+    flow.start("x y")
+    assert _run_keys(flow, "\x10\x03") is None  # ctrl-p on the picker does nothing; ctrl-c then quits
+    assert flow.step != "done" and flow.wrapper in (None, "clauded")
+
+
+@pytest.mark.parametrize("width", [40, 60, 100])
+def test_start_here_confirm_footer_wraps_between_items_and_keeps_ctrl_p(fake_env, index, width):
+    from prompt_toolkit.utils import get_cwidth
+    from launcher.tui.new import CONFIRM_HERE_KEYS as keys
+    from launcher.tui.resume import wrap_items
+    flow = _flow(fake_env, index)
+    flow.start("net stuff")
+    _go(flow, fake_env.root / "work" / "net")
+    _pick(flow, "start")
+    lines = _text(flow, width).splitlines()
+    footer = lines[-len(wrap_items(keys, width)):]
+    assert all(get_cwidth(x) <= width for x in footer)
+    assert " · ".join(footer) == keys
+    assert any("ctrl-p launch asking permissions" in x for x in footer)  # the item is never split
+    assert lines[0].startswith("Session name: ")

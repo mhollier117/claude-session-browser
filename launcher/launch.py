@@ -14,8 +14,11 @@ import termfocus
 from .index import Row
 
 WRAPPERS = ("claude", "clauded", "claude6", "claudeb", "claudew", "qwen")
-_CC_AREA = "cc"
-_DEFAULT = "clauded"
+_DEFAULT = "clauded"  # the user's alias: claude --dangerously-skip-permissions
+# ctrl-p ("ask permissions"): the same launch without --dangerously-skip-permissions. clauded, claude6 and claudew
+# all pass that flag inside their profile functions, so the plain `claude` is the non-bypass form; claudeb and claude
+# never bypass, and qwen is another tool.
+_WITHOUT_BYPASS = {"clauded": "claude", "claude6": "claude", "claudew": "claude"}
 
 
 @dataclass
@@ -26,16 +29,19 @@ class Launch:
 
 
 def default_wrapper(root: Path, cwd: Path) -> str:
-    """`claude` for the `cc` area (tooling for Claude Code itself), `clauded` everywhere else."""
-    rel = [p.lower() for p in Path(cwd).parts]
-    base = [p.lower() for p in Path(root).parts]  # case-insensitive, whole path components (Windows paths)
-    area = rel[len(base):len(base) + 1] if rel[:len(base)] == base else []
-    return "claude" if area == [_CC_AREA] else _DEFAULT
+    """`clauded` everywhere (the launcher always starts in bypass mode; ctrl-p asks for permissions instead)."""
+    return _DEFAULT
+
+
+def without_bypass(wrapper: str) -> str:
+    """The wrapper that runs the same launch with permission prompts (see `_WITHOUT_BYPASS`)."""
+    return _WITHOUT_BYPASS.get(wrapper, wrapper)
 
 
 def resume_command(row: Row, wrapper: str | None, *, root: Path) -> Launch:
-    """Resume `row`. A Qwen session always resumes with `qwen`; otherwise the explicit `wrapper`, then the one
-    that last launched it, then the folder's default for `root`."""
+    """Resume `row`. A Qwen session always resumes with `qwen`; otherwise the explicit `wrapper`, then the account
+    wrapper that last launched it (claude6, claudeb, claudew), then `clauded`. A session last launched with plain
+    `claude` resumes with `clauded` too: plain `claude` is what ctrl-p picks, per launch."""
     warnings: list[str] = []
     if row.cwd:
         cwd = Path(row.cwd)
@@ -47,7 +53,8 @@ def resume_command(row: Row, wrapper: str | None, *, root: Path) -> Launch:
     if row.store == "qwen":
         chosen = "qwen"
     else:
-        chosen = wrapper or row.wrapper or default_wrapper(root, cwd)
+        last = row.wrapper if row.wrapper not in (None, "", "claude") else None
+        chosen = wrapper or last or default_wrapper(root, cwd)
     return Launch(cwd, [chosen, "-r", row.sid], warnings)
 
 

@@ -68,11 +68,11 @@ def test_render_rows_columns_and_ellipsis(fake_env):
     assert second[5:33] == "n" * 27 + "…"
     assert second[34:34 + loc_w].rstrip() == r"work\…\a_rather_long_folder\stackjack_rip_qwen"
     assert second[34 + loc_w + 1:].rstrip() == "qwen"
-    assert KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · "
-                    "ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
+    assert KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-p resume asking permissions · "
+                    "ctrl-n new · ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
     assert lines[-2:] == footer_lines(WIDTH) == [
-        "↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · ctrl-o folder · ctrl-w wrapper",
-        "ctrl-q quit"]  # wrapped between items, as the picker footer is
+        "↑↓ move · type to filter · tab preview · enter resume · ctrl-p resume asking permissions",
+        "ctrl-n new · ctrl-o folder · ctrl-w wrapper · ctrl-q quit"]  # wrapped between items, as the picker footer is
 
 
 def test_render_rows_middle_ellipsis_on_narrow_terminal(fake_env):
@@ -108,12 +108,13 @@ def test_render_rows_window_and_status(fake_env):
     assert lines[-1] == "filter: ro"
 
 
-@pytest.mark.parametrize("width, lines", [(120, 1), (100, 2), (60, 2), (40, 4)])
+@pytest.mark.parametrize("width, lines", [(200, 1), (120, 2), (100, 2), (60, 3), (40, 5)])
 def test_footer_wraps_between_items_and_loses_none(width, lines):
     from prompt_toolkit.utils import get_cwidth
     footer = footer_lines(width)
     assert len(footer) == lines and all(get_cwidth(x) <= width for x in footer)
     assert " · ".join(footer) == KEYS  # every item survives, in order, whole
+    assert any("ctrl-p resume asking permissions" in line for line in footer)  # the item is never split
     assert chrome_rows(width) == 3 + lines
 
 
@@ -270,6 +271,64 @@ def test_app_chords_and_typing_through_the_real_key_bindings(fake_env):
     assert isinstance(res, Resume) and res.row.sid == "aaa"
     res = _run_keys(fake_env, " \r")  # space on an empty filter opens the preview too
     assert isinstance(res, Resume) and res.row.sid == "aaa"
+
+
+def test_chords_has_ctrl_p_as_ask():
+    from launcher.tui.resume import CHORDS
+    assert CHORDS["c-p"] == "ask"
+    assert "ctrl-p resume asking permissions" in KEYS
+
+
+def test_state_enter_ask_permissions_resumes_without_bypass(fake_env):
+    st = ResumeState(fake_env, _two_sessions(fake_env))
+    res = st.enter(ask_permissions=True)
+    assert isinstance(res, Resume) and res.wrapper == "claude"
+    assert res.launch.argv == ["claude", "-r", "aaa"]
+    st.cycle_wrapper()
+    st.cycle_wrapper()  # claude6, then claudeb
+    assert st.enter(ask_permissions=True).launch.argv == ["claudeb", "-r", "aaa"]
+    st.cycle_wrapper()  # claudew
+    assert st.enter(ask_permissions=True).launch.argv == ["claude", "-r", "aaa"]
+    st.move(1)  # the qwen row maps to itself
+    assert st.enter(ask_permissions=True).launch.argv == ["qwen", "-r", "qqq"]
+
+
+def test_state_enter_ask_permissions_on_a_live_row_focuses(fake_env):
+    calls = []
+    st = ResumeState(fake_env, _two_sessions(fake_env), focus=lambda row: calls.append(row) or {"ok": True})
+    st.rows[0].live_pid = 99
+    assert st.enter(ask_permissions=True) is FOCUSED and len(calls) == 1
+
+
+def test_app_ctrl_p_resumes_asking_permissions(fake_env):
+    res = _run_keys(fake_env, "\x10")  # ctrl-p: no override, so claude (clauded without bypass)
+    assert isinstance(res, Resume) and res.row.sid == "aaa"
+    assert res.launch.argv == ["claude", "-r", "aaa"] and res.wrapper == "claude"
+    res = _run_keys(fake_env, "\x17\x17\x10")  # ctrl-w twice (claudeb), then ctrl-p: claudeb never bypasses
+    assert res.launch.argv == ["claudeb", "-r", "aaa"]
+    res = _run_keys(fake_env, "pxe boot\x10")  # ctrl-p works with a filter typed and is not text
+    assert res.launch.argv == ["claude", "-r", "aaa"]
+    assert _run_keys(fake_env, "\r").launch.argv == ["clauded", "-r", "aaa"]  # enter is unchanged
+
+
+def test_app_ctrl_p_on_a_live_row_focuses_like_enter(fake_env, monkeypatch):
+    import termfocus
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from launcher.tui.app import build_app
+    seen = []
+    monkeypatch.setattr(termfocus, "focus_session", lambda pid, cwd=None: seen.append(pid) or {"ok": True})
+    _two_sessions(fake_env)  # writes the session files
+    live = [{"session_id": "aaa", "pid": 99, "name": "x", "named": False, "cwd": str(fake_env.root / "home" / "homelab")}]
+    idx = Index(fake_env, claude_live=lambda: live, pid_exists=lambda pid: False)
+    idx.refresh()
+    assert idx.row("claude", "aaa").live_pid == 99
+    for keys in ("\r", "\x10"):  # enter and ctrl-p do the same: focus the window, no resume
+        with create_pipe_input() as pipe:
+            app = build_app(fake_env, idx, output=DummyOutput(), input=pipe)
+            pipe.send_text(keys)
+            assert app.run() is FOCUSED
+    assert seen == [99, 99]
 
 
 def test_state_cycle_wrapper(fake_env):

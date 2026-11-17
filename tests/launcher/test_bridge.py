@@ -195,7 +195,7 @@ def test_children_listing(fake_env):
     top = bridge.children_listing(fake_env, idx, fake_env.root)
     assert top["start_here"] is False and top["rel"] == ""
     assert top["kind_options"] == ["organisational"]
-    assert bridge.children_listing(fake_env, idx, fake_env.root / "cc")["default_wrapper"] == "claude"
+    assert bridge.children_listing(fake_env, idx, fake_env.root / "cc")["default_wrapper"] == "clauded"  # no cc exception any more
     idx.close()
 
 
@@ -208,10 +208,11 @@ def test_children_listing_carries_the_remembered_defaults(fake_env):
                                                                                     "github": "none"}
     assert bridge.children_listing(fake_env, idx, r / "work" / "net")["defaults"] == {"wrapper": "clauded",
                                                                                      "github": "personal"}
-    assert bridge.children_listing(fake_env, idx, r / "cc")["defaults"] == {"wrapper": "claude",
+    assert bridge.children_listing(fake_env, idx, r / "cc")["defaults"] == {"wrapper": "clauded",
                                                                            "github": "personal"}
     defaults.remember(fake_env, r / "work" / "net", "claudeb", "work")
-    assert bridge.children_listing(fake_env, idx, r / "work" / "net")["defaults"] == {"wrapper": "claudeb",
+    # the GitHub choice is remembered; the stored wrapper is ignored (always clauded)
+    assert bridge.children_listing(fake_env, idx, r / "work" / "net")["defaults"] == {"wrapper": "clauded",
                                                                                      "github": "work"}
     idx.close()
 
@@ -358,12 +359,12 @@ def test_prepare_new_github_none_makes_no_gh_call_and_is_remembered(fake_env):
     assert saved == {"work\\net": {"wrapper": "clauded", "github": "none"}}
 
 
-def test_prepare_new_remembers_choices_and_start_here_keeps_the_github_choice(fake_env):
+def test_prepare_new_remembers_the_github_choice_and_start_here_keeps_it(fake_env):
     from launcher import defaults
     bridge.prepare_new(fake_env, _payload(rel="home/ai", new_folder="a", kind="project", wrapper="claudeb",
                                           github="work"), runner=FakeRunner())
     bridge.prepare_new(fake_env, _payload(rel="home/homelab", wrapper="claude6"), runner=FakeRunner())
-    assert defaults.get(fake_env, fake_env.root / "home") == defaults.Defaults("claude6", "work")
+    assert defaults.get(fake_env, fake_env.root / "home") == defaults.Defaults("clauded", "work")
 
 
 def test_prepare_new_container_creates_and_does_not_launch(fake_env):

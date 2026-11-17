@@ -20,7 +20,7 @@ from prompt_toolkit.utils import get_cwidth
 from .. import defaults, flowlog
 from ..display import age, rel_or_abs
 from ..index import FolderStats, Index
-from ..launch import WRAPPERS, Launch, new_command
+from ..launch import WRAPPERS, Launch, new_command, without_bypass
 from ..paths import Env
 from ..scaffold import Runner, check_name, create_folder
 from ..suggest import Pending, Suggestion, default_http, log_outcome, suggest
@@ -43,9 +43,11 @@ PICKER_FOOTER = ("enter select · type to filter or name a new folder · backspa
 HIDDEN_HINT = "suggestions hidden while filtering · backspace to clear"
 OPTION_KEYS = "↑↓ · enter choose · esc back · ctrl-c quit"
 TEXT_KEYS = "enter confirm · esc back · ctrl-c quit"
-CONFIRM_KEYS = "enter launch · ctrl-w wrapper · ctrl-g github · esc back · ctrl-c cancel"
+CONFIRM_KEYS = ("enter launch · ctrl-p launch asking permissions · ctrl-w wrapper · ctrl-g github · esc back · "
+                "ctrl-c cancel")
 # start here: nothing is created, so there is no GitHub choice, and typing goes back to the picker as a filter
-CONFIRM_HERE_KEYS = "enter launch · ctrl-w wrapper · type to name a new folder · esc back · ctrl-c cancel"
+CONFIRM_HERE_KEYS = ("enter launch · ctrl-p launch asking permissions · ctrl-w wrapper · type to name a new folder · "
+                     "esc back · ctrl-c cancel")
 CONFIRM_TYPED_HINT = "esc to go back and change the folder name"
 
 
@@ -562,6 +564,12 @@ class NewFlow:
         self.error = ""
         self.step = "picker"
         self.type_filter(ch)  # a typed filter selects its own first match, not the row the picker was left from
+
+    def ask_permissions(self) -> None:
+        """ctrl-p on the confirm step: launch the same thing without bypass mode (`launch.without_bypass`); the
+        app then does what enter does."""
+        if self.step == "confirm" and self.wrapper:
+            self.wrapper = without_bypass(self.wrapper)
 
     def cycle_wrapper(self) -> None:
         """ctrl-w: the next wrapper (the Claude wrappers, then qwen)."""

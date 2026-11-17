@@ -17,7 +17,7 @@ from prompt_toolkit.utils import get_cwidth
 from .. import stores
 from ..display import age, middle_ellipsis, rel_or_abs
 from ..index import Index, Row
-from ..launch import WRAPPERS, Launch, focus_live, resume_command
+from ..launch import WRAPPERS, Launch, focus_live, resume_command, without_bypass
 from ..paths import Env
 from .preview import render_preview
 
@@ -28,8 +28,9 @@ _MARK = "▶ "
 _ELLIPSIS = "…"
 _RULE = "─"
 # prompt_toolkit key names of the chords; every printable key goes to the filter instead
-CHORDS = {"c-n": "new", "c-o": "open", "c-w": "wrapper", "c-q": "quit", "c-c": "quit"}
-KEYS = "↑↓ move · type to filter · tab preview · enter resume · ctrl-n new · ctrl-o folder · ctrl-w wrapper · ctrl-q quit"
+CHORDS = {"c-n": "new", "c-o": "open", "c-w": "wrapper", "c-p": "ask", "c-q": "quit", "c-c": "quit"}
+KEYS = ("↑↓ move · type to filter · tab preview · enter resume · ctrl-p resume asking permissions · ctrl-n new · "
+        "ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
 
 
 @dataclass
@@ -260,9 +261,10 @@ class ResumeState:
         self._wrappers[(row.store, row.sid)] = nxt
         self.status = f"resume with {nxt}"
 
-    def enter(self) -> Resume | _Signal | None:
+    def enter(self, ask_permissions: bool = False) -> Resume | _Signal | None:
         """A `Resume` to exit with, `FOCUSED` when a live session's window was brought forward, or None to stay
-        (nothing selected, or focusing failed: the error is in `status`)."""
+        (nothing selected, or focusing failed: the error is in `status`). `ask_permissions` (ctrl-p) resumes without
+        bypass mode (`launch.without_bypass`)."""
         row = self.current()
         if row is None:
             return None
@@ -273,6 +275,8 @@ class ResumeState:
             self.status = f"could not focus pid {row.live_pid}: {res.get('error') or 'unknown error'}"
             return None
         launch = self.launch_for(row)
+        if ask_permissions:
+            launch.argv[0] = without_bypass(launch.argv[0])
         return Resume(row, launch.argv[0], launch)
 
     def open_folder(self) -> None:

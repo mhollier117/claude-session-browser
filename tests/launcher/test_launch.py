@@ -22,15 +22,32 @@ def test_wrappers_constant():
     assert launch.WRAPPERS == ("claude", "clauded", "claude6", "claudeb", "claudew", "qwen")
 
 
-def test_default_wrapper_cc_area_is_claude(fake_env):
-    assert default_wrapper(fake_env.root, fake_env.root / "cc") == "claude"
-    assert default_wrapper(fake_env.root, fake_env.root / "CC" / "tool") == "claude"
+def test_default_wrapper_cc_area_is_clauded_too(fake_env):
+    assert default_wrapper(fake_env.root, fake_env.root / "cc") == "clauded"
+    assert default_wrapper(fake_env.root, fake_env.root / "CC" / "tool") == "clauded"
 
 
 def test_default_wrapper_elsewhere_is_clauded(fake_env):
     assert default_wrapper(fake_env.root, fake_env.root / "work" / "net") == "clauded"
     assert default_wrapper(fake_env.root, fake_env.root / "ccx") == "clauded"
     assert default_wrapper(fake_env.root, fake_env.root) == "clauded"
+
+
+@pytest.mark.parametrize("rel", ["", "cc", "work/net", "work/wf/x", "home/ai"])
+def test_default_wrapper_is_clauded_everywhere(fake_env, rel):
+    assert default_wrapper(fake_env.root, fake_env.root / rel) == "clauded"
+
+
+@pytest.mark.parametrize("wrapper, expected", [
+    ("clauded", "claude"), ("claude6", "claude"), ("claudew", "claude"),
+    ("claude", "claude"), ("claudeb", "claudeb"), ("qwen", "qwen"),
+])
+def test_without_bypass_maps_each_wrapper(wrapper, expected):
+    assert launch.without_bypass(wrapper) == expected
+
+
+def test_without_bypass_covers_every_known_wrapper():
+    assert {launch.without_bypass(w) for w in launch.WRAPPERS} == {"claude", "claudeb", "qwen"}
 
 
 def test_resume_uses_recorded_wrapper(tmp_path):
@@ -44,13 +61,32 @@ def test_resume_override_beats_recorded_wrapper(tmp_path):
     assert resume_command(make_row(cwd=str(tmp_path), wrapper="claude6"), "claudeb", root=tmp_path).argv == ["claudeb", "-r", "s1"]
 
 
-def test_resume_falls_back_to_default_wrapper(fake_env):
+def test_resume_falls_back_to_clauded(fake_env):
     in_cc = make_row(cwd=str(fake_env.root / "cc"))
     elsewhere = make_row(cwd=str(fake_env.root / "work" / "net"))
-    assert resume_command(in_cc, None, root=fake_env.root).argv[0] == "claude"
+    assert resume_command(in_cc, None, root=fake_env.root).argv[0] == "clauded"
     assert resume_command(elsewhere, None, root=fake_env.root).argv[0] == "clauded"
-    # a cc-area row with no recorded wrapper resumes with `claude`
-    assert resume_command(make_row(cwd=str(fake_env.root / "cc")), None, root=fake_env.root).argv == ["claude", "-r", "s1"]
+    assert resume_command(make_row(cwd=str(fake_env.root / "cc")), None, root=fake_env.root).argv == ["clauded", "-r", "s1"]
+
+
+def test_resume_last_launched_with_plain_claude_resumes_with_clauded(tmp_path):
+    assert resume_command(make_row(cwd=str(tmp_path), wrapper="claude"), None, root=tmp_path).argv == ["clauded", "-r", "s1"]
+
+
+@pytest.mark.parametrize("last", ["claudeb", "claude6", "claudew"])
+def test_resume_reuses_a_last_account_wrapper(tmp_path, last):
+    assert resume_command(make_row(cwd=str(tmp_path), wrapper=last), None, root=tmp_path).argv == [last, "-r", "s1"]
+
+
+def test_resume_explicit_wrapper_beats_plain_claude_last_wrapper(tmp_path):
+    row = make_row(cwd=str(tmp_path), wrapper="claude")
+    assert resume_command(row, "claudeb", root=tmp_path).argv == ["claudeb", "-r", "s1"]
+    assert resume_command(row, "claude", root=tmp_path).argv == ["claude", "-r", "s1"]
+
+
+def test_resume_qwen_ignores_a_last_wrapper(tmp_path):
+    row = make_row(store="qwen", sid="q1", cwd=str(tmp_path), wrapper="claudeb")
+    assert resume_command(row, None, root=tmp_path).argv == ["qwen", "-r", "q1"]
 
 
 def test_resume_qwen(tmp_path):

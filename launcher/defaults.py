@@ -76,13 +76,13 @@ def _read(env: Env) -> dict:
 
 
 def get(env: Env, folder: Path) -> Defaults:
-    """The wrapper and GitHub choice to preselect for `folder`; each falls back separately to its built-in."""
+    """The wrapper and GitHub choice to preselect for `folder`. The wrapper is always `clauded` (a stored one is
+    ignored: ctrl-w and ctrl-p change it for one launch only); GitHub falls back to its built-in."""
     key = bucket_key(env.root, folder)
     saved = _load(env).get(key)
     saved = saved if isinstance(saved, dict) else {}
-    wrapper, github = saved.get("wrapper"), saved.get("github")
-    if wrapper not in WRAPPERS:
-        wrapper = default_wrapper(env.root, folder)
+    github = saved.get("github")
+    wrapper = default_wrapper(env.root, folder)
     if github not in GITHUB_CHOICES:
         github = "none" if key in _NO_REPO_BUCKETS else "personal"
     return Defaults(wrapper, github)

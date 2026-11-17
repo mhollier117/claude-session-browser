@@ -33,18 +33,18 @@ def test_bucket_key_ignores_case(fake_env):
     ("work/net", Defaults("clauded", "personal")),
     ("work/clients/bast", Defaults("clauded", "personal")),
     ("home/ai", Defaults("clauded", "personal")),
-    ("cc/tools", Defaults("claude", "personal")),
+    ("cc/tools", Defaults("clauded", "personal")),  # no cc exception any more
 ])
 def test_built_in_fallbacks(fake_env, rel, expected):
     assert defaults.get(fake_env, fake_env.root / rel) == expected
 
 
-def test_remember_get_round_trip_per_bucket(fake_env):
+def test_remember_get_round_trip_per_bucket_keeps_github_and_ignores_the_wrapper(fake_env):
     r = fake_env.root
     defaults.remember(fake_env, r / "work" / "wf" / "a", "claudeb", "personal")
     defaults.remember(fake_env, r / "work" / "clients" / "bast", "claude6", "work")
-    assert defaults.get(fake_env, r / "work" / "wf" / "other") == Defaults("claudeb", "personal")
-    assert defaults.get(fake_env, r / "work" / "clients" / "x") == Defaults("claude6", "work")
+    assert defaults.get(fake_env, r / "work" / "wf" / "other") == Defaults("clauded", "personal")
+    assert defaults.get(fake_env, r / "work" / "clients" / "x") == Defaults("clauded", "work")
     assert defaults.get(fake_env, r / "work" / "net") == Defaults("clauded", "personal")  # untouched bucket
     saved = json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))
     assert saved == {"work\\wf": {"wrapper": "claudeb", "github": "personal"},
@@ -55,7 +55,8 @@ def test_remember_without_github_keeps_the_earlier_one(fake_env):
     folder = fake_env.root / "home" / "ai"
     defaults.remember(fake_env, folder, "clauded", "none")
     defaults.remember(fake_env, folder, "qwen")
-    assert defaults.get(fake_env, folder) == Defaults("qwen", "none")
+    assert defaults.get(fake_env, folder) == Defaults("clauded", "none")
+    assert json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))["home"]["wrapper"] == "qwen"
 
 
 def test_remember_rejects_unknown_values(fake_env):
@@ -74,9 +75,9 @@ def test_broken_or_invalid_file_falls_back(fake_env):
     assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "personal")
     path.write_text(json.dumps({"home": {"wrapper": "bash", "github": "gitlab"}, "cc": "x"}), encoding="utf-8")
     assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "personal")
-    assert defaults.get(fake_env, fake_env.root / "cc") == Defaults("claude", "personal")
+    assert defaults.get(fake_env, fake_env.root / "cc") == Defaults("clauded", "personal")
     defaults.remember(fake_env, fake_env.root / "home", "claudew", "work")  # replaces the broken content
-    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("claudew", "work")
+    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "work")
 
 
 # ---- review fixes: a failed read never erases the other buckets ------------------------------------------------------
@@ -114,9 +115,9 @@ def test_remember_retries_a_failed_read_once_and_keeps_the_other_buckets(fake_en
     _seed(fake_env)
     _failing_reads(monkeypatch, 1)
     defaults.remember(fake_env, fake_env.root / "work" / "net", "claudew", "none")
-    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("claudeb", "work")
-    assert defaults.get(fake_env, fake_env.root / "cc") == Defaults("claude6", "none")
-    assert defaults.get(fake_env, fake_env.root / "work" / "net") == Defaults("claudew", "none")
+    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "work")
+    assert defaults.get(fake_env, fake_env.root / "cc") == Defaults("clauded", "none")
+    assert defaults.get(fake_env, fake_env.root / "work" / "net") == Defaults("clauded", "none")
 
 
 def test_get_stays_tolerant_when_the_read_fails(fake_env, monkeypatch):
@@ -150,7 +151,7 @@ def test_a_locked_replace_is_retried_once(fake_env, monkeypatch):
     monkeypatch.setattr(defaults.time, "sleep", sleeps.append)
     defaults.remember(fake_env, fake_env.root / "home", "claudew", "none")
     assert len(calls) == 2 and sleeps == [defaults._RETRY_S]
-    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("claudew", "none")
+    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "none")  # the write landed: github
     assert not [p for p in fake_env.data_dir.iterdir() if p.name.endswith(".tmp")]
 
 
@@ -191,4 +192,12 @@ def test_remember_treats_a_non_object_top_level_as_empty(fake_env):
     fake_env.data_dir.mkdir(parents=True)
     (fake_env.data_dir / "defaults.json").write_text("[1, 2]", encoding="utf-8")
     defaults.remember(fake_env, fake_env.root / "home", "claudeb")
-    assert defaults.get(fake_env, fake_env.root / "home").wrapper == "claudeb"
+    stored = json.loads((fake_env.data_dir / "defaults.json").read_text(encoding="utf-8"))
+    assert stored == {"home": {"wrapper": "claudeb"}}  # written; the wrapper is simply ignored on read
+    assert defaults.get(fake_env, fake_env.root / "home") == Defaults("clauded", "personal")
+
+
+@pytest.mark.parametrize("stored", ["claude", "claudeb"])
+def test_get_ignores_a_stored_wrapper_but_returns_the_stored_github_choice(fake_env, stored):
+    defaults.remember(fake_env, fake_env.root / "work" / "net", stored, "work")
+    assert defaults.get(fake_env, fake_env.root / "work" / "net") == Defaults("clauded", "work")

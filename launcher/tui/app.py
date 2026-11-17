@@ -157,8 +157,9 @@ def build_app(env: Env, index: Index, output: Output | None = None, input=None) 
         state.chord(event.key_sequence[0].key.value)  # open folder / cycle wrapper; the status line shows the result
 
     @kb.add("enter")
+    @kb.add("c-p", filter=in_list)  # resume asking for permissions (no bypass)
     def _enter(event) -> None:
-        result = state.enter()
+        result = state.enter(ask_permissions=event.key_sequence[0].key.value == "c-p")
         if isinstance(result, Resume) or result is FOCUSED:
             event.app.exit(result=result)
         elif mode["preview"] and state.status:
@@ -315,6 +316,11 @@ def build_new_app(flow: NewFlow, output: Output | None = None, input=None) -> Ap
     @kb.add("c-w", filter=confirming)  # as on the resume list; plain w and g are letters on this step
     def _cycle_wrapper(event) -> None:
         flow.cycle_wrapper()
+
+    @kb.add("c-p", filter=confirming)  # launch asking for permissions: then exactly what enter does
+    def _ask_permissions(event) -> None:
+        flow.ask_permissions()
+        _enter(event)
 
     @kb.add("c-g", filter=confirming)
     def _cycle_github(event) -> None:
