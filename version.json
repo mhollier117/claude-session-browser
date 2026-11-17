@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.4",
-  "notes": "Launcher: strict suggestion order. Qwen first, then Claude, and the local name match only if both fail; nothing is suggested while a model is still answering.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.4",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.4/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "9726b95b6d7b63f45379d357502206bae2f7204a11ec89c1b98f5be16ee716c7"
+  "version": "1.7.0.5",
+  "notes": "Launcher: always launches with clauded (bypass mode). ctrl-p on the resume list or the confirm step launches the same session asking for permissions (plain claude).",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.5",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.5/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "938c51bfe618670073f96c8bf1e3909725cb73a6a1af5351371ddc639b38d4c6"
 }
