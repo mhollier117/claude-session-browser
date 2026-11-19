@@ -4479,10 +4479,23 @@ class Api:
             return {"ok": False, "error": t("Ungültige Session-ID.")}
         if tool == "qwen":
             return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
-        from pathlib import Path
-        from launcher.launch import default_wrapper
         workdir = _safe_workdir(cwd, project)
-        return launch_in_terminal(workdir, [default_wrapper(Path(workdir), Path(workdir)), "-r", sid])
+        return launch_in_terminal(workdir, [self._resume_wrapper(sid), "-r", sid])
+
+    def _resume_wrapper(self, sid):
+        """The wrapper the resume button uses, as the launcher's resume list does (launch.resume_command): the
+        account wrapper that last launched the session (claude6, claudeb, claudew), else `clauded`. The launcher
+        index only says which wrapper that was; if it cannot be read, `clauded`, and the resume still happens."""
+        from launcher.launch import default_wrapper, resume_command
+        try:
+            with self._launcher_state():
+                env = self._launcher_env
+                row = self._launcher_idx().row("claude", sid)
+            if row is not None:
+                return resume_command(row, None, root=env.root).argv[0]
+        except Exception as e:  # noqa: BLE001 - the index is optional here
+            _launcher_log(f"resume wrapper lookup failed: {type(e).__name__}: {e}")
+        return default_wrapper(None, None)
 
     @_launcher_api
     def launcher_rows(self):

@@ -230,6 +230,31 @@ def test_resume_claude_row_uses_the_clauded_alias_through_powershell(fake_env, a
         assert command.startswith("$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; ")
 
 
+@pytest.mark.parametrize("last, used", [("claudeb", "claudeb"), ("claude6", "claude6"), ("claudew", "claudew"),
+                                        ("claude", "clauded"), (None, "clauded")])
+def test_resume_claude_keeps_the_account_wrapper_that_last_launched_it(fake_env, api, monkeypatch, last, used):
+    """As the launcher's resume list: an account wrapper is kept, plain claude or none resumes with clauded."""
+    from types import SimpleNamespace
+    cwd = fake_env.root / "work"
+    row = SimpleNamespace(store="claude", sid="c1", cwd=str(cwd), cwd_exists=True, wrapper=last)
+    monkeypatch.setattr(api, "_launcher_idx", lambda refresh=False: SimpleNamespace(
+        row=lambda store, sid: row if (store, sid) == ("claude", "c1") else None))
+    assert api.resume("c1", str(cwd)) == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc([used, "-r", "c1"])
+
+
+def test_resume_claude_still_resumes_with_clauded_when_the_index_fails(fake_env, api, monkeypatch):
+    def boom(refresh=False):
+        raise RuntimeError("the launcher index is unavailable (retried shortly)")
+    monkeypatch.setattr(api, "_launcher_idx", boom)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    cwd = fake_env.root / "work"
+    assert api.resume("c1", str(cwd)) == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc(["clauded", "-r", "c1"])
+
+
 def test_resume_claude_rejects_a_bad_session_id(api):
     assert api.resume("c1 & calc", "C:\\")["ok"] is False
     assert api.popens == []
