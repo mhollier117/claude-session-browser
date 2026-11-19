@@ -216,12 +216,23 @@ def test_resume_qwen_rejects_a_bad_session_id(api):
     assert api.popens == []
 
 
-def test_resume_claude_row_is_unchanged(fake_env, api):
-    cwd = fake_env.root / "cc"
-    assert api.resume("c1", str(cwd)) == {"ok": True}
-    [(argv, kw)] = api.popens
-    assert argv == ["wt", "-d", str(cwd), "cmd", "/k", "claude", "--resume", "c1"]
-    assert kw["env"]["CLAUDE_CODE_FORCE_SESSION_PERSIST"] == "1"
+def test_resume_claude_row_uses_the_clauded_alias_through_powershell(fake_env, api):
+    """The resume button runs `clauded -r <sid>` in a PowerShell tab with the profile (where the alias lives),
+    with the child-session marker cleared, in every area (cc included)."""
+    for area in ("cc", "work"):
+        api.popens.clear()
+        cwd = fake_env.root / area
+        assert api.resume("c1", str(cwd)) == {"ok": True}
+        [(argv, _kw)] = api.popens
+        assert argv == ["wt", "-w", "0", "nt", "-d", str(cwd), "pwsh", "-NoExit", "-EncodedCommand",
+                        _enc(["clauded", "-r", "c1"])]
+        command = base64.b64decode(argv[-1]).decode("utf-16-le")
+        assert command.startswith("$env:CLAUDE_CODE_CHILD_SESSION=$null; $env:CLAUDE_CODE_FORCE_SESSION_PERSISTENCE='1'; ")
+
+
+def test_resume_claude_rejects_a_bad_session_id(api):
+    assert api.resume("c1 & calc", "C:\\")["ok"] is False
+    assert api.popens == []
 
 
 def test_launch_falls_back_to_a_console_without_wt(fake_env, api, monkeypatch):

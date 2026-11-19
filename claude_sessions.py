@@ -4471,12 +4471,18 @@ class Api:
         return self._state(force=True)
 
     def resume(self, sid, cwd, project="", tool="claude"):
+        """Resume a session in a new terminal tab through the user's PowerShell profile (launch_in_terminal):
+        Qwen with `qwen -r`, Claude with the `clauded` alias (bypass mode), as the launcher does. The launched
+        command clears the inherited child-session marker, so the transcript keeps saving."""
+        sid = str(sid or "")
+        if not _SESSION_ID_RE.match(sid):
+            return {"ok": False, "error": t("Ungültige Session-ID.")}
         if tool == "qwen":
-            sid = str(sid or "")
-            if not _SESSION_ID_RE.match(sid):
-                return {"ok": False, "error": t("Ungültige Session-ID.")}
             return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
-        return resume_session(sid, cwd, self.settings, project)
+        from pathlib import Path
+        from launcher.launch import default_wrapper
+        workdir = _safe_workdir(cwd, project)
+        return launch_in_terminal(workdir, [default_wrapper(Path(workdir), Path(workdir)), "-r", sid])
 
     @_launcher_api
     def launcher_rows(self):
