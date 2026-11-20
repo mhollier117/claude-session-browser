@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.7",
-  "notes": "The resume button keeps the account wrapper that last launched a session (claude6, claudeb, claudew); everything else resumes with clauded.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.7",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.7/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "af9128c0bc11da863537a7a928659382e5a69b49c6c735507cd065ef6db5b5b5"
+  "version": "1.7.0.8",
+  "notes": "Sessions run on GLM (claudez) or Qwen (claudeq) show as glm / qwen and resume with the same alias, in bypass mode (ctrl-p asks permissions); Qwen Code sessions show as qwencli. The app never launches through cmd.exe any more. cc in Windows PowerShell 5.1 hands over to PowerShell 7. The session index moves to index-v3.sqlite (rebuilt once).",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.8",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.8/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "07c9ca5c115fcf82267ee7f5f3891ca1521aabd517e0599183011983177ae564"
 }
