@@ -10306,8 +10306,73 @@ def _close_handle(handle):
             pass
 
 
+def _window_hung(user32, hwnd, timeout_ms=3000):
+    """True when the window's thread does not answer a harmless message within `timeout_ms`
+    (SendMessageTimeout with SMTO_ABORTIFHUNG, which also gives up at once on a window Windows marks as hung)."""
+    WM_NULL, SMTO_BLOCK, SMTO_ABORTIFHUNG = 0x0000, 0x0001, 0x0002
+    result = ctypes.c_size_t(0)
+    send = user32.SendMessageTimeoutW
+    send.restype = ctypes.c_ssize_t
+    ok = send(ctypes.c_void_p(hwnd), WM_NULL, ctypes.c_size_t(0), ctypes.c_ssize_t(0),
+              SMTO_BLOCK | SMTO_ABORTIFHUNG, timeout_ms, ctypes.byref(result))
+    return not ok
+
+
+class _Frozen:
+    """`_restore_existing_window` found the running copy's window, but it does not answer (its thread is hung)."""
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    def __bool__(self):
+        return False  # nothing was brought forward
+
+
+def _other_copies():
+    """PIDs of the other running ClaudeSessionBrowser.exe processes (frozen copies to offer to close)."""
+    try:
+        import psutil
+        me = os.getpid()
+        name = os.path.basename(sys.executable).lower()
+        return [p.pid for p in psutil.process_iter(["name"])
+                if (p.info["name"] or "").lower() == name and p.pid != me]
+    except Exception:
+        return []
+
+
+def _ask_close_frozen():
+    """Ask whether to close the frozen copy and start a fresh one (Yes/No, topmost). True for Yes."""
+    if not _IS_WIN:
+        return False
+    try:
+        MB_YESNO, MB_ICONWARNING, MB_TOPMOST, MB_SETFOREGROUND, IDYES = 0x4, 0x30, 0x40000, 0x10000, 6
+        text = t("Der Claude Session Browser läuft schon, reagiert aber nicht. Die hängende Kopie schließen und neu starten?")  # noqa: E501 - one literal for check_i18n
+        flags = MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND
+        return ctypes.windll.user32.MessageBoxW(None, text, "Claude Session Browser", flags) == IDYES
+    except Exception:
+        return False
+
+
+def _kill_copies(pids):
+    """End the given ClaudeSessionBrowser.exe processes (only that program, never anything else)."""
+    try:
+        import psutil
+        name = os.path.basename(sys.executable).lower()
+        for pid in pids:
+            try:
+                p = psutil.Process(pid)
+                if p.name().lower() == name and pid != os.getpid():
+                    p.kill()
+                    p.wait(5)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _wait_for_instance_slot(timeout=20.0, step=0.5, acquire=None, restore=None,
-                            close=None, sleep=time.sleep, clock=time.monotonic):
+                            close=None, sleep=time.sleep, clock=time.monotonic,
+                            ask=None, kill=None, others=None):
     """Eine andere Instanz haelt den Guard. Nie eine zweite Kopie starten.
 
     Hat sie ein Fenster: nach vorne holen, fertig. Hat sie noch keins, startet
@@ -10317,22 +10382,43 @@ def _wait_for_instance_slot(timeout=20.0, step=0.5, acquire=None, restore=None,
     Lock-Datei sind Kernel-Objekte und fallen beim Prozessende automatisch weg,
     koennen also nicht 'haengen bleiben'.
 
+    Haengt die laufende Kopie (ihr Fenster antwortet nicht, oder nach `timeout`
+    gibt es noch immer kein Fenster), fragen wir, ob sie geschlossen werden soll:
+    Ja beendet sie und startet diese Kopie, Nein beendet nur diese. Frueher
+    blieb jeder weitere Start dabei selbst haengen, und es ging gar nichts auf.
+
     Rueckgabe wie _acquire_single_instance: (owned, handle)."""
     acquire = acquire or _acquire_single_instance
     restore = restore or _restore_existing_window
     close = close or _close_handle
+    ask = ask or _ask_close_frozen
+    kill = kill or _kill_copies
+    others = others or _other_copies
     deadline = clock() + timeout
+    asked = False
     while True:
-        if restore():
+        found = restore()
+        if found:
             return False, None
+        frozen = isinstance(found, _Frozen)
         owned, handle = acquire()
         if owned:
             return True, handle
         close(handle)
-        if clock() >= deadline:
-            logging.getLogger(__name__).warning(
-                "another instance holds the guard but shows no window; not starting a second one")
-            return False, None
+        if frozen or clock() >= deadline:
+            if asked:
+                return False, None
+            asked = True
+            stuck = [found.pid] if frozen and found.pid else others()
+            _log_startup("frozen copy found", frozen_window=frozen, pids=stuck)
+            if not stuck or not ask():
+                logging.getLogger(__name__).warning(
+                    "another instance holds the guard but does not respond; not starting a second one")
+                return False, None
+            kill(stuck)
+            _log_startup("frozen copy closed", pids=stuck)
+            deadline = clock() + timeout  # the guard frees once the killed copy is gone
+            continue
         sleep(step)
 
 
@@ -10366,13 +10452,20 @@ def _restore_existing_window():
         hwnd = found["hwnd"]
         if not hwnd:
             return False
+        # Antwortet das Fenster? ShowWindow & Co. auf das Fenster eines haengenden
+        # Threads blockieren sonst diese Kopie mit - dann ging gar nichts mehr auf.
+        if _window_hung(user32, hwnd):
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return _Frozen(pid.value)
+        # Ab hier nur noch asynchrone Aufrufe: haengt das Fenster doch noch, kehren sie trotzdem zurueck.
         # SW_RESTORE=9, SW_SHOW=5. IsIconic pruefen fuer Minimized.
         SW_RESTORE = 9
         SW_SHOW = 5
         if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.ShowWindowAsync(hwnd, SW_RESTORE)
         else:
-            user32.ShowWindow(hwnd, SW_SHOW)
+            user32.ShowWindowAsync(hwnd, SW_SHOW)
         # SetForegroundWindow ist mit Windows-Restrictions oft eingeschraenkt.
         # Trick: kurz Fenster ganz nach oben ziehen und wieder loslassen.
         HWND_TOPMOST = -1
@@ -10380,10 +10473,10 @@ def _restore_existing_window():
         SWP_NOMOVE = 0x0002
         SWP_NOSIZE = 0x0001
         SWP_SHOWWINDOW = 0x0040
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        SWP_ASYNCWINDOWPOS = 0x4000
+        flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
         user32.SetForegroundWindow(hwnd)
         return True
     except Exception:

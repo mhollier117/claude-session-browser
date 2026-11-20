@@ -956,6 +956,8 @@ TRANSLATIONS = {
         "persönlich": "personal",
         "Arbeit": "work",
         "keins": "none",
+        "Der Claude Session Browser läuft schon, reagiert aber nicht. Die hängende Kopie schließen und neu starten?":
+            "Claude Session Browser is already running but not responding. Close the frozen copy and start a new one?",
         "kein GitHub-Repo, nur git init": "no GitHub repo, git init only",
         "neuer Ordner…": "new folder…",
         "Anlegen und starten": "Create and start",

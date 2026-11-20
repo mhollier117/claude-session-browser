@@ -56,6 +56,8 @@ class Fake:
         self.t = 0.0
         self.window_at, self.free_at = window_at, free_at
         self.closed = []
+        self.asked = 0
+        self.killed = []
         self.slept = 0
 
     def clock(self):
@@ -65,8 +67,22 @@ class Fake:
         self.t += s
         self.slept += 1
 
+    frozen_pid = None    # the running copy's window exists but does not answer
+    answer = False       # what the "close the frozen copy?" question gets
+    copies = []          # other running copies (for a copy with no window at all)
+
     def restore(self):
+        if self.frozen_pid is not None and self.frozen_pid not in self.killed:
+            return cs._Frozen(self.frozen_pid)
         return self.window_at is not None and self.t >= self.window_at
+
+    def ask(self):
+        self.asked += 1
+        return self.answer
+
+    def kill(self, pids):
+        self.killed.extend(pids)
+        self.free_at = self.t  # the guard frees once the frozen copy is gone
 
     def acquire(self):
         if self.free_at is not None and self.t >= self.free_at:
@@ -79,7 +95,8 @@ class Fake:
     def wait(self, timeout=20.0):
         return cs._wait_for_instance_slot(timeout=timeout, step=0.5, acquire=self.acquire,
                                           restore=self.restore, close=self.close,
-                                          sleep=self.sleep, clock=self.clock)
+                                          sleep=self.sleep, clock=self.clock,
+                                          ask=self.ask, kill=self.kill, others=lambda: list(self.copies))
 
 
 def test_hands_over_to_a_running_window_at_once():
@@ -103,6 +120,45 @@ def test_never_starts_a_second_copy_when_the_first_shows_no_window():
     f = Fake()
     assert f.wait(timeout=5.0) == (False, None)
     assert f.t >= 5.0
+
+
+def test_a_frozen_window_is_offered_for_closing_and_yes_starts_this_copy(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    f = Fake()
+    f.frozen_pid, f.answer = 4242, True
+    assert f.wait() == (True, "mine")
+    assert f.asked == 1 and f.killed == [4242]
+    assert f.t < 1.0  # asked at once, not after the 20 s wait
+
+
+def test_a_frozen_window_and_no_closes_nothing_and_starts_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    f = Fake()
+    f.frozen_pid, f.answer = 4242, False
+    assert f.wait() == (False, None)
+    assert f.asked == 1 and f.killed == []
+
+
+def test_a_copy_with_no_window_after_the_wait_is_offered_for_closing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    f = Fake()
+    f.copies, f.answer = [111, 222], True
+    assert f.wait(timeout=5.0) == (True, "mine")
+    assert f.t >= 5.0 and f.asked == 1 and f.killed == [111, 222]
+
+
+def test_the_question_is_asked_once(tmp_path, monkeypatch):
+    """If the copy is still there after closing it was tried, stop instead of asking again."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    f = Fake()
+    f.copies, f.answer = [111], True
+    f.kill = lambda pids: f.killed.extend(pids)  # the kill does not free the guard
+    assert f.wait(timeout=2.0) == (False, None)
+    assert f.asked == 1
+
+
+def test_a_frozen_copy_is_not_a_hand_over():
+    assert not cs._Frozen(1)
 
 
 def test_each_start_is_logged_with_its_parent(tmp_path, monkeypatch):
