@@ -20,7 +20,7 @@ from prompt_toolkit.utils import get_cwidth
 from .. import defaults, flowlog
 from ..display import age, rel_or_abs
 from ..index import FolderStats, Index
-from ..launch import WRAPPERS, Launch, new_command, without_bypass
+from ..launch import WRAPPERS, Launch, new_command
 from ..paths import Env
 from ..scaffold import Runner, check_name, create_folder
 from ..suggest import Pending, Suggestion, default_http, log_outcome, suggest
@@ -112,6 +112,7 @@ class NewFlow:
         self.new_name: str | None = None  # None: start here (no new folder)
         self.new_kind: str | None = None
         self.wrapper: str | None = None  # the confirm step's choices (preselected from `defaults`)
+        self.ask = False  # ctrl-p on the confirm step: launch `wrapper` asking permissions (`launch.wrapper_argv`)
         self._confirm_bucket: str | None = None  # the bucket whose defaults the wrapper and GitHub values came from
         self.github: str | None = None  # personal | work | none; only a new project has one
         self.cwd: Path | None = None
@@ -520,6 +521,7 @@ class NewFlow:
         d = defaults.get(self.env, self.target())
         self.step = "confirm"
         self.error = ""
+        self.ask = False  # each arrival on the confirm step launches in bypass mode unless ctrl-p says otherwise
         if bucket != self._confirm_bucket or self.wrapper is None:  # first entry, or another bucket: its defaults
             self.wrapper = d.wrapper
             self.github = None
@@ -566,10 +568,11 @@ class NewFlow:
         self.type_filter(ch)  # a typed filter selects its own first match, not the row the picker was left from
 
     def ask_permissions(self) -> None:
-        """ctrl-p on the confirm step: launch the same thing without bypass mode (`launch.without_bypass`); the
-        app then does what enter does."""
+        """ctrl-p on the confirm step: launch the chosen wrapper without bypass mode (`launch.wrapper_argv` with
+        ask_permissions: clauded/claude6/claudew run as `claude`, claudeq/claudez without the bypass flag); the
+        wrapper choice itself stays, and the app then does what enter does."""
         if self.step == "confirm" and self.wrapper:
-            self.wrapper = without_bypass(self.wrapper)
+            self.ask = True
 
     def cycle_wrapper(self) -> None:
         """ctrl-w: the next wrapper (the Claude wrappers, then qwen)."""
@@ -631,14 +634,16 @@ class NewFlow:
             defaults.remember(self.env, self.cwd, self.wrapper, self.github if self._new_project() else None)
         except (OSError, ValueError) as e:
             self.warnings.append(f"could not remember the choices: {e}")
-        self._log("launch", folder_kind=self.new_kind, new_folder=self.new_name, wrapper=self.wrapper, github=self.github,
+        self._log("launch", folder_kind=self.new_kind, new_folder=self.new_name,
+                  wrapper=new_command(self.cwd, self.name, self.wrapper, ask_permissions=self.ask).argv[0],
+                  github=self.github,
                   cwd=self._rel(self.cwd))
         log_outcome(self.env, self.name, self.suggestion_in_effect(), self.folder, self.new_name)
 
     def result(self) -> Launch | None:
         if self.step != "done":
             return None
-        launch = new_command(self.cwd, self.name, self.wrapper, session_id=self.session_id)
+        launch = new_command(self.cwd, self.name, self.wrapper, session_id=self.session_id, ask_permissions=self.ask)
         launch.warnings.extend(self.warnings)
         return launch
 
@@ -652,8 +657,8 @@ class NewFlow:
 
     def command_text(self) -> str:
         """`cd <folder> ; <wrapper> -n "<name>" ...`: exactly what the launch runs (same flags as `new_command`)."""
-        argv = new_command(self.target(), self.name, self.wrapper or "").argv
-        run = " ".join(f'"{a}"' if a == self.name and i == 2 else a for i, a in enumerate(argv))
+        argv = new_command(self.target(), self.name, self.wrapper or "", ask_permissions=self.ask).argv
+        run = " ".join(f'"{a}"' if i and argv[i - 1] == "-n" else a for i, a in enumerate(argv))
         return f"cd {self.target()} ; {run}"
 
     def summary(self) -> list[str]:

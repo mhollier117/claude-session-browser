@@ -370,8 +370,6 @@ DEFAULT_SETTINGS = {
     "accent": "#ec7456",         # Akzentfarbe der Oberflaeche (Koralle, passend zum Logo)
     "bg_base": "#4a3a30",        # Grundton -> daraus wird die Hintergrund-Palette abgeleitet (warm)
     "language": "en",            # en (Standard dieser Fassung) | auto (= Windows-Sprache) | de
-    "terminal": "auto",          # auto | wt | cmd
-    "claude_cmd": "claude",      # Befehl/Pfad zur Claude-CLI
     "columns": [                 # sichtbare Spalten + Reihenfolge
         {"key": "title", "on": True}, {"key": "project", "on": True},
         {"key": "msgs", "on": True}, {"key": "when", "on": True},
@@ -1337,44 +1335,6 @@ def _safe_workdir(cwd, project=""):
     return dec if dec and os.path.isdir(dec) else HOME
 
 
-def resume_session(session_id, cwd, settings, project=""):
-    # Session-ID hart validieren – sie fliesst in eine Terminal-Kommandozeile.
-    # Ein bloedes Zeichen (& | " `) waere sonst Command-Injection.
-    sid = str(session_id or "")
-    if not _SESSION_ID_RE.match(sid):
-        return {"ok": False, "error": t("Ungültige Session-ID.")}
-    workdir = _safe_workdir(cwd, project)
-    claude = settings.get("claude_cmd") or "claude"
-    # `claude_cmd` kommt aus User-Settings – wir erlauben nur einen einfachen
-    # Programmnamen oder absoluten Pfad, keine Shell-Metazeichen.
-    if any(c in claude for c in '&|;<>"`$'):
-        return {"ok": False, "error": t("Unsicherer claude_cmd-Wert.")}
-    term = settings.get("terminal", "auto")
-    # Wichtig: CLAUDE_CODE_FORCE_SESSION_PERSIST=1 setzen damit die resumed
-    # Session weiterhin in die JSONL schreibt (sonst wird sie als Child erkannt
-    # und Transcript-Speicherung ist aus).
-    env = os.environ.copy()
-    env["CLAUDE_CODE_FORCE_SESSION_PERSIST"] = "1"
-    try:
-        if term in ("auto", "wt"):
-            try:
-                # argv-Form, KEIN shell=True -> keine Shell-Interpretation
-                subprocess.Popen(["wt", "-d", workdir, "cmd", "/k",
-                                  claude, "--resume", sid], env=env)
-                return {"ok": True}
-            except FileNotFoundError:
-                if term == "wt":
-                    return {"ok": False, "error": t("Windows Terminal (wt) nicht gefunden.")}
-        # Fallback: cmd.exe direkt starten – ohne shell=True, argv als Liste.
-        # `start` ist ein cmd-Builtin, deshalb rufen wir cmd /c start …
-        subprocess.Popen(
-            ["cmd", "/c", "start", "Claude Code", "/D", workdir,
-             "cmd", "/k", claude, "--resume", sid], env=env)
-        return {"ok": True}
-    except OSError as e:
-        return {"ok": False, "error": str(e)}
-
-
 # --------------------------------------------------------------------------- #
 #  Session launcher (launcher/, the `cc` core) in the browser
 # --------------------------------------------------------------------------- #
@@ -1407,6 +1367,12 @@ def _launcher_api(method):
             _launcher_log(f"{method.__name__} failed: {type(e).__name__}: {e}")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
     return call
+
+
+def _claude_type(backend):
+    """The list type of a Claude session on `backend` (launcher index `Row.backend`): claude, qwen or glm; claude
+    when the backend is unknown (index unavailable or the session not indexed yet)."""
+    return backend if backend in ("qwen", "glm") else "claude"
 
 
 def launch_in_terminal(cwd, argv):
@@ -3947,8 +3913,8 @@ class PluginHost:
     def sessions(self):
         """Die Sessionliste, wie sie die Tabelle zeigt. Braucht "sessions"."""
         self._darf("sessions")
-        # Claude sessions only, as before the launcher added Qwen rows to the list.
-        return [dict(s) for s in self._api._sessions() if s.get("tool") != "qwen"]
+        # Claude sessions only (any backend), as before the launcher added Qwen Code rows to the list.
+        return [dict(s) for s in self._api._sessions() if s.get("tool") != "qwencli"]
 
 
 class PluginManager:
@@ -4362,15 +4328,20 @@ class Api:
         return detect_projects_dir()
 
     def _sessions(self, force=False):
+        """The session list: Claude rows from this app's own parser, then the launcher's Qwen Code rows. `tool` is
+        the type the list shows: claude, qwen (claudeq) or glm (claudez) for a Claude row, from the launcher index
+        (`_launcher_backends`; `claude` while the index is not read yet or unavailable), and qwencli for Qwen Code."""
         if self._cache is None or force:
             self._cache = collect_sessions(self._projects_dir())
+        qwen = self._qwen_sessions(force)  # also starts the background index read that fills the backends
+        backends = getattr(self, "_launcher_backends", None) or {}
         colors = self.settings.get("session_colors", {})
         for s in self._cache:
             s["display_title"] = self.overrides.get(s["id"], s["auto_title"])
             s["color"] = colors.get(s["id"], "")
             s["when"] = fmt_time(s["mtime"])
-            s["tool"] = "claude"
-        return self._cache + self._qwen_sessions(force)
+            s["tool"] = _claude_type(backends.get(s["id"]))
+        return self._cache + qwen
 
     # -- Session launcher (launcher/bridge.py); pywebview calls every js_api
     # method on a thread of its own, so all Index use holds _launcher_lock --
@@ -4386,6 +4357,7 @@ class Api:
                 self._launcher_index = None
                 self._launcher_failed_at = None
                 self._launcher_qwen = None
+                self._launcher_backends = None
                 self._launcher_thread = None
                 self._launcher_suggestions = PendingSuggestions()
                 self._launcher_lock = threading.RLock()
@@ -4414,12 +4386,13 @@ class Api:
         return self._launcher_index
 
     def _launcher_build(self, force):
-        """Background thread: build or refresh the Index and cache its Qwen rows. On a failure the previous rows
-        stay."""
+        """Background thread: build or refresh the Index, then from its one `rows()` read cache the Qwen Code rows
+        and each Claude session's backend by sid (the list's type). On a failure the previous rows stay."""
         try:
             with self._launcher_lock:
                 rows = self._launcher_idx(refresh=force).rows()
                 self._launcher_qwen = [r for r in rows if r.store == "qwen"]
+                self._launcher_backends = {r.sid: r.backend for r in rows if r.store == "claude"}
         except Exception as e:
             _launcher_log(f"Qwen sessions not refreshed: {type(e).__name__}: {e}")
         finally:
@@ -4472,30 +4445,32 @@ class Api:
 
     def resume(self, sid, cwd, project="", tool="claude"):
         """Resume a session in a new terminal tab through the user's PowerShell profile (launch_in_terminal):
-        Qwen with `qwen -r`, Claude with the `clauded` alias (bypass mode), as the launcher does. The launched
-        command clears the inherited child-session marker, so the transcript keeps saving."""
+        Qwen Code (`tool` qwencli) with `qwen -r`; every other row is a Claude session (claude, or the qwen and glm
+        backends) and resumes as the launcher's resume list does (`_resume_wrapper`). The launched command clears
+        the inherited child-session marker, so the transcript keeps saving."""
         sid = str(sid or "")
         if not _SESSION_ID_RE.match(sid):
             return {"ok": False, "error": t("Ungültige Session-ID.")}
-        if tool == "qwen":
+        if tool == "qwencli":
             return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
         workdir = _safe_workdir(cwd, project)
-        return launch_in_terminal(workdir, [self._resume_wrapper(sid), "-r", sid])
+        return launch_in_terminal(workdir, [*self._resume_wrapper(sid), "-r", sid])
 
     def _resume_wrapper(self, sid):
-        """The wrapper the resume button uses, as the launcher's resume list does (launch.resume_command): the
-        account wrapper that last launched the session (claude6, claudeb, claudew), else `clauded`. The launcher
-        index only says which wrapper that was; if it cannot be read, `clauded`, and the resume still happens."""
-        from launcher.launch import default_wrapper, resume_command
+        """The wrapper part of the resume argv, as the launcher's resume list builds it (launch.resume_command, in
+        bypass mode): `claudez --dangerously-skip-permissions` for a session on the GLM backend, `claudeq ...` on
+        the Qwen backend, else the account wrapper that last launched it (claude6, claudeb, claudew), else
+        `clauded`. The launcher index says which; if it cannot be read, `clauded`, and the resume still happens."""
+        from launcher.launch import default_wrapper, resume_command, wrapper_argv
         try:
             with self._launcher_state():
                 env = self._launcher_env
                 row = self._launcher_idx().row("claude", sid)
             if row is not None:
-                return resume_command(row, None, root=env.root).argv[0]
+                return resume_command(row, None, root=env.root).argv[:-2]  # without "-r <sid>"
         except Exception as e:  # noqa: BLE001 - the index is optional here
             _launcher_log(f"resume wrapper lookup failed: {type(e).__name__}: {e}")
-        return default_wrapper(None, None)
+        return wrapper_argv(default_wrapper(None, None))
 
     @_launcher_api
     def launcher_rows(self):
@@ -6767,7 +6742,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tool-badge{display:inline-block; font-size:10.5px; font-weight:600; line-height:16px; padding:0 6px;
     margin-right:8px; border-radius:6px; vertical-align:1px; letter-spacing:.2px;
     background:rgba(255,255,255,.06); color:var(--muted); border:1px solid var(--border)}
-  .tool-badge.qwen{background:rgba(124,140,255,.16); color:#b3bcff; border-color:rgba(124,140,255,.38)}
+  .tool-badge.qwencli{background:rgba(124,140,255,.16); color:#b3bcff; border-color:rgba(124,140,255,.38)}
+  .tool-badge.qwen{background:rgba(196,140,255,.16); color:#d9b8ff; border-color:rgba(196,140,255,.38)}
+  .tool-badge.glm{background:rgba(80,200,180,.16); color:#9be3d6; border-color:rgba(80,200,180,.38)}
   .row.colored .tool-badge{background:transparent; color:inherit; border-color:currentColor; opacity:.8}
   .toolfilter{display:flex; align-items:center; gap:3px; background:var(--surface);
     border:1px solid var(--border); border-radius:12px; padding:0 5px; height:42px; flex:none}
@@ -7685,8 +7662,8 @@ function updateDetail(){
   // rechtes Panel nur zeigen, wenn etwas ausgewaehlt ist
   document.querySelector('.main').classList.toggle('show-side', en);
   ['btn-resume','btn-copy'].forEach(b=>document.getElementById(b).disabled=!en);
-  // Qwen sessions have no title override or colour (the backend ignores both)
-  const qwen = en && toolOf(s)==='qwen';
+  // Qwen Code sessions have no title override or colour (the backend ignores both)
+  const qwen = en && toolOf(s)==='qwencli';
   ['btn-rename','btn-color'].forEach(b=>document.getElementById(b).disabled=!en || qwen);
   const d=document.getElementById('detail');
   if(!s){
@@ -8028,7 +8005,7 @@ function buildSwatches(){
   const html=COLORS.map(c=>`<div class="sw" style="background:${c}" onclick="setColor('${c}')"></div>`).join('');
   document.getElementById('color-swatches').innerHTML=html;
 }
-function openColor(){const s=getSel(); if(!s || toolOf(s)==='qwen')return;
+function openColor(){const s=getSel(); if(!s || toolOf(s)==='qwencli')return;
   const start=s.color||STATE.settings.accent||'#6c6cff';
   const v=hex2hsv(start); CP.h=v.h; CP.s=v.s||1; CP.v=(v.v===undefined?1:v.v); cpRender();
   document.getElementById('overlay-color').classList.add('show');}
@@ -8065,7 +8042,7 @@ function cpDown(e){CPdrag=true; try{e.target.setPointerCapture(e.pointerId);}cat
 function cpHexIn(v){const x=hex2hsv(v); CP.h=x.h; CP.s=x.s; CP.v=x.v; cpRender();}
 
 /* ---- Umbenennen ---- */
-function openRename(){const s=getSel(); if(!s || toolOf(s)==='qwen')return;
+function openRename(){const s=getSel(); if(!s || toolOf(s)==='qwencli')return;
   const i=document.getElementById('rename-input'); i.value=s.display_title;
   document.getElementById('overlay-rename').classList.add('show'); setTimeout(()=>{i.focus();i.select();},50);}
 async function saveRename(){const s=getSel(); if(!s)return;
@@ -8474,19 +8451,6 @@ function renderSettings(){
 
     <div class="card">
       <h2>${ic('terminal')}Terminal &amp; Claude</h2>
-      <div class="row2">
-        <div><div class="lbl">Womit öffnen?</div><div class="desc">Wie eine Session gestartet wird.</div></div>
-        <select class="sel-input" onchange="api.update_setting('terminal',this.value)">
-          <option value="auto" ${st.terminal==='auto'?'selected':''}>Automatisch</option>
-          <option value="wt" ${st.terminal==='wt'?'selected':''}>Windows Terminal</option>
-          <option value="cmd" ${st.terminal==='cmd'?'selected':''}>Eingabeaufforderung (cmd)</option>
-        </select>
-      </div>
-      <div class="row2">
-        <div><div class="lbl">Claude-Befehl</div><div class="desc">Pfad/Name der Claude-CLI (Standard: claude).</div></div>
-        <input type="text" class="cmd-input" value="${esc(st.claude_cmd||'claude')}"
-          onchange="api.update_setting('claude_cmd',this.value)">
-      </div>
       <div class="row2">
         <div><div class="lbl">Rückfragen zuverlässig erkennen</div>
           <div class="desc">Claude Code meldet dem Buddy selbst, wenn es auf deine Antwort wartet.</div>
@@ -9345,28 +9309,33 @@ async function obFinish(){
 
 // launcher -------------------------------------------------------------------
 // Tool badge and filter of the session list, and the New session dialog. The
+// type (s.tool): claude, qwen (Claude Code on a Qwen model, claudeq), glm
+// (Claude Code on Z.ai GLM, claudez) or qwencli (the Qwen Code tool). The
 // backend is launcher/bridge.py behind Api.launcher_*; every launcher call can
 // answer {ok:false, error}, which is shown, never left hanging.
 let TOOL_FILTER = 'all';
 const LN_WRAPPERS = __LAUNCHER_WRAPPERS__;
-function toolOf(s){ return s && s.tool==='qwen' ? 'qwen' : 'claude'; }
+const TOOL_TYPES = ['claude','qwen','glm','qwencli'];
+function toolOf(s){ return s && TOOL_TYPES.includes(s.tool) ? s.tool : 'claude'; }
 function renderToolFilter(){
   const el=document.getElementById('toolfilter'); if(!el) return;
-  el.innerHTML=[['all',t('alle')],['claude','claude'],['qwen','qwen']].map(([k,label])=>
+  el.innerHTML=[['all',t('alle')], ...TOOL_TYPES.map(k=>[k,k])].map(([k,label])=>
     `<button class="${TOOL_FILTER===k?'on':''}" onclick="setToolFilter('${k}')">${esc(label)}</button>`).join('');
 }
 function setToolFilter(k){ TOOL_FILTER=k; render(); }
 function resumeResult(r){
   if(r && r.ok===false) toast(r.error || t('Das hat nicht geklappt.'), 6000);
 }
-// Qwen rows come from the launcher's index, built in the background on the
-// first call: when the first list has none, ask once more shortly after.
+// Qwen Code rows and the qwen/glm types of Claude rows come from the
+// launcher's index, read in the background on the first call: when the first
+// list has none of them, ask once more shortly after.
 function repollQwen(){
-  if(sessions.some(s=>s.tool==='qwen')) return;
+  const fromIndex = s=>s.tool && s.tool!=='claude';
+  if(sessions.some(fromIndex)) return;
   setTimeout(async ()=>{
     try{
       const st=await api.get_state();
-      if(st && (st.sessions||[]).some(s=>s.tool==='qwen')){ ingest(st); render(); }
+      if(st && (st.sessions||[]).some(fromIndex)){ ingest(st); render(); }
     }catch(e){}
   }, 2000);
 }

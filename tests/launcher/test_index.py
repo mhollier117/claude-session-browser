@@ -69,7 +69,7 @@ def test_refresh_indexes_both_stores_and_sorts_by_activity(fake_env):
     assert isinstance(r, Row) and r.cwd == str(net) and r.first_ask == "set up PXE" and r.last_reply == "Add the VLAN."
     assert (r.user_msgs, r.assistant_msgs, r.last_activity, r.live_pid, r.wrapper) == (1, 1, T0 - 3600, None, None)
     assert rows[0].cwd == str(ai) and rows[0].cwd_exists
-    assert (fake_env.data_dir / "index.sqlite").is_file()
+    assert (fake_env.data_dir / "index-v3.sqlite").is_file()
 
 
 def test_refresh_rereads_only_changed_files(fake_env, monkeypatch):
@@ -206,8 +206,10 @@ def test_same_sid_in_two_folders_newest_wins_and_is_stable(fake_env):
 
 
 def test_old_schema_version_is_rebuilt(fake_env):
+    """A cache file of this version whose user_version does not match (an unversioned or broken table) is still
+    dropped and rebuilt."""
     import sqlite3
-    db = fake_env.data_dir / "index.sqlite"
+    db = index_mod.index_file(fake_env.data_dir)
     db.parent.mkdir(parents=True)
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE sessions (store TEXT, sid TEXT, path TEXT, PRIMARY KEY(store, sid))")
@@ -421,7 +423,7 @@ def test_last_activity_is_the_last_record_date_not_the_file_mtime(fake_env):
 
 def test_older_schema_cache_is_dropped_and_rebuilt(fake_env):
     import sqlite3
-    path = fake_env.data_dir / "index.sqlite"
+    path = index_mod.index_file(fake_env.data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.execute("CREATE TABLE sessions (store TEXT, sid TEXT, stale INTEGER)")
@@ -430,7 +432,7 @@ def test_older_schema_cache_is_dropped_and_rebuilt(fake_env):
     db.commit()
     db.close()
     idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
-    assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 2
+    assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 3
 
 def test_incremental_refresh_follows_the_new_last_record_and_counts_each_message_once(fake_env):
     """A transcript that only grew is counted from its stored offset: its last_activity follows the new last
@@ -452,3 +454,126 @@ def test_incremental_refresh_follows_the_new_last_record_and_counts_each_message
     row = idx.row("claude", "grow")
     assert (row.user_msgs, row.assistant_msgs) == (2, 2)
     assert row.last_activity == datetime(2026, 10, 5, 6, 0, tzinfo=timezone.utc).timestamp()
+
+
+# ---- versioned cache file ----------------------------------------------------------------------------------------
+
+def test_index_uses_a_versioned_file_and_leaves_the_old_one_alone(fake_env):
+    """An older build keeps using `index.sqlite`: this one opens `index-v3.sqlite` beside it and never touches the
+    old file (no drop, no rebuild), so neither rebuilds the other's cache."""
+    import sqlite3
+    old = fake_env.data_dir / "index.sqlite"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(old)
+    con.execute("CREATE TABLE sessions (store TEXT, sid TEXT, path TEXT, PRIMARY KEY(store, sid))")
+    con.execute("INSERT INTO sessions VALUES ('claude', 'kept', 'x')")
+    con.execute("PRAGMA user_version = 2")
+    con.commit()
+    con.close()
+    before = old.read_bytes()
+    cwd = fake_env.root / "cc"
+    write_claude_session(fake_env, cwd, "s1", [_u("ask", cwd)])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.db_path == fake_env.data_dir / "index-v3.sqlite" == index_mod.index_file(fake_env.data_dir)
+    assert idx.db_path.is_file() and [r.sid for r in idx.rows()] == ["s1"]
+    idx.close()
+    assert old.read_bytes() == before
+    con = sqlite3.connect(old)
+    assert con.execute("SELECT sid FROM sessions").fetchall() == [("kept",)]
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    con.close()
+
+
+# ---- backend -----------------------------------------------------------------------------------------------------
+
+def _model_reply(text, model, top_level=False):
+    rec = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    if top_level:
+        rec["model"] = model
+    else:
+        rec["message"]["model"] = model
+    return rec
+
+
+@pytest.mark.parametrize("model, backend", [
+    ("claude-opus-4-1", "claude"), ("glm-5.3", "glm"), ("glm-5.3[1m]", "glm"), ("GLM-5.3-flash", "glm"),
+    ("qwen3-vl-current", "qwen"), (None, "claude"),
+])
+def test_backend_from_the_last_assistant_model(fake_env, model, backend):
+    cwd = fake_env.root / "home" / "ai"
+    records = [_u("ask", cwd), _model_reply("ok", model) if model else _a("ok")]
+    write_claude_session(fake_env, cwd, "m1", records)
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("claude", "m1").backend == backend
+
+
+def test_backend_uses_the_last_assistant_record_even_without_text(fake_env):
+    """The tail's last assistant record decides, also when it only holds a tool call (no text) and when an older
+    reply came from another model; Claude Code's `<synthetic>` placeholder records are skipped."""
+    cwd = fake_env.root / "home" / "ai"
+    tool_only = {"type": "assistant", "message": {"role": "assistant", "model": "glm-5.3",
+                                                  "content": [{"type": "tool_use", "name": "Read", "input": {}}]}}
+    synthetic = {"type": "assistant", "message": {"role": "assistant", "model": "<synthetic>",
+                                                  "content": [{"type": "text", "text": "API Error"}]}}
+    write_claude_session(fake_env, cwd, "m2", [_u("ask", cwd), _model_reply("first", "claude-sonnet-4-5"),
+                                               _u("next", cwd), _model_reply("second", "glm-5.3"), tool_only,
+                                               synthetic])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("claude", "m2").backend == "glm"
+
+
+def test_backend_from_a_top_level_model_field(fake_env):
+    cwd = fake_env.root / "home" / "ai"
+    write_claude_session(fake_env, cwd, "m3", [_u("ask", cwd), _model_reply("ok", "qwen3-vl-current", top_level=True)])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("claude", "m3").backend == "qwen"
+
+
+@pytest.mark.parametrize("wrapper, model, backend", [
+    ("claudez", "claude-opus-4-1", "glm"), ("claudeq", "glm-5.3", "qwen"), ("claudez", None, "glm"),
+    ("claudeq", None, "qwen"), ("claude6", "glm-5.3", "glm"), ("clauded", None, "claude"),
+])
+def test_backend_the_last_wrapper_wins_over_the_model(fake_env, wrapper, model, backend):
+    cwd = fake_env.root / "home" / "ai"
+    write_claude_session(fake_env, cwd, "w1", [_u("ask", cwd), _model_reply("ok", model) if model else _a("ok")])
+    idx = _index(fake_env)
+    idx.refresh()
+    idx.record_launch("claude", "w1", wrapper)
+    assert idx.row("claude", "w1").backend == backend
+
+
+def test_backend_from_a_wrapper_remembered_at_launch(fake_env):
+    """A new session started with claudez: launched.json carries the wrapper until the transcript is indexed."""
+    cwd = fake_env.root / "home" / "ai"
+    index_mod.remember_launch(fake_env.data_dir, "claude", "n1", "claudez")
+    write_claude_session(fake_env, cwd, "n1", [_u("ask", cwd), _a("ok")])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("claude", "n1").backend == "glm"
+
+
+def test_qwen_code_sessions_are_qwencode(fake_env):
+    ai = fake_env.root / "home" / "ai"
+    write_qwen_session(fake_env, ai, "q1", [_q_user("hello qwen"), _q_asst("hi")])
+    idx = _index(fake_env)
+    idx.refresh()
+    assert idx.row("qwen", "q1").backend == "qwencode"
+    assert index_mod.backend_of("qwen", "claudez", "glm-5.3") == "qwencode"  # the store decides first
+
+
+def test_backend_model_survives_an_incremental_refresh_without_a_new_reply(fake_env):
+    cwd = fake_env.root / "home" / "ai"
+    path = write_claude_session(fake_env, cwd, "g1", [_u("ask", cwd), _model_reply("ok", "glm-5.3")])
+    idx = _index(fake_env)
+    idx.refresh()
+    _append(path, {"type": "system", "subtype": "note", "content": "x" * 10})
+    idx.refresh()
+    assert idx.row("claude", "g1").backend == "glm"
+
+
+def test_backend_labels():
+    assert [index_mod.backend_label(b) for b in index_mod.BACKENDS] == ["claude", "qwen", "glm", "qwencli"]

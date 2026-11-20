@@ -132,9 +132,6 @@ TRANSLATIONS = {
 
         # ---- Session starten ---------------------------------------------
         "Ungültige Session-ID.": "Invalid session ID.",
-        "Unsicherer claude_cmd-Wert.": "Unsafe value for claude_cmd.",
-        "Windows Terminal (wt) nicht gefunden.":
-            "Windows Terminal (wt) not found.",
 
         # ---- Tray und Benachrichtigungen ---------------------------------
         "Öffnen": "Open",
@@ -244,8 +241,6 @@ TRANSLATIONS = {
             "Claude",
         "Claude Session Browser":
             "Claude Session Browser",
-        "Claude-Befehl":
-            "Claude command",
         "Claude-Buddy":
             "Claude Buddy",
         "Clawd-Buddy spiegeln":
@@ -316,8 +311,6 @@ TRANSLATIONS = {
             "A tiny animated Clawd (20×20 pixels) floats on your desktop and shows what's happening right now – is Claude writing code, thinking, or did it hit a limit? By default it only shows up while Claude Code is running, fading smoothly in and out.",
         "Ein winziger animierter Clawd (20×20 Pixel) schwebt auf dem Desktop – frameless, immer im Vordergrund. Zieh ihn mit der Maus wohin du magst. Rechts- oder Doppelklick schickt ihn kurz weg – er kommt beim nächsten neuen Claude-Terminal von selbst zurück.":
             "A tiny animated Clawd (20×20 pixels) floats on your desktop – frameless, always on top. Drag it with your mouse wherever you like. Right-click or double-click sends it away for a bit – it comes back on its own with the next new Claude terminal.",
-        "Eingabeaufforderung (cmd)":
-            "Command Prompt (cmd)",
         "Einstellungen":
             "Settings",
         "English":
@@ -434,8 +427,6 @@ TRANSLATIONS = {
             "Party mode (dance only)",
         "Passt zu jedem Fenster, dessen Titel den eingegebenen Text enthält (Groß-/Kleinschreibung egal).":
             "Matches any window whose title contains the text you enter (case doesn't matter).",
-        "Pfad/Name der Claude-CLI (Standard: claude).":
-            "Path/name of the Claude CLI (default: claude).",
         "Platzieren":
             "Place",
         "Quelltext, Fehler melden, Änderungen nachlesen.":
@@ -528,22 +519,16 @@ TRANSLATIONS = {
             "Which paired device is used.",
         "Wenn aktiv, versteckt der X-Button die App nur (Icon im System-Tray unten rechts, Klick öffnet sie wieder).":
             "When enabled, the X button just hides the app (icon in the system tray at the bottom right, click it to bring it back).",
-        "Wie eine Session gestartet wird.":
-            "How a session gets started.",
         "Wie viel vom 5-Stunden-Fenster und von der Woche verbraucht ist. Aktualisiert sich von selbst.":
             "How much of the 5-hour window and the week you've used up. Updates on its own.",
         "Willkommen 👋":
             "Welcome 👋",
-        "Windows Terminal":
-            "Windows Terminal",
         "Windows-Systembenachrichtigung wenn dein Claude-Limit sich zurückgesetzt hat und du wieder loslegen kannst. Braucht den System-Tray aktiv.":
             "Windows system notification when your Claude limit has reset and you can get going again. Needs the system tray enabled.",
         "Wird geladen…":
             "Loading…",
         "Wo Claude die Session-Dateien speichert. Wird automatisch gesucht, lässt sich aber überschreiben.":
             "Where Claude stores the session files. Found automatically, but you can override it.",
-        "Womit öffnen?":
-            "Open with?",
         "Wähle deine Farbe":
             "Choose your color",
         "Wähle eine Session aus, um Details zu sehen.":

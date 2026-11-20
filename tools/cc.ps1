@@ -7,6 +7,23 @@
 # Anything else on stdout (cc --json, cc --help) is passed through unchanged.
 
 function cc {
+    # Windows PowerShell 5.1 mangles double quotes in arguments passed to native programs, so a session name with
+    # a `"` would break: hand over to PowerShell 7, whose profile defines cc. The arguments travel as single-quoted
+    # literals inside a base64 -EncodedCommand, so no double quote reaches the command line. Not a scriptblock
+    # (`pwsh -Command { ... } -args ...`): for that form 5.1 adds `-inputFormat xml` and pipes the child's stdin and
+    # output, and cc's screens need the console. pwsh sets $LASTEXITCODE, which is what cc returns.
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        if (Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue) {
+            # each single quote doubled, the typographic ones too (PowerShell reads them as quotes); ASCII source,
+            # since 5.1 reads a script without a BOM in the ANSI code page
+            $sq = "['" + [char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B + "]"
+            $quoted = @($args | ForEach-Object { "'" + ([string]$_ -replace $sq, '$0$0') + "'" })
+            $text = (@('cc') + $quoted) -join ' '
+            pwsh -NoLogo -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($text)))
+            return
+        }
+        Write-Host 'cc needs PowerShell 7 (pwsh) for session names with double quotes; continuing in Windows PowerShell.'
+    }
     $repo = Split-Path -Parent $PSScriptRoot
     # the installed onedir build ({app}\cc\cc.exe), then a cc.exe beside this script (older single-file layout)
     $exe = @((Join-Path $PSScriptRoot 'cc\cc.exe'), (Join-Path $PSScriptRoot 'cc.exe')) |

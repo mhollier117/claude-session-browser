@@ -26,17 +26,53 @@ _UNTITLED = "(untitled)"
 LAUNCH_WAIT_MS = 500  # how long `record_launch` waits for a lock: resuming must not sit behind another cc's refresh
 DB_TIMEOUT_S = 30.0  # how long a write waits for another process's write (another cc, the browser) to finish
 
-_SCHEMA_VERSION = 2  # bump when the columns change: an older cache is dropped and rebuilt
+# Bump when the columns change. The cache file is named after the version (`index_file`), so a new schema starts a
+# new file beside the old one instead of dropping its table: an older build still running against the old file
+# keeps its cache, and neither rebuilds the other's. The old file is left in place.
+_SCHEMA_VERSION = 3
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     store TEXT NOT NULL, sid TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT, name TEXT, display_name TEXT,
     first_ask TEXT, last_ask TEXT, last_reply TEXT, user_msgs INTEGER, assistant_msgs INTEGER,
     size INTEGER, mtime REAL, last_activity REAL, wrapper TEXT,
-    counted_to INTEGER, custom_title TEXT, ai_title TEXT,
+    counted_to INTEGER, custom_title TEXT, ai_title TEXT, model TEXT,
     PRIMARY KEY (store, sid))
 """
 _FACT_COLS = ("path", "cwd", "name", "display_name", "first_ask", "last_ask", "last_reply", "user_msgs",
-              "assistant_msgs", "size", "mtime", "last_activity", "counted_to", "custom_title", "ai_title")
+              "assistant_msgs", "size", "mtime", "last_activity", "counted_to", "custom_title", "ai_title", "model")
+
+# The backend a session runs on (`Row.backend`): Claude Code against Anthropic (claude), a self-hosted Qwen model
+# (qwen, the claudeq wrapper) or Z.ai GLM (glm, claudez); Qwen Code sessions are another tool (qwencode).
+BACKENDS = ("claude", "qwen", "glm", "qwencode")
+_WRAPPER_BACKEND = {"claudeq": "qwen", "claudez": "glm"}
+# the type the lists show for each backend (the resume list's tool column, the browser's tool badge)
+_BACKEND_LABEL = {"claude": "claude", "qwen": "qwen", "glm": "glm", "qwencode": "qwencli"}
+
+
+def index_file(data_dir: Path) -> Path:
+    """The index cache for this schema version: `index-v<N>.sqlite` in `data_dir`."""
+    return Path(data_dir) / f"index-v{_SCHEMA_VERSION}.sqlite"
+
+
+def backend_of(store: str, wrapper: str | None, model: str | None) -> str:
+    """A session's backend: Qwen Code sessions are `qwencode`; a Claude session last launched with claudeq or claudez
+    is `qwen` or `glm`; else the model of its last assistant record decides (contains `glm` -> glm, contains `qwen`
+    -> qwen); else `claude`."""
+    if store == "qwen":
+        return "qwencode"
+    if wrapper in _WRAPPER_BACKEND:
+        return _WRAPPER_BACKEND[wrapper]
+    m = (model or "").lower()
+    if "glm" in m:
+        return "glm"
+    if "qwen" in m:
+        return "qwen"
+    return "claude"
+
+
+def backend_label(backend: str) -> str:
+    """What the lists show for `backend`: claude, qwen, glm, or qwencli for a Qwen Code session."""
+    return _BACKEND_LABEL.get(backend, "claude")
 
 
 @dataclass
@@ -58,6 +94,7 @@ class Row:
     wrapper: str | None
     cwd_exists: bool
     path: str = ""  # the transcript file (the preview reads the whole last reply from it)
+    backend: str = "claude"  # one of BACKENDS (see `backend_of`)
 
 
 @dataclass
@@ -171,7 +208,7 @@ class Index:
         writer waits up to `timeout` seconds for another's write before sqlite raises `OperationalError`."""
         self.env = env
         self._timeout = timeout
-        self.db_path = Path(db_path) if db_path else env.data_dir / "index.sqlite"
+        self.db_path = Path(db_path) if db_path else index_file(env.data_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
         self._pid_exists = pid_exists or _default_pid_exists
@@ -224,7 +261,7 @@ class Index:
         with self._db:  # one transaction: an unexpected error rolls the whole refresh back
             old = {(r["store"], r["sid"]): r for r in self._db.execute(
                 "SELECT store, sid, path, size, mtime, counted_to, user_msgs, assistant_msgs, custom_title, ai_title, "
-                "last_ask FROM sessions")}
+                "last_ask, model FROM sessions")}
             for done, (key, (path, st)) in enumerate(files.items(), 1):
                 prev = old.get(key)
                 if not (prev and prev["path"] == str(path) and prev["size"] == st.st_size
@@ -281,7 +318,8 @@ class Index:
         row = {"path": str(path), "cwd": facts.cwd, "name": custom or ai, "first_ask": facts.first_ask,
                "last_ask": last_ask, "last_reply": facts.last_reply[:_LAST_REPLY_CHARS],
                "user_msgs": users, "assistant_msgs": assistants, "size": facts.size, "mtime": facts.mtime,
-               "last_activity": facts.last_ts or facts.mtime, "counted_to": end, "custom_title": custom, "ai_title": ai}
+               "last_activity": facts.last_ts or facts.mtime, "counted_to": end, "custom_title": custom, "ai_title": ai,
+               "model": facts.last_model or (prev["model"] if prev is not None else None)}
         row["display_name"] = self._display_name(store, facts.sid, row, live, titles)
         cols = ", ".join(_FACT_COLS)
         self._db.execute(
@@ -339,7 +377,8 @@ class Index:
                 first_ask=r["first_ask"] or "", last_ask=r["last_ask"] or "", last_reply=r["last_reply"] or "",
                 user_msgs=r["user_msgs"], assistant_msgs=r["assistant_msgs"], size=r["size"], mtime=r["mtime"],
                 last_activity=r["last_activity"], live_pid=reg.pid if reg else None, wrapper=r["wrapper"],
-                cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir(), path=r["path"]))
+                cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir(), path=r["path"],
+                backend=backend_of(r["store"], r["wrapper"], r["model"])))
         return out
 
     def rows(self, filter_text: str = "") -> list[Row]:

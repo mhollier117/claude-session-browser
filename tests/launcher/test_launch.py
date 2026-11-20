@@ -19,7 +19,7 @@ def make_row(**kw) -> Row:
 
 
 def test_wrappers_constant():
-    assert launch.WRAPPERS == ("claude", "clauded", "claude6", "claudeb", "claudew", "qwen")
+    assert launch.WRAPPERS == ("claude", "clauded", "claude6", "claudeb", "claudew", "claudeq", "claudez", "qwen")
 
 
 def test_default_wrapper_cc_area_is_clauded_too(fake_env):
@@ -39,15 +39,68 @@ def test_default_wrapper_is_clauded_everywhere(fake_env, rel):
 
 
 @pytest.mark.parametrize("wrapper, expected", [
-    ("clauded", "claude"), ("claude6", "claude"), ("claudew", "claude"),
-    ("claude", "claude"), ("claudeb", "claudeb"), ("qwen", "qwen"),
+    ("clauded", ["claude"]), ("claude6", ["claude"]), ("claudew", ["claude"]),
+    ("claude", ["claude"]), ("claudeb", ["claudeb"]), ("claudeq", ["claudeq"]), ("claudez", ["claudez"]),
+    ("qwen", ["qwen"]),
 ])
-def test_without_bypass_maps_each_wrapper(wrapper, expected):
-    assert launch.without_bypass(wrapper) == expected
+def test_wrapper_argv_asking_permissions(wrapper, expected):
+    assert launch.wrapper_argv(wrapper, ask_permissions=True) == expected
 
 
-def test_without_bypass_covers_every_known_wrapper():
-    assert {launch.without_bypass(w) for w in launch.WRAPPERS} == {"claude", "claudeb", "qwen"}
+@pytest.mark.parametrize("wrapper, expected", [
+    ("clauded", ["clauded"]), ("claude6", ["claude6"]), ("claudew", ["claudew"]), ("claude", ["claude"]),
+    ("claudeb", ["claudeb"]), ("qwen", ["qwen"]),
+    ("claudeq", ["claudeq", "--dangerously-skip-permissions"]),
+    ("claudez", ["claudez", "--dangerously-skip-permissions"]),
+])
+def test_wrapper_argv_bypass_mode(wrapper, expected):
+    assert launch.wrapper_argv(wrapper) == launch.wrapper_argv(wrapper, ask_permissions=False) == expected
+
+
+def test_wrapper_argv_covers_every_known_wrapper():
+    assert {launch.wrapper_argv(w, True)[0] for w in launch.WRAPPERS} == {"claude", "claudeb", "claudeq", "claudez",
+                                                                          "qwen"}
+    assert not hasattr(launch, "without_bypass")  # replaced by wrapper_argv
+
+
+@pytest.mark.parametrize("backend, last, ask, expected", [
+    ("glm", None, False, ["claudez", "--dangerously-skip-permissions", "-r", "s1"]),
+    ("glm", "claude6", False, ["claudez", "--dangerously-skip-permissions", "-r", "s1"]),  # whatever last ran it
+    ("glm", "claudez", True, ["claudez", "-r", "s1"]),
+    ("qwen", "claudeb", False, ["claudeq", "--dangerously-skip-permissions", "-r", "s1"]),
+    ("qwen", None, True, ["claudeq", "-r", "s1"]),
+    ("claude", None, False, ["clauded", "-r", "s1"]),
+    ("claude", None, True, ["claude", "-r", "s1"]),
+    ("claude", "claude6", False, ["claude6", "-r", "s1"]),
+    ("claude", "claude6", True, ["claude", "-r", "s1"]),
+    ("claude", "claudeb", True, ["claudeb", "-r", "s1"]),
+])
+def test_resume_argv_for_each_backend(tmp_path, backend, last, ask, expected):
+    row = make_row(cwd=str(tmp_path), wrapper=last, backend=backend)
+    assert resume_command(row, None, root=tmp_path, ask_permissions=ask).argv == expected
+
+
+@pytest.mark.parametrize("ask", [False, True])
+def test_resume_qwen_code_backend_is_always_qwen(tmp_path, ask):
+    row = make_row(store="qwen", sid="q1", cwd=str(tmp_path), backend="qwencode")
+    assert resume_command(row, None, root=tmp_path, ask_permissions=ask).argv == ["qwen", "-r", "q1"]
+
+
+def test_resume_explicit_wrapper_beats_the_backend(tmp_path):
+    row = make_row(cwd=str(tmp_path), backend="glm")
+    assert resume_command(row, "claude6", root=tmp_path).argv == ["claude6", "-r", "s1"]
+
+
+@pytest.mark.parametrize("wrapper, ask, expected", [
+    ("claudez", False, ["claudez", "--dangerously-skip-permissions", "-n", "n", "--session-id", "x"]),
+    ("claudez", True, ["claudez", "-n", "n", "--session-id", "x"]),
+    ("claudeq", False, ["claudeq", "--dangerously-skip-permissions", "-n", "n", "--session-id", "x"]),
+    ("clauded", True, ["claude", "-n", "n", "--session-id", "x"]),
+    ("clauded", False, ["clauded", "-n", "n", "--session-id", "x"]),
+    ("qwen", True, ["qwen", "--session-id", "x"]),
+])
+def test_new_command_wrapper_part(tmp_path, wrapper, ask, expected):
+    assert new_command(tmp_path, "n", wrapper, session_id="x", ask_permissions=ask).argv == expected
 
 
 def test_resume_uses_recorded_wrapper(tmp_path):

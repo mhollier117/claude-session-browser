@@ -77,7 +77,7 @@ def test_sessions_include_qwen_rows_with_tool(fake_env, api):
     write_qwen_session(fake_env, ai, "q1", [_q_user("hello qwen")])
     assert [r["id"] for r in api._sessions()] == ["c1"]  # the first call never waits for the index build
     rows = _settled(api)
-    assert [(r["id"], r["tool"]) for r in rows] == [("c1", "claude"), ("q1", "qwen")]
+    assert [(r["id"], r["tool"]) for r in rows] == [("c1", "claude"), ("q1", "qwencli")]
     q = rows[1]
     assert q["display_title"] == "hello qwen" and q["cwd"] == str(ai) and q["project"] == "ai"
     assert q["when"] == cs.fmt_time(q["mtime"]) and q["total_msgs"] == 1 and q["color"] == ""
@@ -205,14 +205,14 @@ def test_launcher_methods_answer_errors_instead_of_raising(api, monkeypatch):
 
 def test_resume_qwen_row_uses_qwen_r(fake_env, api):
     cwd = fake_env.root / "home" / "ai"
-    assert api.resume("q1", str(cwd), "", "qwen") == {"ok": True}
+    assert api.resume("q1", str(cwd), "", "qwencli") == {"ok": True}
     [(argv, _kw)] = api.popens
     assert argv == ["wt", "-w", "0", "nt", "-d", str(cwd), "pwsh", "-NoExit", "-EncodedCommand",
                     _enc(["qwen", "-r", "q1"])]
 
 
 def test_resume_qwen_rejects_a_bad_session_id(api):
-    assert api.resume("q1; rm", "C:\\", "", "qwen")["ok"] is False
+    assert api.resume("q1; rm", "C:\\", "", "qwencli")["ok"] is False
     assert api.popens == []
 
 
@@ -236,7 +236,7 @@ def test_resume_claude_keeps_the_account_wrapper_that_last_launched_it(fake_env,
     """As the launcher's resume list: an account wrapper is kept, plain claude or none resumes with clauded."""
     from types import SimpleNamespace
     cwd = fake_env.root / "work"
-    row = SimpleNamespace(store="claude", sid="c1", cwd=str(cwd), cwd_exists=True, wrapper=last)
+    row = SimpleNamespace(store="claude", sid="c1", cwd=str(cwd), cwd_exists=True, wrapper=last, backend="claude")
     monkeypatch.setattr(api, "_launcher_idx", lambda refresh=False: SimpleNamespace(
         row=lambda store, sid: row if (store, sid) == ("claude", "c1") else None))
     assert api.resume("c1", str(cwd)) == {"ok": True}
@@ -269,7 +269,7 @@ def test_launch_falls_back_to_a_console_without_wt(fake_env, api, monkeypatch):
             raise FileNotFoundError("wt")
     monkeypatch.setattr(cs.subprocess, "Popen", popen)
     cwd = fake_env.root / "cc"
-    assert api.resume("q1", str(cwd), "", "qwen") == {"ok": True}
+    assert api.resume("q1", str(cwd), "", "qwencli") == {"ok": True}
     argv, kw = calls[1]
     assert argv == ["pwsh", "-NoExit", "-EncodedCommand", _enc(["qwen", "-r", "q1"])]
     assert kw["cwd"] == str(cwd) and kw["creationflags"] == cs.subprocess.CREATE_NEW_CONSOLE
@@ -562,3 +562,98 @@ def test_page_new_strings_are_translated(page):
     import i18n
     for key in ("keins", "kein GitHub-Repo, nur git init", "neuer Ordner…"):
         assert f"t('{key}')" in page and key in i18n.TRANSLATIONS["en"]
+
+
+# ---- the type of each row and resuming other backends -----------------------------------------------------------
+
+def _c_user(text, cwd):
+    return {"type": "user", "cwd": str(cwd), "message": {"role": "user", "content": text}}
+
+
+def _c_reply(model):
+    return {"type": "assistant", "message": {"role": "assistant", "model": model,
+                                             "content": [{"type": "text", "text": "ok"}]}}
+
+
+def _claude_rows(api, monkeypatch, rows):
+    """The app's own parser returns these Claude rows (ids only matter)."""
+    monkeypatch.setattr(cs, "collect_sessions", lambda d: [dict(_CLAUDE_ROW, id=i) for i in rows])
+
+
+def test_session_list_types_come_from_the_launcher_index(fake_env, api, monkeypatch):
+    from launcher_helpers import write_claude_session
+    cwd = fake_env.root / "home" / "ai"
+    for sid, model in (("c1", "claude-opus-4-1"), ("g1", "glm-5.3[1m]"), ("k1", "qwen3-vl-current")):
+        write_claude_session(fake_env, cwd, sid, [_c_user("hi", cwd), _c_reply(model)])
+    write_qwen_session(fake_env, cwd, "q1", [_q_user("hello qwen")])
+    _claude_rows(api, monkeypatch, ["c1", "g1", "k1", "n1"])  # n1: not in the index (yet)
+    assert {r["id"]: r["tool"] for r in api._sessions()} == {"c1": "claude", "g1": "claude", "k1": "claude",
+                                                            "n1": "claude"}  # before the index read: claude
+    types = {r["id"]: r["tool"] for r in _settled(api)}
+    assert types == {"c1": "claude", "g1": "glm", "k1": "qwen", "n1": "claude", "q1": "qwencli"}
+    host = cs.PluginHost(api, {"id": "p", "version": "1", "permissions": ["sessions"]})
+    assert [s["id"] for s in host.sessions()] == ["c1", "g1", "k1", "n1"]  # every Claude backend, no Qwen Code
+
+
+def test_session_list_types_are_claude_when_the_index_is_unavailable(fake_env, api, monkeypatch):
+    from launcher_helpers import write_claude_session
+    cwd = fake_env.root / "home" / "ai"
+    write_claude_session(fake_env, cwd, "g1", [_c_user("hi", cwd), _c_reply("glm-5.3")])
+    _claude_rows(api, monkeypatch, ["g1"])
+
+    def broken(*a, **k):
+        raise RuntimeError("index exploded")
+    monkeypatch.setattr(Index, "refresh", broken)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    assert [(r["id"], r["tool"]) for r in _settled(api)] == [("g1", "claude")]
+
+
+@pytest.mark.parametrize("backend, last, wrapper_part", [
+    ("glm", None, ["claudez", "--dangerously-skip-permissions"]),
+    ("glm", "claude6", ["claudez", "--dangerously-skip-permissions"]),
+    ("qwen", "claudeb", ["claudeq", "--dangerously-skip-permissions"]),
+    ("claude", None, ["clauded"]),
+    ("claude", "claudew", ["claudew"]),
+])
+def test_resume_claude_row_on_each_backend(fake_env, api, monkeypatch, backend, last, wrapper_part):
+    """A glm or qwen row is a Claude session: the page passes its type as `tool` and it still resumes through
+    the Claude path, where the index row picks claudez / claudeq (bypass mode: the app has no ask-permissions
+    resume)."""
+    from types import SimpleNamespace
+    cwd = fake_env.root / "work"
+    row = SimpleNamespace(store="claude", sid="c1", cwd=str(cwd), cwd_exists=True, wrapper=last, backend=backend)
+    monkeypatch.setattr(api, "_launcher_idx", lambda refresh=False: SimpleNamespace(
+        row=lambda store, sid: row if (store, sid) == ("claude", "c1") else None))
+    tool = {"glm": "glm", "qwen": "qwen", "claude": "claude"}[backend]
+    assert api.resume("c1", str(cwd), "", tool) == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc([*wrapper_part, "-r", "c1"])
+
+
+def test_resume_glm_row_from_a_real_index(fake_env, api):
+    from launcher_helpers import write_claude_session
+    cwd = fake_env.root / "home" / "ai"
+    write_claude_session(fake_env, cwd, "g1", [_c_user("hi", cwd), _c_reply("glm-5.3-flash")])
+    assert api.resume("g1", str(cwd), "", "glm") == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc(["claudez", "--dangerously-skip-permissions", "-r", "g1"])
+
+
+def test_page_types_badges_and_qwen_code_checks(page):
+    assert "const TOOL_TYPES = ['claude','qwen','glm','qwencli'];" in page
+    assert "s && TOOL_TYPES.includes(s.tool) ? s.tool : 'claude'" in _js_fn(page, "toolOf")
+    for cls in ("qwencli", "qwen", "glm"):
+        assert f".tool-badge.{cls}{{" in page
+    assert "toolOf(s)==='qwencli'" in _js_fn(page, "openColor") and "toolOf(s)==='qwencli'" in _js_fn(page, "openRename")
+    assert "toolOf(s)==='qwen'" not in page  # "qwen" is now Claude Code on a Qwen model, not Qwen Code
+    assert "api.resume(s.id,s.cwd,s.project||'',toolOf(s))" in page
+    assert "s.tool!=='claude'" in _js_fn(page, "repollQwen")
+
+
+def test_claude_is_never_launched_through_cmd(page):
+    assert not hasattr(cs, "resume_session")
+    assert "claude_cmd" not in page and "update_setting('terminal'" not in page
+    assert "claude_cmd" not in cs.DEFAULT_SETTINGS and "terminal" not in cs.DEFAULT_SETTINGS
+    import inspect
+    source = inspect.getsource(cs)
+    assert '"--resume"' not in source and '"/k"' not in source  # no `cmd /k claude --resume` argv left

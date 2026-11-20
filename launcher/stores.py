@@ -38,6 +38,7 @@ class SessionFacts:
     size: int
     mtime: float
     last_ts: float | None = None  # epoch seconds of the last record with a `timestamp` in the tail read, else None
+    last_model: str | None = None  # the model of the last assistant record in the tail read (see `_record_model`)
 
 
 def clean_user_text(s: str) -> str:
@@ -143,17 +144,38 @@ def _head(path: Path, size: int, parser) -> tuple[str | None, str]:
         n *= 2
 
 
-def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True) -> tuple[str, str]:
-    """(last cleaned ask, last whole reply), growing backwards by doubling until both are found, BOF, or the last
-    `TAIL_MAX_BYTES` have been read: then whatever was found is returned ("" for the other), so a transcript whose
-    last typed ask lies far back (long tool output since) is never read whole."""
+def _record_model(rec: dict) -> str | None:
+    """The model an assistant record was answered by: `message.model` (Claude Code), else a top-level `model`;
+    None for other records and for Claude Code's `<synthetic>` placeholder (local error and notice records)."""
+    if rec.get("type") != "assistant":
+        return None
+    msg = rec.get("message")
+    model = msg.get("model") if isinstance(msg, dict) else None
+    if not isinstance(model, str) or not model.strip():
+        model = rec.get("model")
+    if not isinstance(model, str) or not model.strip() or model.strip() == "<synthetic>":
+        return None
+    return model.strip()
+
+
+def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True) -> tuple[str, str, str | None]:
+    """(last cleaned ask, last whole reply, model of the last assistant record), growing backwards by doubling until
+    the ask and reply are found, BOF, or the last `TAIL_MAX_BYTES` have been read: then whatever was found is
+    returned ("" for the other), so a transcript whose last typed ask lies far back (long tool output since) is never
+    read whole. The model comes from the same lines (an assistant record holding only tool calls counts too), so it
+    is found whenever the reply is."""
     cap = max(TAIL_MAX_BYTES, 1)
     n = min(max(tail_bytes, 1), cap)
     while True:
         ask = reply = ""
+        model = None
         for line in reversed(_tail_lines(path, size, n)):
             got = _parse(line, parser)
-            if got is None or got[1] is None:
+            if got is None:
+                continue
+            if model is None:
+                model = _record_model(got[0])
+            if got[1] is None:
                 continue
             kind, text = got[1]
             if kind == "assistant" and not reply:
@@ -163,7 +185,7 @@ def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True)
             if reply and (ask or not want_ask):
                 break
         if (reply and (ask or not want_ask)) or n >= size or n >= cap:
-            return ask, reply
+            return ask, reply, model
         n = min(n * 2, cap)
 
 
@@ -245,11 +267,11 @@ def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> Sessi
     st = path.stat()
     parser = _PARSERS[store]
     cwd, first = _head(path, st.st_size, parser)
-    last_ask, last_reply = _tail(path, st.st_size, parser, tail_bytes)
+    last_ask, last_reply, last_model = _tail(path, st.st_size, parser, tail_bytes)
     last_ts = _last_ts(path, st.st_size, tail_bytes)
     users, assistants, name = _count(path, parser) if count else (0, 0, None)
     return SessionFacts(store, path.stem, path, cwd, name, first, last_ask, last_reply,
-                        users, assistants, st.st_size, st.st_mtime, last_ts)
+                        users, assistants, st.st_size, st.st_mtime, last_ts, last_model)
 
 
 def read_claude(path: Path, tail_bytes: int = 262_144, count: bool = True) -> SessionFacts:

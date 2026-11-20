@@ -16,8 +16,8 @@ from prompt_toolkit.utils import get_cwidth
 
 from .. import stores
 from ..display import age, middle_ellipsis, rel_or_abs
-from ..index import Index, Row
-from ..launch import WRAPPERS, Launch, focus_live, resume_command, without_bypass
+from ..index import Index, Row, backend_label
+from ..launch import WRAPPERS, Launch, focus_live, resume_command
 from ..paths import Env
 from .preview import render_preview
 
@@ -121,6 +121,11 @@ def location(row: Row, root: Path | None, width: int) -> str:
     return middle_ellipsis(shown, width)
 
 
+def tool_label(row: Row) -> str:
+    """The tool column and its style class: claude, qwen (claudeq), glm (claudez), or qwencli (Qwen Code)."""
+    return "qwencli" if row.store == "qwen" else backend_label(row.backend)
+
+
 def scroll_top(top: int, selected: int, visible: int) -> int:
     """The first visible row index after the smallest scroll that keeps `selected` on screen."""
     visible = max(1, visible)
@@ -154,7 +159,7 @@ def render_rows(rows: list[Row], width: int, now: float, selected: int, *, root:
         frags += [(base + "class:dim", fit(age(row.last_activity, now), AGE_W)), (base, " "),
                   (base + ("class:cur" if sel else "class:name"), fit(name, NAME_W)), (base, " "),
                   (base + "class:dim", fit(location(row, root, loc_w), loc_w)), (base, " "),
-                  (base + f"class:{row.store}", fit(row.store, TOOL_W)), (base, " "),
+                  (base + f"class:{tool_label(row)}", fit(tool_label(row), TOOL_W)), (base, " "),
                   (base + "class:live", fit("live" if row.live_pid else "", LIVE_W)), ("", "\n")]
     if height is not None:  # keep the footer at the bottom of the screen
         frags += [("", "\n")] * (visible - max(1, len(shown)))
@@ -242,8 +247,9 @@ class ResumeState:
 
     # ---- wrapper and launch ------------------------------------------------------------------------------------
 
-    def launch_for(self, row: Row) -> Launch:
-        return resume_command(row, self._wrappers.get((row.store, row.sid)), root=self.env.root)
+    def launch_for(self, row: Row, ask_permissions: bool = False) -> Launch:
+        return resume_command(row, self._wrappers.get((row.store, row.sid)), root=self.env.root,
+                              ask_permissions=ask_permissions)
 
     def wrapper_for(self, row: Row) -> str:
         return self.launch_for(row).argv[0]
@@ -264,7 +270,7 @@ class ResumeState:
     def enter(self, ask_permissions: bool = False) -> Resume | _Signal | None:
         """A `Resume` to exit with, `FOCUSED` when a live session's window was brought forward, or None to stay
         (nothing selected, or focusing failed: the error is in `status`). `ask_permissions` (ctrl-p) resumes without
-        bypass mode (`launch.without_bypass`)."""
+        bypass mode (`launch.wrapper_argv`)."""
         row = self.current()
         if row is None:
             return None
@@ -274,9 +280,7 @@ class ResumeState:
                 return FOCUSED
             self.status = f"could not focus pid {row.live_pid}: {res.get('error') or 'unknown error'}"
             return None
-        launch = self.launch_for(row)
-        if ask_permissions:
-            launch.argv[0] = without_bypass(launch.argv[0])
+        launch = self.launch_for(row, ask_permissions)
         return Resume(row, launch.argv[0], launch)
 
     def open_folder(self) -> None:

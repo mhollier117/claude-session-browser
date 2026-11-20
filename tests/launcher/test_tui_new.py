@@ -361,10 +361,10 @@ def test_confirm_preselects_clauded_in_every_area_and_w_cycles_in_order(fake_env
     _pick(flow, "start")
     assert flow.step == "confirm" and flow.wrapper == "clauded" and flow.github is None  # no cc exception
     seen = [flow.wrapper]
-    for _ in range(6):
+    for _ in range(8):
         flow.cycle_wrapper()
         seen.append(flow.wrapper)
-    assert seen == ["clauded", "claude6", "claudeb", "claudew", "qwen", "claude", "clauded"]
+    assert seen == ["clauded", "claude6", "claudeb", "claudew", "claudeq", "claudez", "qwen", "claude", "clauded"]
     flow.cycle_github()  # start here creates nothing: there is no GitHub choice to cycle
     assert flow.github is None
     flow.esc()
@@ -1417,24 +1417,67 @@ def test_every_step_footer_wraps_between_items(fake_env, index, width):
 
 # ---- ctrl-p: launch asking permissions ------------------------------------------------------------------------------
 
-def test_ask_permissions_maps_the_wrapper_and_only_works_on_the_confirm_step(fake_env, index):
+def test_ask_permissions_sets_the_flag_and_only_works_on_the_confirm_step(fake_env, index):
     flow = _flow(fake_env, index)
     flow.start("x y")
     flow.ask_permissions()  # not on the confirm step: nothing to change
     assert flow.step == "name" or flow.step == "picker"
+    assert flow.ask is False
     _go(flow, fake_env.root / "home")
     _pick(flow, "start")
-    assert flow.wrapper == "clauded"
+    assert flow.wrapper == "clauded" and flow.ask is False
+    assert flow.command_text().endswith(' ; clauded -n "x y"')
     flow.ask_permissions()
-    assert flow.wrapper == "claude" and flow.step == "confirm"  # it only sets the wrapper; enter launches
-    flow.ask_permissions()
-    assert flow.wrapper == "claude"
+    # it only sets the flag (the wrapper choice stays); enter launches
+    assert flow.wrapper == "clauded" and flow.ask is True and flow.step == "confirm"
+    assert flow.command_text().endswith(' ; claude -n "x y"')
     flow.choose_wrapper("claudeb")
-    flow.ask_permissions()
-    assert flow.wrapper == "claudeb"
+    assert flow.command_text().endswith(' ; claudeb -n "x y"')
     flow.choose_wrapper("claude6")
+    assert flow.command_text().endswith(' ; claude -n "x y"')
+    flow.esc()
+    _pick(flow, "start")  # back on the confirm step: bypass mode again
+    assert flow.ask is False
+
+
+def _confirm_new_project(fake_env, index):
+    """The confirm step for a new project (wrapper preselected: clauded)."""
+    flow = _flow(fake_env, index)
+    flow.start("glm work")
+    _go(flow, fake_env.root / "home" / "ai")
+    _pick(flow, "new")
+    flow.submit_folder_name("glmwork")
+    flow.choose_kind("project")
+    assert flow.step == "confirm" and flow.wrapper == "clauded"
+    return flow
+
+
+CTRL_W_TO_CLAUDEZ = "\x17" * 5  # clauded -> claude6 -> claudeb -> claudew -> claudeq -> claudez
+
+
+def test_new_project_claudez_via_ctrl_w_then_enter_launches_in_bypass_mode(fake_env, index):
+    flow = _confirm_new_project(fake_env, index)
+    launch = _run_keys(flow, CTRL_W_TO_CLAUDEZ + "\r")
+    assert flow.wrapper == "claudez" and flow.ask is False
+    assert launch.argv[:5] == ["claudez", "--dangerously-skip-permissions", "-n", "glm work", "--session-id"]
+    assert launch.cwd == fake_env.root / "home" / "ai" / "glmwork"
+
+
+def test_new_project_claudez_via_ctrl_w_then_ctrl_p_launches_without_the_bypass_flag(fake_env, index):
+    flow = _confirm_new_project(fake_env, index)
+    launch = _run_keys(flow, CTRL_W_TO_CLAUDEZ + "\x10")
+    assert flow.wrapper == "claudez" and flow.ask is True
+    assert launch.argv[:4] == ["claudez", "-n", "glm work", "--session-id"]
+    assert launch.cwd == fake_env.root / "home" / "ai" / "glmwork"
+
+
+def test_new_project_confirm_shows_the_claudez_command(fake_env, index):
+    flow = _confirm_new_project(fake_env, index)
+    while flow.wrapper != "claudez":
+        flow.cycle_wrapper()
+    assert flow.command_text().endswith(' ; claudez --dangerously-skip-permissions -n "glm work"')
     flow.ask_permissions()
-    assert flow.wrapper == "claude"
+    assert flow.command_text().endswith(' ; claudez -n "glm work"')
 
 
 def test_confirm_footers_offer_ctrl_p():

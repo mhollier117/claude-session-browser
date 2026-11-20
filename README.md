@@ -257,7 +257,8 @@ never the API key); each step of the walk goes to `flow.log` beside it.
 The first run after this update rebuilds the index, which takes a few minutes; a second
 `cc` or the app may report "index busy" meanwhile.
 
-**Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index.sqlite`.
+**Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index-v3.sqlite` (the
+file name carries the schema version, so an older build keeps its own `index.sqlite`).
 Each location can be overridden with an environment variable:
 
 | Variable | Default | What it is |

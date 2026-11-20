@@ -157,12 +157,13 @@ def row_dict(row: Row) -> dict:
 
 
 def qwen_session_dicts(rows: list[Row], when) -> list[dict]:
-    """The Qwen rows among `rows` in the browser's session-list shape; `when(mtime)` formats the time column as
-    the Claude rows get it."""
+    """The Qwen Code rows among `rows` in the browser's session-list shape, with `tool` qwencli (the type the list
+    shows; a Claude session on the Qwen backend is `qwen`); `when(mtime)` formats the time column as the Claude rows
+    get it."""
     return [{"id": r.sid, "auto_title": r.display_name, "display_title": r.display_name, "first_user": r.first_ask,
              "cwd": r.cwd or "", "mtime": r.mtime, "when": when(r.mtime), "user_msgs": r.user_msgs,
              "assistant_msgs": r.assistant_msgs, "total_msgs": r.user_msgs + r.assistant_msgs,
-             "project": Path(r.cwd).name if r.cwd else "", "color": "", "tool": "qwen"}
+             "project": Path(r.cwd).name if r.cwd else "", "color": "", "tool": "qwencli"}
             for r in rows if r.store == "qwen"]
 
 

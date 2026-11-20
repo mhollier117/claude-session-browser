@@ -175,7 +175,7 @@ def test_qwen_session_dicts_take_the_browser_shape(fake_env):
     q = rows[0]
     assert d == {"id": "q1", "auto_title": "hello qwen", "display_title": "hello qwen", "first_user": "hello qwen",
                  "cwd": str(ai), "mtime": q.mtime, "when": f"at {q.mtime:.0f}", "user_msgs": 1, "assistant_msgs": 0,
-                 "total_msgs": 1, "project": "ai", "color": "", "tool": "qwen"}
+                 "total_msgs": 1, "project": "ai", "color": "", "tool": "qwencli"}
     idx.close()
 
 

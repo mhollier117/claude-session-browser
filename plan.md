@@ -3,6 +3,22 @@
 Repo: `mhollier117/claude-session-browser` (public; keep it public). Upstream: `juppeee/claude-session-browser`.
 No GitHub Actions workflows in this repo: pushes cost no CI minutes.
 
+## Backends: claudeq / claudez, no cmd.exe, 5.1 hand-off (2026-11-20, branch `launcher`, not pushed)
+- `index.Row.backend` (claude | qwen | glm | qwencode): last wrapper claudeq/claudez, else the model of the last
+  assistant record in the tail read (`glm` -> glm, `qwen` -> qwen), else claude; Qwen Code is qwencode. Index schema 3
+  in `index-v3.sqlite` (old `index.sqlite` left alone for older builds; first run rebuilds the new file).
+- `launch.wrapper_argv(wrapper, ask_permissions)` replaces `without_bypass`; claudeq/claudez get
+  `--dangerously-skip-permissions` in bypass mode. glm resumes with claudez, qwen with claudeq (an explicit ctrl-w
+  choice still wins). WRAPPERS gains claudeq, claudez (before qwen). New-session ctrl-p is a flag (`NewFlow.ask`).
+- Lists show claude / qwen / glm / qwencli (resume list tool column; the app's `s.tool` and badge, filter by type;
+  the app reads backends from its background index read, so the first list shows claude until the re-poll).
+- App: `resume_session` (`cmd /k claude --resume`), the `claude_cmd` and `terminal` settings and their settings rows
+  and i18n keys are gone.
+- `tools/cc.ps1`: in Windows PowerShell 5.1 hands over to pwsh via `-EncodedCommand` (not a scriptblock: that form
+  pipes the child's stdin, and cc needs the console). Needs a manual check in a real 5.1 tab.
+- Known unrelated failure: `tests/test_accounts.py::test_store_folders_inherit_profile_acl` fails at f72ebad too
+  (ACL of the pytest temp folder on this machine).
+
 ## Crash fix + release 1.7.0.0 (2026-11-12)
 - The app vanished without a message (7 APPCRASH events since 11-06, tcl86t `Tcl_PanicVA`, 0x80000003):
   the buddy's and the limit-reset card's Tk roots stayed in reference cycles after closing (self-calling

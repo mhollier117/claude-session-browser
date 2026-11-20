@@ -67,7 +67,7 @@ def test_render_rows_columns_and_ellipsis(fake_env):
     # long name cut to 28 cells with an ellipsis; long location keeps first and last two segments
     assert second[5:33] == "n" * 27 + "…"
     assert second[34:34 + loc_w].rstrip() == r"work\…\a_rather_long_folder\stackjack_rip_qwen"
-    assert second[34 + loc_w + 1:].rstrip() == "qwen"
+    assert second[34 + loc_w + 1:].rstrip() == "qwencli"  # Qwen Code; "qwen" is Claude Code on a Qwen model
     assert KEYS == ("↑↓ move · type to filter · tab preview · enter resume · ctrl-p resume asking permissions · "
                     "ctrl-n new · ctrl-o folder · ctrl-w wrapper · ctrl-q quit")
     assert lines[-2:] == footer_lines(WIDTH) == [
@@ -289,8 +289,77 @@ def test_state_enter_ask_permissions_resumes_without_bypass(fake_env):
     assert st.enter(ask_permissions=True).launch.argv == ["claudeb", "-r", "aaa"]
     st.cycle_wrapper()  # claudew
     assert st.enter(ask_permissions=True).launch.argv == ["claude", "-r", "aaa"]
+    st.cycle_wrapper()  # claudeq: asks permissions by leaving out the bypass flag
+    assert st.enter(ask_permissions=True).launch.argv == ["claudeq", "-r", "aaa"]
+    assert st.enter().launch.argv == ["claudeq", "--dangerously-skip-permissions", "-r", "aaa"]
+    st.cycle_wrapper()  # claudez
+    assert st.enter(ask_permissions=True).launch.argv == ["claudez", "-r", "aaa"]
+    assert st.enter().launch.argv == ["claudez", "--dangerously-skip-permissions", "-r", "aaa"]
     st.move(1)  # the qwen row maps to itself
     assert st.enter(ask_permissions=True).launch.argv == ["qwen", "-r", "qqq"]
+
+
+def _backend_sessions(env):
+    """Four sessions, one per backend: claude, glm (model), qwen (model) and a Qwen Code one."""
+    import os
+    cwd = env.root / "home" / "ai"
+    for i, (sid, model) in enumerate((("c1", "claude-opus-4-1"), ("g1", "glm-5.3[1m]"), ("k1", "qwen3-vl-current"))):
+        p = write_claude_session(env, cwd, sid, [_u(f"ask {sid}", cwd), _model_reply("ok", model)])
+        os.utime(p, (NOW - i * 60, NOW - i * 60))
+    q = write_qwen_session(env, cwd, "q1", [{"type": "user", "provenance": "real_user",
+                                            "message": {"role": "user", "parts": [{"text": "qwen code"}]}}])
+    os.utime(q, (NOW - 600, NOW - 600))
+    idx = _index(env)
+    idx.refresh()
+    return idx
+
+
+def _model_reply(text, model):
+    return {"type": "assistant", "message": {"role": "assistant", "model": model,
+                                             "content": [{"type": "text", "text": text}]}}
+
+
+@pytest.mark.parametrize("sid, ask, argv", [
+    ("c1", False, ["clauded", "-r", "c1"]),
+    ("c1", True, ["claude", "-r", "c1"]),
+    ("g1", False, ["claudez", "--dangerously-skip-permissions", "-r", "g1"]),
+    ("g1", True, ["claudez", "-r", "g1"]),
+    ("k1", False, ["claudeq", "--dangerously-skip-permissions", "-r", "k1"]),
+    ("k1", True, ["claudeq", "-r", "k1"]),
+    ("q1", False, ["qwen", "-r", "q1"]),
+    ("q1", True, ["qwen", "-r", "q1"]),
+])
+def test_state_enter_resumes_each_backend(fake_env, sid, ask, argv):
+    st = ResumeState(fake_env, _backend_sessions(fake_env))
+    st.selected = [r.sid for r in st.rows].index(sid)
+    res = st.enter(ask_permissions=ask)
+    assert isinstance(res, Resume) and res.launch.argv == argv and res.wrapper == argv[0]
+
+
+def test_state_glm_session_resumes_with_claudez_whatever_last_launched_it(fake_env):
+    idx = _backend_sessions(fake_env)
+    idx.record_launch("claude", "g1", "claude6")  # e.g. resumed once with an account wrapper by hand
+    st = ResumeState(fake_env, idx)
+    st.selected = [r.sid for r in st.rows].index("g1")
+    assert st.enter().launch.argv == ["claudez", "--dangerously-skip-permissions", "-r", "g1"]
+
+
+def test_render_rows_tool_column_labels_and_styles(fake_env):
+    st = ResumeState(fake_env, _backend_sessions(fake_env))
+    frags = render_rows(st.rows, WIDTH, NOW, 0, root=fake_env.root)
+    lines = _lines(frags)
+    loc_w = WIDTH - (4 + 28 + 7 + 5 + 4)
+    tools = {r.sid: line[34 + loc_w + 1:34 + loc_w + 1 + 7].rstrip() for r, line in zip(st.rows, lines[2:])}
+    assert tools == {"c1": "claude", "g1": "glm", "k1": "qwen", "q1": "qwencli"}
+    styles = {style.split("class:")[-1] for style, text in frags if text.rstrip() in ("claude", "glm", "qwen",
+                                                                                      "qwencli")}
+    assert styles == {"claude", "glm", "qwen", "qwencli"}
+
+
+def test_app_style_has_a_class_for_every_tool_label():
+    from launcher.tui.app import STYLE
+    classes = {name for rule in STYLE.style_rules for name in rule[0].split()}
+    assert {"claude", "qwen", "glm", "qwencli"} <= classes
 
 
 def test_state_enter_ask_permissions_on_a_live_row_focuses(fake_env):
@@ -336,9 +405,11 @@ def test_state_cycle_wrapper(fake_env):
     st = ResumeState(fake_env, idx)
     st.cycle_wrapper()
     assert st.wrapper_for(st.current()) == "claude6" and "claude6" in st.status
-    for _ in range(4):
-        st.cycle_wrapper()  # claudeb, claudew, then wraps past qwen to claude, clauded
-    assert st.wrapper_for(st.current()) == "clauded"
+    seen = []
+    for _ in range(6):
+        st.cycle_wrapper()  # claudeb, claudew, claudeq, claudez, then wraps past qwen to claude, clauded
+        seen.append(st.wrapper_for(st.current()))
+    assert seen == ["claudeb", "claudew", "claudeq", "claudez", "claude", "clauded"]
     assert st.enter().launch.argv[0] == "clauded"
     st.move(1)
     st.cycle_wrapper()
