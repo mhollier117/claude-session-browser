@@ -1369,10 +1369,14 @@ def _launcher_api(method):
     return call
 
 
-def _claude_type(backend):
-    """The list type of a Claude session on `backend` (launcher index `Row.backend`): claude, qwen or glm; claude
-    when the backend is unknown (index unavailable or the session not indexed yet)."""
-    return backend if backend in ("qwen", "glm") else "claude"
+_TYPE_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+
+
+def _claude_type(label):
+    """The list type of a Claude session (launcher index `type_label`): the alias that launched it (claudek,
+    claudez, claude6, any claude* alias) or the backend guessed from its model (qwen, glm); claude when unknown
+    (index unavailable or the session not indexed yet)."""
+    return label if isinstance(label, str) and _TYPE_RE.match(label) and label != "qwencli" else "claude"
 
 
 def launch_in_terminal(cwd, argv):
@@ -4329,8 +4333,9 @@ class Api:
 
     def _sessions(self, force=False):
         """The session list: Claude rows from this app's own parser, then the launcher's Qwen Code rows. `tool` is
-        the type the list shows: claude, qwen (claudeq) or glm (claudez) for a Claude row, from the launcher index
-        (`_launcher_backends`; `claude` while the index is not read yet or unavailable), and qwencli for Qwen Code."""
+        the type the list shows: for a Claude row the alias that launched it (claudek, claudez, ...) or the backend
+        guessed from its model (qwen, glm), from the launcher index (`_launcher_backends`, `type_label`; `claude`
+        while the index is not read yet or unavailable), and qwencli for Qwen Code."""
         if self._cache is None or force:
             self._cache = collect_sessions(self._projects_dir())
         qwen = self._qwen_sessions(force)  # also starts the background index read that fills the backends
@@ -4390,9 +4395,10 @@ class Api:
         and each Claude session's backend by sid (the list's type). On a failure the previous rows stay."""
         try:
             with self._launcher_lock:
+                from launcher.index import type_label
                 rows = self._launcher_idx(refresh=force).rows()
                 self._launcher_qwen = [r for r in rows if r.store == "qwen"]
-                self._launcher_backends = {r.sid: r.backend for r in rows if r.store == "claude"}
+                self._launcher_backends = {r.sid: type_label(r) for r in rows if r.store == "claude"}
         except Exception as e:
             _launcher_log(f"Qwen sessions not refreshed: {type(e).__name__}: {e}")
         finally:
@@ -6759,6 +6765,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .tool-badge.qwencli{background:rgba(124,140,255,.16); color:#b3bcff; border-color:rgba(124,140,255,.38)}
   .tool-badge.qwen{background:rgba(196,140,255,.16); color:#d9b8ff; border-color:rgba(196,140,255,.38)}
   .tool-badge.glm{background:rgba(80,200,180,.16); color:#9be3d6; border-color:rgba(80,200,180,.38)}
+  .tool-badge.alias{background:hsla(var(--th),70%,60%,.16); color:hsl(var(--th),80%,80%); border-color:hsla(var(--th),70%,60%,.38)}
   .row.colored .tool-badge{background:transparent; color:inherit; border-color:currentColor; opacity:.8}
   .toolfilter{display:flex; align-items:center; gap:3px; background:var(--surface);
     border:1px solid var(--border); border-radius:12px; padding:0 5px; height:42px; flex:none}
@@ -7401,7 +7408,7 @@ async function saveColWidth(key, w){
 }
 function cellHtml(s,key){
   switch(key){
-    case 'title':   return `<div class="cell title"><span class="tool-badge ${toolOf(s)}">${toolOf(s)}</span>${esc(s.display_title)}</div>`;
+    case 'title':   return `<div class="cell title">${toolBadge(s)}${esc(s.display_title)}</div>`;
     case 'project': return `<div class="cell dim">${esc(s.cwd||s.project)}</div>`;
     case 'msgs':    return `<div class="cell"><span class="ic">${SVG_MSG}${s.total_msgs} <span class="dim">(${s.user_msgs}/${s.assistant_msgs})</span></span></div>`;
     case 'when':    return `<div class="cell"><span class="ic">${SVG_CAL}${esc(s.when)}</span></div>`;
@@ -9329,11 +9336,23 @@ async function obFinish(){
 // answer {ok:false, error}, which is shown, never left hanging.
 let TOOL_FILTER = 'all';
 const LN_WRAPPERS = __LAUNCHER_WRAPPERS__;
-const TOOL_TYPES = ['claude','qwen','glm','qwencli'];
-function toolOf(s){ return s && TOOL_TYPES.includes(s.tool) ? s.tool : 'claude'; }
+// The list types: claude, the backends guessed from a model (qwen, glm), Qwen Code (qwencli), and any alias
+// a session was launched with (claudek, claudez, ...: whatever the sessions carry, no table to extend).
+const TOOL_STYLED = ['claude','qwen','glm','qwencli'];
+function toolOf(s){ return s && typeof s.tool==='string' && /^[A-Za-z0-9_-]{1,48}$/.test(s.tool) ? s.tool : 'claude'; }
+function toolTypes(){
+  const seen=new Set((typeof sessions!=='undefined' && sessions ? sessions : []).map(toolOf));
+  return ['claude', ...[...seen].filter(k=>k!=='claude').sort()];
+}
+function toolHue(k){ let h=0; for(const c of k) h=(h*31+c.charCodeAt(0))%360; return h; }
+function toolBadge(s){
+  const k=toolOf(s);
+  if(TOOL_STYLED.includes(k)) return `<span class="tool-badge ${k}">${esc(k)}</span>`;
+  return `<span class="tool-badge alias" style="--th:${toolHue(k)}">${esc(k)}</span>`;
+}
 function renderToolFilter(){
   const el=document.getElementById('toolfilter'); if(!el) return;
-  el.innerHTML=[['all',t('alle')], ...TOOL_TYPES.map(k=>[k,k])].map(([k,label])=>
+  el.innerHTML=[['all',t('alle')], ...toolTypes().map(k=>[k,k])].map(([k,label])=>
     `<button class="${TOOL_FILTER===k?'on':''}" onclick="setToolFilter('${k}')">${esc(label)}</button>`).join('');
 }
 function setToolFilter(k){ TOOL_FILTER=k; render(); }

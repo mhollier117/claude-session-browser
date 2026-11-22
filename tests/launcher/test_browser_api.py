@@ -640,10 +640,16 @@ def test_resume_glm_row_from_a_real_index(fake_env, api):
 
 
 def test_page_types_badges_and_qwen_code_checks(page):
-    assert "const TOOL_TYPES = ['claude','qwen','glm','qwencli'];" in page
-    assert "s && TOOL_TYPES.includes(s.tool) ? s.tool : 'claude'" in _js_fn(page, "toolOf")
-    for cls in ("qwencli", "qwen", "glm"):
+    assert "const TOOL_STYLED = ['claude','qwen','glm','qwencli'];" in page
+    # any alias name is a type (claudek, a new one): only its shape is checked, no list of known types
+    assert "/^[A-Za-z0-9_-]{1,48}$/.test(s.tool) ? s.tool : 'claude'" in _js_fn(page, "toolOf")
+    assert "TOOL_STYLED" not in _js_fn(page, "toolOf")
+    for cls in ("qwencli", "qwen", "glm", "alias"):
         assert f".tool-badge.{cls}{{" in page
+    badge = _js_fn(page, "toolBadge")
+    assert "tool-badge alias" in badge and "--th:${toolHue(k)}" in badge and "esc(k)" in badge
+    assert "toolTypes()" in _js_fn(page, "renderToolFilter")
+    assert "${toolBadge(s)}" in page
     assert "toolOf(s)==='qwencli'" in _js_fn(page, "openColor") and "toolOf(s)==='qwencli'" in _js_fn(page, "openRename")
     assert "toolOf(s)==='qwen'" not in page  # "qwen" is now Claude Code on a Qwen model, not Qwen Code
     assert "api.resume(s.id,s.cwd,s.project||'',toolOf(s))" in page

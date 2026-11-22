@@ -16,7 +16,7 @@ from prompt_toolkit.utils import get_cwidth
 
 from .. import stores
 from ..display import age, middle_ellipsis, rel_or_abs
-from ..index import Index, Row, backend_label
+from ..index import Index, Row, type_label
 from ..launch import WRAPPERS, Launch, focus_live, resume_command
 from ..paths import Env
 from .preview import render_preview
@@ -122,8 +122,9 @@ def location(row: Row, root: Path | None, width: int) -> str:
 
 
 def tool_label(row: Row) -> str:
-    """The tool column and its style class: claude, qwen (claudeq), glm (claudez), or qwencli (Qwen Code)."""
-    return "qwencli" if row.store == "qwen" else backend_label(row.backend)
+    """The tool column and its style class (`index.type_label`): qwencli (Qwen Code), the alias that launched the
+    session (claudek, claudez, ...; an unknown class is drawn in the default style), else claude, qwen or glm."""
+    return type_label(row)
 
 
 def scroll_top(top: int, selected: int, visible: int) -> int:

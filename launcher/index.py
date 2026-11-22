@@ -35,9 +35,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     store TEXT NOT NULL, sid TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT, name TEXT, display_name TEXT,
     first_ask TEXT, last_ask TEXT, last_reply TEXT, user_msgs INTEGER, assistant_msgs INTEGER,
     size INTEGER, mtime REAL, last_activity REAL, wrapper TEXT,
-    counted_to INTEGER, custom_title TEXT, ai_title TEXT, model TEXT,
+    counted_to INTEGER, custom_title TEXT, ai_title TEXT, model TEXT, launch_args TEXT,
     PRIMARY KEY (store, sid))
 """
+# Added to an existing v3 file with ALTER TABLE (not a schema bump, which would start a new cache and lose the
+# recorded wrappers): older builds sharing the file ignore the extra column.
+_ADDED_COLS = (("launch_args", "TEXT"),)
+
+# How the PowerShell profile's shared `claude` function (claude_improvements/clauded) marks a launch, in the
+# environment of the claude.exe it starts: the outermost claude* alias typed and the arguments typed to it.
+ENV_LAUNCHER = "CLAUDE_RESTORE_LAUNCHER"
+ENV_ARGS = "CLAUDE_RESTORE_ARGS"
+# A wrapper name taken from a session's environment: only claude* names (argv[0] of a resume is this name).
+LAUNCHER_RE = re.compile(r"^claude[A-Za-z0-9_-]{0,40}$")
+_PLAIN = ("claude", "clauded")  # the same command: no type of their own in the lists
 _FACT_COLS = ("path", "cwd", "name", "display_name", "first_ask", "last_ask", "last_reply", "user_msgs",
               "assistant_msgs", "size", "mtime", "last_activity", "counted_to", "custom_title", "ai_title", "model")
 
@@ -75,6 +86,40 @@ def backend_label(backend: str) -> str:
     return _BACKEND_LABEL.get(backend, "claude")
 
 
+def type_label(row: "Row") -> str:
+    """The type the lists show for a session: qwencli for Qwen Code; the alias that last launched a Claude session
+    when it is not plain claude (claudek, claudez, claude6, a new alias: no table to extend); else the backend
+    guessed from the model (`backend_label`)."""
+    if row.store == "qwen":
+        return "qwencli"
+    if row.wrapper and row.wrapper not in _PLAIN and LAUNCHER_RE.match(row.wrapper):
+        return row.wrapper
+    return backend_label(row.backend)
+
+
+def parse_launch_args(value) -> list[str] | None:
+    """A JSON array of strings (`CLAUDE_RESTORE_ARGS`, the `launch_args` column) as a list; None when missing or
+    not such an array."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return None
+    return data if isinstance(data, list) and all(isinstance(a, str) for a in data) else None
+
+
+def process_launch_env(pid: int) -> dict | None:
+    """The launch marker in a running claude.exe's environment: {"launcher": name or None, "args": JSON text or
+    None}; None when the process can't be read (gone, or another user's)."""
+    import psutil
+    try:
+        env = psutil.Process(pid).environ()
+    except (psutil.Error, OSError):
+        return None
+    return {"launcher": env.get(ENV_LAUNCHER), "args": env.get(ENV_ARGS)}
+
+
 @dataclass
 class Row:
     store: str
@@ -95,6 +140,9 @@ class Row:
     cwd_exists: bool
     path: str = ""  # the transcript file (the preview reads the whole last reply from it)
     backend: str = "claude"  # one of BACKENDS (see `backend_of`)
+    # the arguments typed to `wrapper` at the last launch the index saw live (None: not known, e.g. launched before
+    # the profile recorded them); a resume repeats them (launch.relaunch_args)
+    launch_args: list[str] | None = None
 
 
 @dataclass
@@ -198,7 +246,7 @@ class Index:
     def __init__(self, env: Env, db_path: Path | None = None,
                  claude_live: Callable[[], list[dict] | None] | None = None,
                  pid_exists: Callable[[int], bool] | None = None, check_same_thread: bool = True,
-                 timeout: float = DB_TIMEOUT_S):
+                 timeout: float = DB_TIMEOUT_S, launch_env: Callable[[int], dict | None] | None = None):
         """`claude_live` (a `LiveSessions.snapshot`-shaped callable: dicts with session_id, pid, named) and
         `pid_exists` (Qwen registry check) are injectable for tests; by default the Claude registry is read
         directly (`claude_registry_live`) and Qwen pids are checked with `psutil.pid_exists`.
@@ -212,6 +260,8 @@ class Index:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
         self._pid_exists = pid_exists or _default_pid_exists
+        self._launch_env = launch_env or process_launch_env  # `launch_env(pid)`: injectable for tests
+        self._launch_seen: set[tuple[int, str]] = set()  # live (pid, sid) whose launch is recorded
         self._db = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=check_same_thread)
         self._db.row_factory = sqlite3.Row
         try:
@@ -221,6 +271,10 @@ class Index:
                     self._db.execute("DROP TABLE IF EXISTS sessions")  # only a cache: rebuilt by the next refresh
                     self._db.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 self._db.execute(_SCHEMA)
+                have = {r[1] for r in self._db.execute("PRAGMA table_info(sessions)")}
+                for col, kind in _ADDED_COLS:
+                    if col not in have:
+                        self._db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {kind}")
         except sqlite3.Error:
             self._db.close()
             raise
@@ -277,7 +331,41 @@ class Index:
                 self._db.execute("DELETE FROM sessions WHERE store = ? AND sid = ?", key)
                 touched += 1
         self._apply_launched()
+        try:
+            self._record_live_launches(live)
+        except (sqlite3.Error, OSError):
+            pass  # best-effort: the next refresh tries again
         return touched
+
+    def _record_live_launches(self, live: dict) -> None:
+        """For every live Claude session not seen yet: read how it was launched from its process environment (the
+        profile's `ENV_LAUNCHER` / `ENV_ARGS`) and store it as the row's wrapper and launch_args, so the session is
+        shown with its alias and resumed the same way after it ends. The latest launch wins. A process without the
+        marker (launched before the profile set it, or not through it) is left as it is; a session with no row
+        yet (no transcript) is retried on the next refresh."""
+        for (store, sid), reg in live.items():
+            key = (reg.pid, sid)
+            if store != "claude" or key in self._launch_seen:
+                continue
+            info = self._launch_env(reg.pid)
+            if info is None:
+                continue  # unreadable now: try again next time
+            name = info.get("launcher")
+            if not (isinstance(name, str) and LAUNCHER_RE.match(name)):
+                self._launch_seen.add(key)  # no marker: nothing to record for this process
+                continue
+            args = parse_launch_args(info.get("args"))
+            with self._db:
+                cur = self._db.execute(
+                    "UPDATE sessions SET wrapper = ?, launch_args = ? WHERE store = 'claude' AND sid = ?",
+                    (name, json.dumps(args, ensure_ascii=False) if args is not None else None, sid))
+            if cur.rowcount:
+                self._launch_seen.add(key)
+
+    def recorded_wrappers(self) -> list[str]:
+        """Every claude* alias a session was launched with (as recorded), sorted."""
+        names = {r[0] for r in self._db.execute("SELECT DISTINCT wrapper FROM sessions WHERE wrapper IS NOT NULL")}
+        return sorted(n for n in names if LAUNCHER_RE.match(n))
 
     def _apply_launched(self) -> None:
         """Consume `launched.json`: an entry whose row now exists sets that row's wrapper when none is recorded
@@ -378,7 +466,8 @@ class Index:
                 user_msgs=r["user_msgs"], assistant_msgs=r["assistant_msgs"], size=r["size"], mtime=r["mtime"],
                 last_activity=r["last_activity"], live_pid=reg.pid if reg else None, wrapper=r["wrapper"],
                 cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir(), path=r["path"],
-                backend=backend_of(r["store"], r["wrapper"], r["model"])))
+                backend=backend_of(r["store"], r["wrapper"], r["model"]),
+                launch_args=parse_launch_args(r["launch_args"])))
         return out
 
     def rows(self, filter_text: str = "") -> list[Row]:
@@ -402,7 +491,9 @@ class Index:
         this as best-effort)."""
         self._db.execute(f"PRAGMA busy_timeout = {LAUNCH_WAIT_MS}")
         try:
-            self._db.execute("UPDATE sessions SET wrapper = ? WHERE store = ? AND sid = ?", (wrapper, store, sid))
+            # the arguments belonged to the previous launch; the next live read records this one's
+            self._db.execute("UPDATE sessions SET wrapper = ?, launch_args = NULL WHERE store = ? AND sid = ?",
+                             (wrapper, store, sid))
             self._db.commit()
         except sqlite3.OperationalError:
             self._db.rollback()

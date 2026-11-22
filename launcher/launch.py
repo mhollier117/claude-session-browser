@@ -11,7 +11,7 @@ from pathlib import Path
 
 import termfocus
 
-from .index import Row
+from .index import LAUNCHER_RE, Row
 
 # claudeq and claudez run Claude Code against a self-hosted Qwen model and Z.ai GLM; qwen is Qwen Code (another tool)
 WRAPPERS = ("claude", "clauded", "claude6", "claudeb", "claudew", "claudeq", "claudez", "qwen")
@@ -24,6 +24,63 @@ _BUILT_IN_BYPASS = ("clauded", "claude6", "claudew")
 _PASS_THROUGH = ("claudeq", "claudez")
 # the wrapper a Claude session on another backend (index.Row.backend) always resumes with
 BACKEND_WRAPPER = {"glm": "claudez", "qwen": "claudeq"}
+
+
+# Claude Code's command line (`claude --help`, 2.1.x), for repeating a session's launch arguments on resume.
+# Options of one launch only, dropped (with their value): resume/continue/new session id, the name, print and
+# background/cloud/desktop modes, a new worktree, help/version.
+_DROP_WITH_VALUE = {"--session-id", "-n", "--name"}
+_DROP_OPTIONAL_VALUE = {"-r", "--resume", "--cloud", "--teleport", "--from-pr", "-w", "--worktree"}
+_DROP_FLAGS = {"-c", "--continue", "--fork-session", "-p", "--print", "--bg", "--background", "--desktop",
+               "-h", "--help", "-v", "--version"}
+# options that take several values (every bare word after them belongs to them)
+_MULTI_VALUE = {"--add-dir", "--allowedTools", "--allowed-tools", "--betas", "--disallowedTools", "--disallowed-tools",
+                "--file", "--mcp-config", "--tools"}
+# options without a value: a bare word after one is the initial prompt (the profile's --nb included)
+_FLAGS = {"--allow-dangerously-skip-permissions", "--ax-screen-reader", "--bare", "--brief", "--chrome",
+          "--dangerously-skip-permissions", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections",
+          "--forward-subagent-text", "--ide", "--include-hook-events", "--include-partial-messages", "--no-chrome",
+          "--no-session-persistence", "--replay-user-messages", "--restricted", "--safe-mode", "--strict-mcp-config",
+          "--tmux", "--verbose", "--nb", "-nb"}
+
+
+def relaunch_args(args: list[str]) -> list[str]:
+    """The arguments a session was launched with, as a resume repeats them: every option and its value, without
+    the options of that one launch (`_DROP_*`: an old resume, -c, --session-id, -n, -p, ...) and without the
+    initial prompt (a bare word that belongs to no option). Any other option, including one this table doesn't
+    know yet, keeps the bare word after it as its value, so nothing of a newer option is lost."""
+    out: list[str] = []
+    i, multi = 0, False
+    while i < len(args):
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        bare_next = nxt is not None and not nxt.startswith("-")
+        if a.startswith("-") and a != "-":
+            multi = False
+            name, has_eq = a.split("=", 1)[0], "=" in a
+            if name in _DROP_FLAGS:
+                i += 1
+            elif name in _DROP_WITH_VALUE or name in _DROP_OPTIONAL_VALUE:
+                i += 1 if has_eq or not bare_next else 2
+            elif has_eq or name in _FLAGS:
+                out.append(a)
+                i += 1
+            elif name in _MULTI_VALUE:
+                out.append(a)
+                multi = True
+                i += 1
+            else:  # one value (or an option this table doesn't know): keep the word after it
+                out.append(a)
+                if bare_next:
+                    out.append(nxt)
+                    i += 2
+                else:
+                    i += 1
+            continue
+        if multi:
+            out.append(a)
+        i += 1  # else: the initial prompt, not repeated
+    return out
 
 
 @dataclass
@@ -48,7 +105,10 @@ def wrapper_argv(wrapper: str, ask_permissions: bool = False) -> list[str]:
 
 
 def resume_command(row: Row, wrapper: str | None, *, root: Path, ask_permissions: bool = False) -> Launch:
-    """Resume `row`. A Qwen Code session always resumes with `qwen`. Otherwise the explicit `wrapper` (ctrl-w);
+    """Resume `row`. A Qwen Code session always resumes with `qwen`. A Claude session whose last launch was seen
+    live with its arguments (`row.launch_args`, recorded from the profile's marker) resumes exactly as launched:
+    `<that alias> <its arguments, relaunch_args> -r <sid>`, any claude* alias, no table; `ask_permissions` adds
+    `--nb`. Otherwise the explicit `wrapper` (ctrl-w);
     then, for a Claude session on another backend, `claudez` (glm) or `claudeq` (qwen) whatever last launched it
     (`BACKEND_WRAPPER`); then the account wrapper that last launched it (claude6, claudeb, claudew); then `clauded`.
     A session last launched with plain `claude` resumes with `clauded` too: plain `claude` is what ctrl-p picks,
@@ -63,6 +123,12 @@ def resume_command(row: Row, wrapper: str | None, *, root: Path, ask_permissions
         warnings.append("session has no recorded folder")
     if row.store == "qwen":
         chosen = "qwen"
+    elif (wrapper is None and getattr(row, "launch_args", None) is not None and row.wrapper
+          and LAUNCHER_RE.match(row.wrapper)):
+        args = relaunch_args(row.launch_args)
+        if ask_permissions and not any(a in ("--nb", "-nb") for a in args):
+            args.append("--nb")
+        return Launch(cwd, [row.wrapper, *args, "-r", row.sid], warnings)
     else:
         last = row.wrapper if row.wrapper not in (None, "", "claude") else None
         chosen = wrapper or BACKEND_WRAPPER.get(row.backend) or last or default_wrapper(root, cwd)
