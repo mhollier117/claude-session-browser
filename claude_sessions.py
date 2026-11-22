@@ -4801,7 +4801,21 @@ class Api:
             elif a.get("relogin_soon") and a.get("relogin_by"):
                 item["x"] = max(0, int((a["relogin_by"] - now) // 86400))
             accounts.append(item)
-        return {"se": sessions, "ac": accounts}
+        return {"se": sessions, "ac": accounts, "vk": self._clawd_voice_mode()}
+
+    def _clawd_voice_mode(self):
+        """Fuer die Voice-Taste des Clawdmeters (voicemode.pick): "c" = Claude-
+        Code-Session auf Anthropic vorn (Leertaste), "h" = Session aus
+        claudez/claudek/claudeq, "o" = kein Session-Fenster (beide Handy,
+        Strg+Leertaste; bei "o" loescht 4x Tippen mit Strg+Z)."""
+        try:
+            import voicemode
+            cache = getattr(self, "_vk_third_party", None)
+            if cache is None:
+                cache = self._vk_third_party = voicemode.ThirdPartyCache()
+            return voicemode.pick(self._live_sessions() or [], voicemode.front_title(), cache)
+        except Exception:
+            return None
 
     def _clawd_gadget_sessions(self):
         """Die offenen Sessions so, wie das Clawdmeter sie sieht

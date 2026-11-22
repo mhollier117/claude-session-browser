@@ -1056,6 +1056,13 @@ class ClawdmeterLink:
             while len(enc(msg)) > limit and len(msg["n"]) > 4:
                 msg["n"] = msg["n"][:-1]
             out[f"ac{i}"] = enc(msg)
+
+        # Voice-Taste je nach Fenster vorn (voicemode): "c" = Claude-Code-Session
+        # auf Anthropic (Leertaste), "h" = Session auf Fremd-API, "o" = kein
+        # Session-Fenster (beide Handy, Strg+Leertaste). Nur bei Aenderung.
+        vk = ex.get("vk")
+        if vk in ("c", "h", "o"):
+            out["vk"] = enc({"k": "vk", "m": vk})
         return out
 
     async def _send_extras(self, client) -> None:
