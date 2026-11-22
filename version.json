@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.9",
-  "notes": "Fix: starting the app while a running copy is frozen no longer hangs silently. It asks whether to close the frozen copy and start a fresh one.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.9",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.9/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "5d06383292b8fab1937e0af5cfc52cd671c6b8315836916ed8972c116c9645c4"
+  "version": "1.7.0.10",
+  "notes": "Sessions show and resume with the alias that launched them: any claude* alias (claudek, claudez, claude6, new ones) gets its own badge, and Resume relaunches with the same alias and arguments. Clawdmeter: the Voice key's push-to-talk follows the session in front (Claude Code voice for an Anthropic session, Handy for claudez/claudek/claudeq and other windows).",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.10",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.10/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "a52d8826c44d46dc48bbbb69d73315b362ec9a0d45dbe715f7cb2f21e5619e98"
 }
