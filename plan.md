@@ -1,6 +1,8 @@
 # Claude Session Browser (mhollier117 fork) — state
 
 ## Codex support (2026-11-23, branch `codex`, not pushed, NOT released yet)
+- Main is at release **1.7.0.11** (1.7.0.10: alias labels, exact resume, qwen filter; 1.7.0.11: buddy limit
+  animation, the profile's wrappers in New session). The `codex` branch builds on it.
 - Built (Tasks 1-5, commits `5d6143b`..Task 5): `codex_store.py` reads `~/.codex` (sessions, titles, liveness, usage);
   Codex sessions in the index (`index-v4.sqlite`) and the browser list with badge, filter and `codex resume`;
   Codex live sessions join the buddy and the gadget session list (`tool: "codex"`); Codex usage beside Claude's.
@@ -10,11 +12,30 @@
   Gadget sessions of Codex are named `cx <name>`. `_clawd_usage` (main payload) unchanged. `limit_state()` =
   `_limit_state_claude()` + `codex` block; the limit page shows "Codex - 5 hours" / "Codex - week" cards after
   Claude's (also when Claude usage is unknown). Tests: `tests/test_codex_gadget.py`.
+- Final-review fixes (2026-11-23):
+  - Messages: codex-cli 0.170 writes prompts/replies as `event_msg` / `item_completed` with `item.type`
+    `UserMessage` / `AgentMessage` (text in `content[]` items of type text/Text); the older `user_message` /
+    `agent_message` events still parse. A `phase: "commentary"` agent message is not a reply (either shape). The
+    codex head read stops at 4 MB; codex head/tail reads skip lines the type prefilter rejects. Fixture:
+    `tests/launcher/fixtures/codex-0.170-items.jsonl` (real shape, ids and text replaced).
+  - Limits: one rule `codex_store.rate_limited(rl, now)` for `usage()` and `CodexLive`: a live window >= 100 %, or
+    `rate_limit_reached_type` set while no window has reset (`resets_at <= now`).
+  - `CodexLive` seeds each live rollout once (bounded tail) and then reads only appended complete lines; a shrink or
+    a gap over 64 MB re-seeds. `terminal_rollouts` caches first-line metas per home (lock; no caching of a
+    half-written line); `imported_ids` keeps the last good set on a failed read.
+  - Liveness: an unmatched `codex` process may take any unclaimed terminal lock made after it started (the lock
+    appears at the first prompt), after the 60 s window pass.
+  - Main usage screen names a Codex session `cx <name>`. Switch guard: "Codex..." always ignored, "Code" only at
+    the Codex row's index. `build.ps1` bundles `codex_store`. `tests/conftest.py` keeps every test off the real
+    `~/.codex`.
 - Pending manual checks (need a human and the devices):
   - Task 3: browser badge, type filter, double-click resume of a Codex session.
   - Task 4: buddy reacts to a Codex turn; gadget long-press focuses the Codex tab.
   - Task 5: Codex row on the C6 (2.16) and the 7" (account swipe, rotation view) with weekly % and "active", no
     "Tap to use" on it, `cx ` sessions in the session swipe, Claude main usage screen unchanged.
+  - New-session liveness: start `codex`, wait 2 minutes, type a prompt; the buddy/gadget should pick the session up.
+  - Device: when the Codex row is sent with `l: 0` ("Tap to use" visible), tapping it must not hang the device; the
+    app ignores the request.
 - Release not cut: after review, fast-forward `main`, then
   `.\release.ps1 -Version 1.7.1.0 -Notes "Codex sessions, live state and usage" -Publish`; the first run after the
   update rebuilds the index (few minutes).
@@ -91,8 +112,8 @@ No GitHub Actions workflows in this repo: pushes cost no CI minutes.
   `.\release.ps1 -Version 1.7.0.0 -Notes "cc launcher: unified Claude+Qwen list, New session, terminal cc" -Publish`;
   (2) deferred minors, listed in the review ledger summary the controller adds at merge.
 
-## Current state (2026-11-06)
-- Latest release: **1.6.1.10** (installer, install-here zip, portable zip). Work happens on two PCs;
+## Current state (2026-11-06; historical, superseded by the sections at the top)
+- Latest release then: **1.6.1.10** (installer, install-here zip, portable zip). Work happens on two PCs;
   1.6.1.8 and 1.6.1.9 came from the other one. Always `git fetch` and fast-forward before releasing.
 - Account store folders on Windows inherit the profile ACL (`accounts._private_mkdir`); together with
   1.6.1.9's `runasoriginaluser` installer change this closes the "PermissionError ... signin.bin" bug.
