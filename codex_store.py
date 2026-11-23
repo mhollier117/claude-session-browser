@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -312,3 +313,85 @@ def live_threads(home: Path, procs: list[dict] | None = None) -> dict[str, int]:
             out[id_] = pid
             used_pids.add(pid)
     return out
+
+
+class CodexLive:
+    """Open terminal Codex sessions as the dicts `sessions_live.LiveSessions._describe` makes, plus "tool": "codex".
+    Polled about once a second, so it is cheap: the process scan, rollout listing and titles are refreshed at most
+    every `enum_every` seconds (the injected clock decides), and a rollout's tail is re-read only when its
+    (size, mtime) changed."""
+
+    def __init__(self, home: Path | None = None, clock=time.time, procs=None, enum_every: float = 5.0):
+        self.home = home if home is not None else codex_home()
+        self.clock = clock
+        self.procs = procs
+        self.enum_every = enum_every
+        self._enum_at: float | None = None
+        self._live: dict[str, int] = {}
+        self._paths: dict[str, Path] = {}
+        self._titles: dict[str, str] = {}
+        self._tails: dict[Path, tuple[tuple[int, float], CodexTail]] = {}
+        self._metas: dict[Path, dict] = {}
+
+    def _refresh(self, now: float) -> None:
+        if self._enum_at is not None and 0 <= now - self._enum_at < self.enum_every:
+            return
+        self._enum_at = now
+        self._live = live_threads(self.home, self.procs)
+        self._paths = terminal_rollouts(self.home)
+        self._titles = titles(self.home)
+
+    def _tail(self, path: Path) -> tuple[CodexTail, float]:
+        """(tail, mtime) of a rollout, the tail cached per (size, mtime)."""
+        try:
+            st = path.stat()
+        except OSError:
+            return CodexTail(None, False, False, None, None, None, None, None), 0.0
+        key = (st.st_size, st.st_mtime)
+        hit = self._tails.get(path)
+        if hit is None or hit[0] != key:
+            hit = self._tails[path] = (key, read_tail(path))
+        return hit[1], st.st_mtime
+
+    def snapshot(self) -> list[dict]:
+        import sessions_live as sl
+        now = self.clock()
+        self._refresh(now)
+        out = []
+        for id_, pid in self._live.items():
+            path = self._paths.get(id_)
+            if path is None:
+                continue
+            tail, mtime = self._tail(path)
+            meta = self._metas.get(path)
+            if meta is None:
+                meta = self._metas[path] = read_meta(path) or {}
+            since = tail.last_ts or mtime
+            expired = not any(isinstance(w, dict) and isinstance(w.get("resets_at"), (int, float))
+                              and w["resets_at"] > now for w in ((tail.rate_limits or {}).get(k)
+                                                                 for k in ("primary", "secondary")))
+            if tail.limit_hit and not expired:
+                state = sl.LIMIT
+            elif tail.turn_open:
+                state = sl.WORKING
+            else:
+                age = now - since if since else 1e9
+                state = sl.DONE if age < sl.DONE_FOR_S else (sl.IDLE if age < sl.SLEEP_AFTER_S else sl.SLEEP)
+            cwd = str(meta.get("cwd") or "")
+            folder = os.path.basename(cwd.rstrip("\\/")) or cwd
+            title = self._titles.get(id_, "")
+            ctx_pct = (sl.context_pct(tail.ctx_tokens, tail.ctx_window)
+                       if tail.ctx_tokens is not None and tail.ctx_window else None)
+            out.append({
+                "session_id": id_, "pid": pid, "cwd": cwd, "folder": folder,
+                "name": (title or folder)[:sl.NAME_MAX], "named": bool(title),
+                "status": "busy" if state in (sl.WORKING, sl.THINKING) else "idle",
+                "waiting_for": "", "state": state, "since": since,
+                "started": _iso_to_epoch(meta.get("timestamp")) or 0.0,
+                "ctx_tokens": tail.ctx_tokens, "ctx_window": tail.ctx_window if ctx_pct is not None else None,
+                "ctx_pct": ctx_pct, "tool": "codex",
+            })
+        for path in [p for p in self._tails if p not in set(self._paths.values())]:
+            self._tails.pop(path, None)
+            self._metas.pop(path, None)
+        return out

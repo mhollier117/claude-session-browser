@@ -411,3 +411,44 @@ def test_app_focus_request_resolves_the_unique_gadget_name():
     assert api._clawd_resolve_session(0, "clawdmeter")[0]["pid"] == 11
     # Index stale (list changed): the unique name still finds the right one.
     assert api._clawd_resolve_session(0, "clawdmeter~2")[0]["pid"] == 22
+
+
+class _Src:
+    def __init__(self, snap):
+        self.snap = snap
+
+    def snapshot(self):
+        if isinstance(self.snap, Exception):
+            raise self.snap
+        return self.snap
+
+
+def _s(sid, state, since, **kw):
+    return dict({"session_id": sid, "state": state, "since": since}, **kw)
+
+
+def test_service_merges_and_sorts_by_urgency():
+    claude = _Src([_s("c1", sl.IDLE, 100.0), _s("c2", sl.WORKING, 50.0)])
+    codex = _Src([_s("x1", sl.LIMIT, 10.0, tool="codex"), _s("x2", sl.IDLE, 200.0, tool="codex")])
+    svc = sl.SessionsService(live=claude, codex=codex)
+    out = svc._merged()
+    assert [s["session_id"] for s in out] == ["x1", "c2", "x2", "c1"]
+    assert {s["session_id"]: s["tool"] for s in out} == {"x1": "codex", "c2": "claude", "x2": "codex", "c1": "claude"}
+
+
+def test_service_none_when_claude_none_and_no_codex():
+    assert sl.SessionsService(live=_Src(None))._merged() is None
+    assert sl.SessionsService(live=_Src(None), codex=_Src([]))._merged() is None
+
+
+def test_service_codex_only_when_claude_registry_missing():
+    out = sl.SessionsService(live=_Src(None), codex=_Src([_s("x", sl.DONE, 1.0, tool="codex")]))._merged()
+    assert [s["session_id"] for s in out] == ["x"]
+
+
+def test_service_failing_codex_is_logged_once_and_ignored():
+    logs = []
+    svc = sl.SessionsService(live=_Src([_s("c", sl.IDLE, 1.0)]), codex=_Src(OSError("boom")), log=logs.append)
+    assert [s["session_id"] for s in svc._merged()] == ["c"]
+    svc._merged()
+    assert len(logs) == 1

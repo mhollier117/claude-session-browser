@@ -80,3 +80,10 @@ def test_link_sends_vk_only_for_known_modes():
     assert link({"se": [], "ac": [], "vk": "o"})._extras_messages()["vk"] == '{"k":"vk","m":"o"}'
     for bad in (None, "x", ""):
         assert "vk" not in link({"se": [], "ac": [], "vk": bad})._extras_messages()
+
+
+def test_voicemode_codex_front_is_h():
+    sessions = [{"name": "Fix the bug", "pid": 1, "tool": "codex"}, {"name": "Other", "pid": 2, "tool": "claude"}]
+    never = lambda s: False  # noqa: E731 - no launch-settings on either
+    assert vm.pick(sessions, "Fix the bug", never) == HANDY
+    assert vm.pick(sessions, "Other", never) == CLAUDE

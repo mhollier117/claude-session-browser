@@ -436,9 +436,11 @@ class SessionsService:
 
     INTERVAL = 1.0
 
-    def __init__(self, live: LiveSessions | None = None, log=None):
+    def __init__(self, live: LiveSessions | None = None, log=None, codex=None):
         import threading
         self.live = live or LiveSessions()
+        self.codex = codex                  # a CodexLive (codex_store) or None
+        self._codex_failed = False
         self._log = log or (lambda msg: None)
         self._latest = None
         self._stop = threading.Event()
@@ -458,10 +460,29 @@ class SessionsService:
     def latest(self):
         return self._latest
 
+    def _merged(self):
+        """The Claude snapshot with the Codex one joined in (each dict tagged with its "tool"). None only when
+        Claude keeps no registry and there is no Codex session either: the old fallback."""
+        claude = self.live.snapshot()
+        codex = []
+        if self.codex is not None:
+            try:
+                codex = self.codex.snapshot() or []
+                self._codex_failed = False
+            except Exception as e:          # Codex trouble must not hide the Claude sessions
+                if not self._codex_failed:
+                    self._log(f"sessions: codex snapshot failed: {e}")
+                self._codex_failed = True
+        if claude is None and not codex:
+            return None
+        out = [s if "tool" in s else {**s, "tool": "claude"} for s in claude or []] + list(codex)
+        out.sort(key=lambda s: (URGENCY[s["state"]], -s["since"]))
+        return out
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self._latest = self.live.snapshot()
+                self._latest = self._merged()
             except Exception as e:          # keep running; old detection takes over
                 self._latest = None
                 self._log(f"sessions: snapshot failed: {e}")

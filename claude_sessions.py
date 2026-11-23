@@ -10729,7 +10729,13 @@ def main():
     # letzten Stand, ohne selbst auf die Platte zu warten.
     try:
         from sessions_live import SessionsService
-        api._sessions_service = SessionsService()
+        codex = None
+        try:
+            from codex_store import CodexLive
+            codex = CodexLive()
+        except Exception:
+            pass
+        api._sessions_service = SessionsService(codex=codex)
         api._sessions_service.start()
     except Exception:
         pass

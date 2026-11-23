@@ -82,7 +82,8 @@ def pick(sessions, front_title: str, is_third_party) -> str:
     hits = [s for s in sessions or [] if str(s.get("name") or "").strip().casefold() == want]
     if not hits:
         return OTHER
-    return HANDY if any(is_third_party(s) for s in hits) else CLAUDE
+    # Codex has no Space-to-talk of its own: Handy dictates into it
+    return HANDY if any(s.get("tool") == "codex" or is_third_party(s) for s in hits) else CLAUDE
 
 
 def front_title() -> str:
