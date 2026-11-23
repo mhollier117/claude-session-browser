@@ -4842,6 +4842,8 @@ class Api:
                 ws = sess["wait_since"]
                 item["ws"] = int(ws) + time.localtime(ws).tm_gmtoff
             item.update(_clawd_context(sess, "c", "w"))
+            if sess.get("tool") == "codex":
+                item["b"] = "x"      # firmware that colours rows by tool; older firmware ignores it
             sessions.append(item)
         accounts = []
         try:

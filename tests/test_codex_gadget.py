@@ -117,6 +117,16 @@ def test_codex_sessions_prefixed_cx_on_gadget():
     assert s is not None and s["tool"] == "codex"
 
 
+def test_session_messages_mark_the_tool():
+    # "b": "x" marks a Codex session for firmware that colours rows by tool;
+    # Claude sessions carry no "b" (older firmware ignores the key either way).
+    a = app_with([acct("A", live=True)],
+                 [sess("api", "claude"), sess("tool", "codex")])
+    by_name = {s["n"]: s for s in a._clawd_extras()["se"]}
+    assert by_name["cx tool"]["b"] == "x"
+    assert "b" not in by_name["api"]
+
+
 def test_switch_request_to_codex_row_ignored():
     a = app_with([acct("A", live=True), acct("B")])
     a._clawd_extras()
