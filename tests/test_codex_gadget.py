@@ -185,15 +185,45 @@ def test_codex_usage_cached_survives_errors(monkeypatch):
     assert cs.Api.__new__(cs.Api)._codex_usage_cached() is None
 
 
-def test_switch_request_ignored_for_truncated_codex_name():
+def test_main_screen_session_name_has_cx_prefix_for_codex():
+    a = app_with([acct("A", live=True)], [sess("tool", "codex")])
+    assert a._clawd_session()["n"] == "cx tool"
+    a = app_with([acct("A", live=True)], [sess("api", "claude")])
+    assert a._clawd_session()["n"] == "api"
+
+
+def test_switch_request_ignored_for_truncated_codex_name_at_the_codex_index():
     a = app_with([acct("A", live=True)])
     a._clawd_extras()
+    assert a._clawd_codex_index == 1
     called = []
     a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True}
     for nick in ("Code", "Codex"):
         a._clawd_switch_request(1, nick)
     assert called == []
     assert sum("Codex has no account switch" in m for m in a._logs) == 2
+
+
+def test_truncated_code_at_another_index_goes_to_the_resolver():
+    """"Code" is also how a Claude account named "Code..." arrives truncated: away from the Codex row it is a
+    normal request."""
+    a = app_with([acct("Code review", live=True), acct("Coder")])
+    a._clawd_extras()
+    assert a._clawd_codex_index == 2
+    called = []
+    a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True, "changed": True}
+    a._clawd_switch_request(1, "Code")
+    assert called == ["u-Coder"]
+    assert not any("Codex has no account switch" in m for m in a._logs)
+
+
+def test_full_codex_nick_ignored_at_any_index():
+    a = app_with([acct("A", live=True), acct("B")])
+    a._clawd_extras()
+    called = []
+    a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True}
+    a._clawd_switch_request(0, "Codex")
+    assert called == [] and any("Codex has no account switch" in m for m in a._logs)
 
 
 def test_switch_goes_through_when_codex_index_now_belongs_to_a_claude_account():

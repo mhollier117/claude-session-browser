@@ -4938,7 +4938,10 @@ class Api:
         if not snap:
             return {"n": "", "h": ""}
         from sessions_live import hint
-        out = {"n": snap[0]["name"], "h": hint(snap)}
+        name = snap[0]["name"]
+        if snap[0].get("tool") == "codex":  # wie in _clawd_gadget_sessions
+            name = "cx " + str(name or "")
+        out = {"n": name, "h": hint(snap)}
         out.update(_clawd_context(snap[0], "cx", "cw"))
         return out
 
@@ -5041,8 +5044,13 @@ class Api:
         Wechsel dann; ins Fenster wird nichts geschoben."""
         # Der Name entscheidet, nicht der Index: der wandert mit der Konten-
         # Liste. Das Geraet kann ihn kuerzen (bei knapper MTU bis auf 4).
+        # "Codex..." wird immer ignoriert. Auf 4 gekuerzt ("Code") kann es
+        # auch ein Claude-Konto "Code..." sein: ignoriert nur, wenn der Index
+        # die Codex-Zeile ist, sonst entscheidet der Namens-Abgleich.
         want = str(nick or "").strip()
-        if want.startswith("Codex") or (len(want) >= 4 and "Codex".startswith(want)):
+        codex_index = getattr(self, "_clawd_codex_index", None)
+        if want.startswith("Codex") or (len(want) >= 4 and "Codex".startswith(want)
+                                        and index == codex_index):
             self._clawd_log(f"Account switch from the gadget ({index}, {nick!r}) "
                             "ignored: Codex has no account switch")
             return
