@@ -331,6 +331,7 @@ def test_app_bridge_sends_context_and_state():
     api.settings = {"clawdmeter_buddy": True}
     api._sessions_service = FakeService()
     api._accounts_mgr = lambda: type("M", (), {"accounts": lambda self: []})()
+    api._codex_usage_cached = lambda: None   # _clawd_extras must never read the real ~/.codex
     assert api._clawd_session() == {"n": "Fix login bug", "h": "+1 working", "cx": 33, "cw": "1M"}
     ss = api._clawd_extras()["se"]
     assert [(x["s"], x.get("c"), x.get("w")) for x in ss] == [
@@ -406,6 +407,7 @@ def test_app_focus_request_resolves_the_unique_gadget_name():
     api.settings = {"clawdmeter_buddy": True}
     api._sessions_service = type("S", (), {"latest": lambda self: rows})()
     api._accounts_mgr = lambda: type("M", (), {"accounts": lambda self: []})()
+    api._codex_usage_cached = lambda: None   # _clawd_extras must never read the real ~/.codex
     assert [x["n"] for x in api._clawd_extras()["se"]] == ["clawdmeter", "clawdmeter~2"]
     assert api._clawd_resolve_session(1, "clawdmeter~2")[0]["pid"] == 22
     assert api._clawd_resolve_session(0, "clawdmeter")[0]["pid"] == 11

@@ -65,7 +65,7 @@ Step "3/6 App (PyInstaller, onedir)"
     --add-data "hooks\csb-name-gate.ps1;hooks" `
     --add-data "launcher\templates\plan.md;launcher\templates" `
     --add-data "launcher\templates\CLAUDE.client.md;launcher\templates" `
-    --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live --hidden-import sysstats --hidden-import termfocus --hidden-import launcher `
+    --hidden-import pystray --hidden-import PIL --hidden-import accounts --hidden-import sessions_live --hidden-import sysstats --hidden-import termfocus --hidden-import launcher --hidden-import codex_store `
     --hidden-import psutil --hidden-import pynvml --hidden-import clr `
     claude_sessions.py
 Check "PyInstaller (app)"
@@ -78,7 +78,7 @@ Step "4/6 cc launcher (dist\cc\cc.exe, PyInstaller onedir console)"
     --onedir --console --name cc --icon claude_sessions.ico `
     --add-data "launcher\templates\plan.md;launcher\templates" `
     --add-data "launcher\templates\CLAUDE.client.md;launcher\templates" `
-    --hidden-import sessions_live --hidden-import termfocus --hidden-import psutil `
+    --hidden-import sessions_live --hidden-import termfocus --hidden-import psutil --hidden-import codex_store `
     --hidden-import launcher --collect-submodules prompt_toolkit `
     cc_main.py
 Check "PyInstaller (cc)"

@@ -22,6 +22,7 @@ def api(env):
     a = cs.Api.__new__(cs.Api)
     a._accounts = mgr
     a._kick_usage_poll = lambda: None
+    a._codex_usage_cached = lambda: None   # limit_state must never read the real ~/.codex
     return a, paths
 
 
