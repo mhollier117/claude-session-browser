@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.11",
-  "notes": "New session offers the wrappers your PowerShell profile actually defines on this PC (your claude* aliases such as claudek or claudezs appear, ones that don't exist here are hidden). The limit animation got an attitude: Clawd flips you off with both hands when a session hits its limit.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.11",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.11/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "0a4915147a0629c411cb80c9ce33ca8d87d11537f0d2aa7cbcf6e59e61a6b0e7"
+  "version": "1.7.1.0",
+  "notes": "Codex support: Codex CLI sessions in the list and cc (badge, filter, resume), live Codex sessions for the buddy and the Clawdmeter, and Codex usage beside Claude's in the app and on the devices.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.1.0",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.1.0/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "8f9828cbc278b14394daccadbd7397fa3de6acfafdbc574b50f67bec07878689"
 }
