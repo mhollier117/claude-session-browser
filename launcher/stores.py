@@ -169,6 +169,45 @@ def _tail_lines(path: Path, size: int, n: int) -> list[bytes]:
     return lines[1:] if start > 0 else lines  # the first line of a mid-file read is partial
 
 
+def _matching_lines(data: bytes, type_re, skip_first: bool) -> list[bytes]:
+    """The lines of `data` that `type_re` matches, found by one regex scan over the buffer (not one search per
+    line); with `skip_first`, a match in the first line (partial, mid-file) is skipped."""
+    out: list[bytes] = []
+    pos = 0
+    while True:
+        m = type_re.search(data, pos)
+        if m is None:
+            return out
+        s = data.rfind(b"\n", 0, m.start()) + 1
+        e = data.find(b"\n", m.end())
+        e = len(data) if e < 0 else e
+        if s > 0 or not skip_first:
+            out.append(data[s:e])
+        pos = e + 1
+
+
+def _tail_matches(path: Path, size: int, type_re):
+    """Generator for `_tail`'s doubling read with a prefilter: send the window size `n`, get back the prefiltered
+    lines of the last `n` bytes. Each step reads and scans only the bytes before what was scanned already, up to a
+    line start, so a far-back ask costs one pass over the bytes, not one per doubling."""
+    boundary = size  # bytes from here to `size` have been scanned; `boundary` is a line start (or `size`)
+    acc: list[bytes] = []
+    n = yield
+    while True:
+        start = max(0, size - n)
+        if start < boundary:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(boundary - start)
+            acc = _matching_lines(data, type_re, skip_first=start > 0) + acc
+            nl = data.find(b"\n") if start > 0 else -1
+            if start == 0:
+                boundary = 0
+            elif nl >= 0:
+                boundary = start + nl + 1
+        n = yield acc
+
+
 def _head(path: Path, size: int, parser, cap: int | None = None, type_re=None) -> tuple[str | None, str]:
     """(first cwd seen, cleaned first ask), growing the read by doubling until an ask is found, EOF, or `cap` bytes
     have been read (then "" for the ask). With `type_re`, lines it rejects are skipped unparsed."""
@@ -216,12 +255,14 @@ def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True,
     is found whenever the reply is. With `type_re`, lines it rejects are skipped unparsed."""
     cap = max(TAIL_MAX_BYTES, 1)
     n = min(max(tail_bytes, 1), cap)
+    scan = None
+    if type_re is not None:
+        scan = _tail_matches(path, size, type_re)
+        next(scan)
     while True:
         ask = reply = ""
         model = None
-        for line in reversed(_tail_lines(path, size, n)):
-            if type_re is not None and not type_re.search(line):
-                continue
+        for line in reversed(scan.send(n) if scan is not None else _tail_lines(path, size, n)):
             got = _parse(line, parser)
             if got is None:
                 continue

@@ -235,6 +235,26 @@ def test_codex_prefilter_lets_both_shapes_through():
     assert stores._TYPE_RES["codex"].search(b'{"type":"event_msg","payload":{"type":"user_message"}}')
 
 
+def test_codex_prefiltered_tail_matches_the_plain_read(cenv):
+    """The codex tail read scans each byte once across doublings; whatever window it starts with, it finds the same
+    last ask and reply as the plain line-by-line read (line boundaries straddling the chunks included)."""
+    recs = []
+    for i in range(30):
+        recs.append(_user(f"ask {i} " + "a" * (i * 37 % 300)))
+        recs += [{"timestamp": "2026-11-18T09:30:00.000Z", "type": "event_msg",
+                  "payload": {"type": "token_count", "pad": "x" * (100 + i * 53 % 900)}} for _ in range(i % 4)]
+        recs.append(_agent(f"reply {i} " + "b" * (i * 71 % 500)))
+    recs += [{"timestamp": "2026-11-18T09:40:00.000Z", "type": "event_msg",
+              "payload": {"type": "token_count", "pad": "y" * 700}} for _ in range(40)]
+    path = write_codex_session(cenv, SID, recs)
+    size = path.stat().st_size
+    parser = stores._PARSERS["codex"]
+    for tb in (1, 97, 500, 1024, 3333, 8192, size):
+        plain = stores._tail(path, size, parser, tb)
+        fast = stores._tail(path, size, parser, tb, type_re=stores._TYPE_RES["codex"])
+        assert fast[:2] == plain[:2] and fast[0].startswith("ask 29") and fast[1].startswith("reply 29"), tb
+
+
 def test_codex_head_read_is_capped(cenv, monkeypatch):
     """A rollout without any ask never reads the whole file looking for one."""
     filler = [{"timestamp": "2026-11-18T09:30:00.000Z", "type": "event_msg",
