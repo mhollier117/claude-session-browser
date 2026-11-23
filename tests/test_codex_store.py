@@ -421,12 +421,40 @@ def test_live_threads_lock_mtime_matches_picker_process(tmp_path):
     assert len(set(got)) == 2 and len(set(got.values())) == 2
 
 
-def test_live_threads_lock_outside_window_ignored(tmp_path):
+def test_live_threads_lock_before_the_process_ignored(tmp_path):
     write_rollout(sessions(tmp_path), ID1, [])
-    lock(tmp_path, ID1, T + 61)
-    assert live_threads(tmp_path, [proc(1, T, "resume")]) == {}
     lock(tmp_path, ID1, T - 6)
     assert live_threads(tmp_path, [proc(1, T, "resume")]) == {}
+
+
+def test_live_threads_lock_made_at_a_late_first_prompt_matches(tmp_path):
+    """Codex makes the rollout (and lock) at the first prompt: a process started 10 minutes earlier still gets it."""
+    write_rollout(sessions(tmp_path), ID1, [])
+    lock(tmp_path, ID1, T + 61)
+    assert live_threads(tmp_path, [proc(1, T)]) == {ID1: 1}
+    lock(tmp_path, ID1, T + 600)
+    assert live_threads(tmp_path, [proc(1, T)]) == {ID1: 1}
+
+
+def test_live_threads_late_lock_goes_to_one_process_only(tmp_path):
+    write_rollout(sessions(tmp_path), ID1, [])
+    lock(tmp_path, ID1, T + 600)
+    assert live_threads(tmp_path, [proc(1, T), proc(2, T + 10)]) == {ID1: 2}   # the smaller gap
+    write_rollout(sessions(tmp_path), ID2, [])
+    lock(tmp_path, ID2, T + 700)
+    got = live_threads(tmp_path, [proc(1, T), proc(2, T + 10)])
+    assert got == {ID1: 2, ID2: 1} and len(set(got.values())) == 2
+
+
+def test_live_threads_window_match_wins_over_the_late_fallback(tmp_path):
+    for i in (ID1, ID2):
+        write_rollout(sessions(tmp_path), i, [])
+    lock(tmp_path, ID1, T + 2)          # inside proc 1's 60 s window
+    lock(tmp_path, ID2, T + 900)        # only reachable by the fallback
+    procs = [proc(1, T), proc(2, T - 3000)]
+    # one greedy pass over all pairs would give ID2 to proc 1 first (gap 900 is the smallest); the window pass runs
+    # first, so proc 1 keeps ID1 and only proc 2 falls back
+    assert live_threads(tmp_path, procs) == {ID1: 1, ID2: 2}
 
 
 def test_live_threads_lock_for_non_terminal_ignored(tmp_path):

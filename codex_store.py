@@ -356,7 +356,9 @@ def live_threads(home: Path, procs: list[dict] | None = None) -> dict[str, int]:
     """id -> pid of the running terminal Codex sessions. A process names its thread on its command line
     (`codex resume <id>`); one without an id (the picker, a new session) is matched to the thread-writer lock whose
     mtime lies in [create_time - 5, create_time + 60] and is closest to it, assigned greedily by smallest gap so no
-    lock and no process is used twice. App-server processes (the desktop app) are ignored."""
+    lock and no process is used twice. Processes still unmatched after that may take any unclaimed lock with
+    mtime >= create_time - 5 (same greedy rule): the lock appears at the first prompt, which can come much later.
+    App-server processes (the desktop app) are ignored."""
     if procs is None:
         procs = _codex_procs()
     procs = [p for p in procs if not any("app-server" in a for a in p["cmdline"])]
@@ -379,19 +381,27 @@ def live_threads(home: Path, procs: list[dict] | None = None) -> dict[str, int]:
                  and f.name[:-5] not in out]
     except OSError:
         locks = []
+    mtimes = []
     for id_, f in locks:
         try:
-            mtime = f.stat().st_mtime
+            mtimes.append((id_, f.stat().st_mtime))
         except OSError:
             continue
-        for p in pending:
-            if p["create_time"] - 5 <= mtime <= p["create_time"] + 60:
-                pairs.append((abs(mtime - p["create_time"]), id_, p["pid"]))
     used_pids: set[int] = set()
-    for _, id_, pid in sorted(pairs):
-        if id_ not in out and pid not in used_pids:
-            out[id_] = pid
-            used_pids.add(pid)
+
+    def assign(fits) -> None:
+        pairs = [(abs(mtime - p["create_time"]), id_, p["pid"]) for id_, mtime in mtimes for p in pending
+                 if id_ not in out and p["pid"] not in used_pids and fits(mtime, p["create_time"])]
+        for _, id_, pid in sorted(pairs):
+            if id_ not in out and pid not in used_pids:
+                out[id_] = pid
+                used_pids.add(pid)
+
+    assign(lambda mtime, ct: ct - 5 <= mtime <= ct + 60)
+    # Codex makes the rollout and its lock at the first prompt, not at start: a process still unmatched (its first
+    # prompt came later than 60 s) may take any unclaimed lock made after it started. Strictly after the window
+    # pass, so a match within 60 s always wins.
+    assign(lambda mtime, ct: mtime >= ct - 5)
     return out
 
 
