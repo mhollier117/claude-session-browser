@@ -1,7 +1,7 @@
 {
   "version": "1.7.0.10",
-  "notes": "Sessions show which provider or alias launched them (kimi for claudek, glm for claudez, qwen for claudeq, or the alias name for any other claude* alias), and Resume relaunches a session with the same alias and arguments. Clawdmeter: the Voice key's push-to-talk follows the session in front (Claude Code voice for an Anthropic session, Handy for claudez/claudek/claudeq and other windows).",
+  "notes": "Sessions show which provider launched them: glm for claudez, kimi for claudek, qwen for claudeq (the labels come from your PowerShell profile), or the alias name for any other claude* alias. Resume relaunches a session with the same alias and arguments it was started with. The qwen filter covers Claude Code on Qwen and Qwen Code together, with a small choice to narrow to one. Clawdmeter: the Voice key's push-to-talk follows the session in front (Claude Code voice for an Anthropic session, Handy for claudez/claudek/claudeq and other windows).",
   "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.10",
   "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.10/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "55da1d6f34fccfec6df4fbca28ceea788fa2c2368ed47c3c6a74d4f8c011215a"
+  "installer_sha256": "f505ff6255f096bc8b886024d98a9d0344bb1110cb762ece02e9aeb5b63984ec"
 }
