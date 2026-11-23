@@ -151,7 +151,7 @@ def _limit_hit(rl: dict) -> bool:
 
 def _scan_tail(lines: list[bytes]) -> tuple[CodexTail, bool, bool]:
     """(tail facts of these lines, turn state seen, rate limits seen)."""
-    last_ts = rate_ts = ctx_tokens = ctx_window = model = rate_limits = None
+    last_ts = rate_ts = ctx_tokens = ctx_window = model = turn_model = rate_limits = None
     turn: bool | None = None
     for line in lines:
         rec = _json_obj(line)
@@ -161,6 +161,11 @@ def _scan_tail(lines: list[bytes]) -> tuple[CodexTail, bool, bool]:
         if ts is not None:
             last_ts = ts
         payload = rec.get("payload")
+        if rec.get("type") == "turn_context" and isinstance(payload, dict):
+            m = payload.get("model")
+            if isinstance(m, str) and m.strip():
+                turn_model = m.strip()
+            continue
         if rec.get("type") != "event_msg" or not isinstance(payload, dict):
             continue
         kind = payload.get("type")
@@ -187,7 +192,7 @@ def _scan_tail(lines: list[bytes]) -> tuple[CodexTail, bool, bool]:
             if isinstance(m, str) and m.strip():
                 model = m.strip()
     tail = CodexTail(last_ts, bool(turn), _limit_hit(rate_limits) if rate_limits else False, rate_limits, rate_ts,
-                     ctx_tokens, ctx_window, model)
+                     ctx_tokens, ctx_window, turn_model or model)  # turn_context is the real source
     return tail, turn is not None, rate_limits is not None
 
 
@@ -206,15 +211,15 @@ def read_tail(path: Path, tail_bytes: int = 262_144) -> CodexTail:
         return CodexTail(None, False, False, None, None, None, None, None)
 
 
-def _window(win, now: float) -> tuple[int | None, float]:
-    """(used percent, reset epoch) of one rate-limit window; a window that has reset reads 0 / 0.0."""
+def _window(win, now: float) -> tuple[int | None, float, bool]:
+    """(used percent, reset epoch, live) of one rate-limit window; a window that has reset reads 0 / 0.0, not live."""
     if not isinstance(win, dict) or not isinstance(win.get("used_percent"), (int, float)):
-        return None, 0.0
+        return None, 0.0, False
     resets = win.get("resets_at")
     resets = float(resets) if isinstance(resets, (int, float)) else 0.0
     if resets and resets < now:
-        return 0, 0.0
-    return int(round(win["used_percent"])), resets
+        return 0, 0.0, False
+    return int(round(win["used_percent"])), resets, True
 
 
 def usage(home: Path, now: float, recent: int = 8) -> dict | None:
@@ -235,16 +240,22 @@ def usage(home: Path, now: float, recent: int = 8) -> dict | None:
     if best is None:
         return None
     out: dict = {"s": None, "s_reset_at": 0.0, "w": None, "w_reset_at": 0.0}
+    live_used: list[int] = []
     for key in ("primary", "secondary"):
         win = best.rate_limits.get(key)
-        used, resets = _window(win, now)
+        used, resets, live = _window(win, now)
         if used is None:
             continue
+        if live:
+            live_used.append(used)
         minutes = win.get("window_minutes")
         slot = "s" if isinstance(minutes, (int, float)) and minutes <= _SIX_HOURS_MIN else "w"
         out[slot], out[slot + "_reset_at"] = used, resets
     plan = best.rate_limits.get("plan_type")
-    out.update(limited=best.limit_hit, plan=plan if isinstance(plan, str) else None, at=best.rate_ts)
+    # limited only while a window that has not yet reset says so: expired windows no longer limit anything
+    limited = bool(live_used) and (best.rate_limits.get("rate_limit_reached_type") is not None
+                                   or any(u >= 100 for u in live_used))
+    out.update(limited=limited, plan=plan if isinstance(plan, str) else None, at=best.rate_ts)
     return out
 
 

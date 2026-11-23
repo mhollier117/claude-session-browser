@@ -165,6 +165,16 @@ def test_read_tail_rate_limits_and_context(tmp_path):
     assert t.model == "gpt-6.1-sol"
 
 
+def test_read_tail_model_from_newest_turn_context(tmp_path):
+    p = write_rollout(sessions(tmp_path), "a", [
+        ev("thread_settings_applied", thread_settings={"model": "from-settings"}),
+        {"type": "turn_context", "payload": {"model": "gpt-old"}},
+        {"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}}, ev("task_started")])
+    assert read_tail(p).model == "gpt-6.1-sol"
+    p = write_rollout(sessions(tmp_path), "a", [ev("thread_settings_applied", thread_settings={"model": "m2"})])
+    assert read_tail(p).model == "m2"
+
+
 def test_read_tail_null_info_and_no_events(tmp_path):
     p = write_rollout(sessions(tmp_path), "a", [ev("token_count", info=None, rate_limits=None)])
     t = read_tail(p)
@@ -236,6 +246,28 @@ def test_usage_takes_newest_record_by_timestamp_across_rollouts(tmp_path):
 def test_usage_limited_follows_newest_record(tmp_path):
     home = usage_home(tmp_path, [token_count(T - 5, 100.0, reached="primary")])
     assert usage(home, T)["limited"] is True
+
+
+def test_usage_limited_false_when_all_windows_expired(tmp_path):
+    home = usage_home(tmp_path, [token_count(T - 5, 100.0, resets=T - 1, reached="primary")])
+    u = usage(home, T)
+    assert u["w"] == 0 and u["w_reset_at"] == 0.0 and u["limited"] is False
+
+
+def test_usage_limited_true_when_a_live_window_is_full(tmp_path):
+    home = usage_home(tmp_path, [token_count(T - 5, 40.0, window=300, resets=T - 1,
+                                             secondary={"used_percent": 100.0, "window_minutes": 10080,
+                                                        "resets_at": T + 500})])
+    u = usage(home, T)
+    assert (u["s"], u["w"], u["limited"]) == (0, 100, True)
+
+
+def test_usage_limited_false_when_only_the_expired_window_was_full(tmp_path):
+    home = usage_home(tmp_path, [token_count(T - 5, 100.0, window=300, resets=T - 1,
+                                             secondary={"used_percent": 30.0, "window_minutes": 10080,
+                                                        "resets_at": T + 500})])
+    u = usage(home, T)
+    assert (u["s"], u["w"], u["limited"]) == (0, 30, False)
 
 
 def test_usage_none_without_token_count(tmp_path):
