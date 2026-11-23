@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,15 +36,36 @@ def _json_obj(line: bytes | str) -> dict | None:
     return rec if isinstance(rec, dict) else None
 
 
+# Module caches, per Codex home. The service thread (CodexLive) and UI threads (usage, the index) all call in.
+_CACHE_LOCK = threading.Lock()
+_IMPORTS_GOOD: dict[Path, frozenset[str]] = {}       # home -> the last imports set read whole
+_ROLLOUT_CACHE: dict[Path, dict[Path, dict]] = {}    # home -> rollout path -> {"id", "source"} of its first line
+
+
+def _reset_caches() -> None:
+    """Forget every cached read (tests)."""
+    with _CACHE_LOCK:
+        _IMPORTS_GOOD.clear()
+        _ROLLOUT_CACHE.clear()
+
+
 def imported_ids(home: Path) -> set[str]:
-    """Thread ids Codex imported from another agent (not terminal sessions of this machine)."""
+    """Thread ids Codex imported from another agent (not terminal sessions of this machine). A read that fails
+    (the file mid-rewrite, locked, or without a `records` list) returns the last good set for this home, so the
+    imported threads never flood the session list; empty when there never was one."""
     try:
         data = json.loads((home / "external_agent_session_imports.json").read_text(encoding="utf-8"))
         records = data.get("records") if isinstance(data, dict) else None
-        return {r["imported_thread_id"] for r in records or []
-                if isinstance(r, dict) and isinstance(r.get("imported_thread_id"), str)}
+        if not isinstance(records, list):
+            raise ValueError("no records list")
+        ids = frozenset(r["imported_thread_id"] for r in records
+                        if isinstance(r, dict) and isinstance(r.get("imported_thread_id"), str))
     except (OSError, ValueError):
-        return set()
+        with _CACHE_LOCK:
+            return set(_IMPORTS_GOOD.get(home, ()))
+    with _CACHE_LOCK:
+        _IMPORTS_GOOD[home] = ids
+    return set(ids)
 
 
 def read_meta(path: Path) -> dict | None:
@@ -70,12 +92,25 @@ def is_terminal(meta: dict, imported: set[str]) -> bool:
 
 
 def terminal_rollouts(home: Path) -> dict[str, Path]:
-    """id -> rollout path over `sessions/**/rollout-*.jsonl`, terminal sessions only; the newest mtime wins."""
+    """id -> rollout path over `sessions/**/rollout-*.jsonl`, terminal sessions only; the newest mtime wins.
+    A rollout's first line never changes, so its id and source are read once per path and cached per home (paths
+    that vanished are dropped); a first line that does not parse yet (Codex still writing it) is never cached. The
+    imports set can change, so `is_terminal` is applied afresh on every call."""
     imported = imported_ids(home)
+    with _CACHE_LOCK:
+        cached = dict(_ROLLOUT_CACHE.get(home, {}))
+    metas: dict[Path, dict] = {}
     found: dict[str, tuple[float, Path]] = {}
     for path in (home / "sessions").glob("**/rollout-*.jsonl"):
-        meta = read_meta(path)
-        if meta is None or not isinstance(meta.get("id"), str) or not is_terminal(meta, imported):
+        meta = cached.get(path)
+        if meta is None:
+            full = read_meta(path)
+            if full is None or not isinstance(full.get("id"), str):
+                continue
+            source = full.get("source")
+            meta = {"id": full["id"], "source": source if isinstance(source, str) else None}
+        metas[path] = meta
+        if not is_terminal(meta, imported):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -83,6 +118,8 @@ def terminal_rollouts(home: Path) -> dict[str, Path]:
             continue
         if meta["id"] not in found or mtime > found[meta["id"]][0]:
             found[meta["id"]] = (mtime, path)
+    with _CACHE_LOCK:
+        _ROLLOUT_CACHE[home] = metas
     return {i: p for i, (_, p) in found.items()}
 
 

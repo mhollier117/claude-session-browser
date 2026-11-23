@@ -89,7 +89,24 @@ def test_imported_ids(tmp_path):
         json.dumps({"records": [{"imported_thread_id": "x"}, {"other": 1}], "detected_connector_records": []}))
     assert imported_ids(tmp_path) == {"x"}
     (tmp_path / "external_agent_session_imports.json").write_text("garbage")
-    assert imported_ids(tmp_path) == set()
+    assert imported_ids(tmp_path) == {"x"}   # a failed read (mid-rewrite) keeps the last good set
+
+
+def test_imported_ids_last_good_set_per_home_and_a_copy(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+    (a / "external_agent_session_imports.json").write_text(json.dumps({"records": [{"imported_thread_id": "x"}]}))
+    got = imported_ids(a)
+    got.add("mutated")
+    assert imported_ids(a) == {"x"}
+    (a / "external_agent_session_imports.json").write_text('{"records": [')       # truncated mid-rewrite
+    assert imported_ids(a) == {"x"}
+    (a / "external_agent_session_imports.json").write_text(json.dumps({"other": 1}))  # no records list
+    assert imported_ids(a) == {"x"}
+    (b / "external_agent_session_imports.json").write_text("garbage")
+    assert imported_ids(b) == set()                                                  # never a good read here
+    (a / "external_agent_session_imports.json").write_text(json.dumps({"records": []}))
+    assert imported_ids(a) == set()                                                  # a good, empty read
 
 
 def test_terminal_rollouts_newest_file_wins(tmp_path):
@@ -104,6 +121,60 @@ def test_terminal_rollouts_newest_file_wins(tmp_path):
     (tmp_path / "external_agent_session_imports.json").write_text(
         json.dumps({"records": [{"imported_thread_id": "imp"}]}))
     assert terminal_rollouts(tmp_path) == {"dup": new}
+
+
+def counting_opens(monkeypatch) -> list:
+    """Every `open` codex_store makes (read_meta, the rollout heads), recorded by path."""
+    import builtins
+    opened = []
+    monkeypatch.setattr(codex_store, "open", lambda p, *a, **k: opened.append(Path(p)) or builtins.open(p, *a, **k),
+                        raising=False)
+    return opened
+
+
+def test_terminal_rollouts_reads_each_first_line_once(tmp_path, monkeypatch):
+    s = sessions(tmp_path)
+    a = write_rollout(s, "a", [])
+    write_rollout(s, "b", [])
+    opened = counting_opens(monkeypatch)
+    assert set(terminal_rollouts(tmp_path)) == {"a", "b"} and len(opened) == 2
+    opened.clear()
+    assert set(terminal_rollouts(tmp_path)) == {"a", "b"} and opened == []       # unchanged files: no reads
+    c = tmp_path / "sessions" / "2026" / "11" / "02" / "rollout-2026-11-02T00-00-00-c.jsonl"
+    c.parent.mkdir(parents=True)
+    c.write_bytes(a.read_bytes().replace(b'"id": "a"', b'"id": "c"'))
+    assert set(terminal_rollouts(tmp_path)) == {"a", "b", "c"} and opened == [c]  # only the new one
+    a.unlink()
+    assert set(terminal_rollouts(tmp_path)) == {"b", "c"}
+    assert a not in codex_store._ROLLOUT_CACHE[tmp_path]                         # vanished paths dropped
+
+
+def test_terminal_rollouts_applies_current_imports_to_cached_metas(tmp_path, monkeypatch):
+    write_rollout(sessions(tmp_path), "a", [])
+    assert set(terminal_rollouts(tmp_path)) == {"a"}
+    opened = counting_opens(monkeypatch)
+    (tmp_path / "external_agent_session_imports.json").write_text(
+        json.dumps({"records": [{"imported_thread_id": "a"}]}))
+    assert terminal_rollouts(tmp_path) == {} and opened == []
+
+
+def test_terminal_rollouts_never_caches_a_half_written_first_line(tmp_path):
+    day = sessions(tmp_path) / "2026" / "10" / "26"
+    day.mkdir(parents=True)
+    p = day / "rollout-2026-10-26T12-35-30-a.jsonl"
+    full = json.dumps({"timestamp": iso(T), "type": "session_meta", "payload": {"id": "a", "source": "cli"}})
+    p.write_text(full[:20], encoding="utf-8")                                     # Codex still writing line 1
+    assert terminal_rollouts(tmp_path) == {}
+    p.write_text(full + "\n", encoding="utf-8")
+    assert terminal_rollouts(tmp_path) == {"a": p}
+
+
+def test_terminal_rollout_caches_are_per_home(tmp_path):
+    write_rollout(sessions(tmp_path / "h1"), "a", [])
+    write_rollout(sessions(tmp_path / "h2"), "b", [])
+    assert set(terminal_rollouts(tmp_path / "h1")) == {"a"}
+    assert set(terminal_rollouts(tmp_path / "h2")) == {"b"}
+    assert set(terminal_rollouts(tmp_path / "h1")) == {"a"}
 
 
 # ---------------------------------------------------------------- titles
