@@ -6785,6 +6785,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     color:var(--muted); font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer}
   .toolfilter button:hover{color:var(--fg)}
   .toolfilter button.on{background:var(--surface2); color:var(--fg)}
+  .toolfilter .toolsub{display:flex; align-items:center; gap:2px; margin-left:4px; padding-left:6px;
+    border-left:1px solid var(--border)}
+  .toolfilter button.sub{height:24px; padding:0 8px; font-size:11.5px}
   .ln-pop{width:min(1000px,94vw); max-height:92vh; display:flex; flex-direction:column}
   .ln-pop [hidden]{display:none !important}
   .ln-body{overflow-y:auto; min-height:0; padding-right:2px}
@@ -7614,7 +7617,7 @@ function visible(){
     const cwd=(s.cwd||'').toLowerCase();
     if(hideHome && cwd===home) return false;
     if(hidden.some(h=>cwd===h)) return false;
-    if(TOOL_FILTER!=='all' && toolOf(s)!==TOOL_FILTER) return false;
+    if(!toolMatch(s)) return false;
     if(q){const hay=((s.display_title||'')+' '+(s.project||'')+' '+(s.cwd||'')+' '+(s.first_user||'')+' '+(s.id||'')).toLowerCase();
       if(!hay.includes(q)) return false;}
     return true;
@@ -9346,15 +9349,30 @@ async function obFinish(){
 // (Claude Code on Z.ai GLM, claudez) or qwencli (the Qwen Code tool). The
 // backend is launcher/bridge.py behind Api.launcher_*; every launcher call can
 // answer {ok:false, error}, which is shown, never left hanging.
-let TOOL_FILTER = 'all';
+let TOOL_FILTER = 'all', TOOL_SUB = 'both';
 const LN_WRAPPERS = __LAUNCHER_WRAPPERS__;
 // The list types: claude, the backends guessed from a model (qwen, glm), Qwen Code (qwencli), and any alias
 // a session was launched with (claudek, claudez, ...: whatever the sessions carry, no table to extend).
 const TOOL_STYLED = ['claude','qwen','glm','qwencli'];
 function toolOf(s){ return s && typeof s.tool==='string' && /^[A-Za-z0-9_-]{1,48}$/.test(s.tool) ? s.tool : 'claude'; }
+// A type and its "...cli" twin share one filter button (qwen = Claude Code on Qwen + Qwen Code, qwencli): the
+// button shows both, and a small choice next to it narrows to one of them when both are in the list.
+function toolGroupOf(k){ return k.length>3 && k.endsWith('cli') ? k.slice(0,-3) : k; }
 function toolTypes(){
-  const seen=new Set((typeof sessions!=='undefined' && sessions ? sessions : []).map(toolOf));
+  const seen=new Set((typeof sessions!=='undefined' && sessions ? sessions : []).map(s=>toolGroupOf(toolOf(s))));
   return ['claude', ...[...seen].filter(k=>k!=='claude').sort()];
+}
+function toolGroupHasBoth(g){
+  const ks=new Set(sessions.map(toolOf));
+  return ks.has(g) && ks.has(g+'cli');
+}
+function toolMatch(s){
+  if(TOOL_FILTER==='all') return true;
+  const k=toolOf(s);
+  if(toolGroupOf(k)!==TOOL_FILTER) return false;
+  if(TOOL_SUB==='claude') return k===TOOL_FILTER;
+  if(TOOL_SUB==='cli') return k===TOOL_FILTER+'cli';
+  return true;
 }
 function toolHue(k){ let h=0; for(const c of k) h=(h*31+c.charCodeAt(0))%360; return h; }
 function toolBadge(s){
@@ -9364,10 +9382,17 @@ function toolBadge(s){
 }
 function renderToolFilter(){
   const el=document.getElementById('toolfilter'); if(!el) return;
-  el.innerHTML=[['all',t('alle')], ...toolTypes().map(k=>[k,k])].map(([k,label])=>
+  let html=[['all',t('alle')], ...toolTypes().map(k=>[k,k])].map(([k,label])=>
     `<button class="${TOOL_FILTER===k?'on':''}" onclick="setToolFilter('${k}')">${esc(label)}</button>`).join('');
+  if(TOOL_FILTER!=='all' && toolGroupHasBoth(TOOL_FILTER)){
+    const subs=[['both',t('beide')],['claude',t('in Claude')],['cli',`${TOOL_FILTER} CLI`]];
+    html+=`<span class="toolsub">`+subs.map(([v,label])=>
+      `<button class="sub ${TOOL_SUB===v?'on':''}" onclick="setToolSub('${v}')">${esc(label)}</button>`).join('')+`</span>`;
+  }
+  el.innerHTML=html;
 }
-function setToolFilter(k){ TOOL_FILTER=k; render(); }
+function setToolFilter(k){ TOOL_FILTER=k; TOOL_SUB='both'; render(); }
+function setToolSub(v){ TOOL_SUB=v; render(); }
 function resumeResult(r){
   if(r && r.ok===false) toast(r.error || t('Das hat nicht geklappt.'), 6000);
 }

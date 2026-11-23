@@ -651,6 +651,15 @@ def test_page_types_badges_and_qwen_code_checks(page):
     badge = _js_fn(page, "toolBadge")
     assert "tool-badge alias" in badge and "--th:${toolHue(k)}" in badge and "esc(k)" in badge
     assert "toolTypes()" in _js_fn(page, "renderToolFilter")
+    # a type and its ...cli twin (qwen, qwencli) share one button; a sub-choice narrows it when both are listed
+    assert "k.endsWith('cli') ? k.slice(0,-3) : k" in _js_fn(page, "toolGroupOf")
+    assert "toolGroupOf(toolOf(s))" in _js_fn(page, "toolTypes")
+    match = _js_fn(page, "toolMatch")
+    assert "TOOL_SUB==='claude') return k===TOOL_FILTER" in match and "k===TOOL_FILTER+'cli'" in match
+    render_ = _js_fn(page, "renderToolFilter")
+    assert "toolGroupHasBoth(TOOL_FILTER)" in render_ and "setToolSub(" in render_
+    assert "TOOL_SUB='both'" in _js_fn(page, "setToolFilter")
+    assert "if(!toolMatch(s)) return false;" in page
     assert "${toolBadge(s)}" in page
     assert "toolOf(s)==='qwencli'" in _js_fn(page, "openColor") and "toolOf(s)==='qwencli'" in _js_fn(page, "openRename")
     assert "toolOf(s)==='qwen'" not in page  # "qwen" is now Claude Code on a Qwen model, not Qwen Code

@@ -912,6 +912,8 @@ TRANSLATIONS = {
         "Auf dem Clawdmeter zeigen": "Show on the Clawdmeter",
         # ---- Session-Liste: Werkzeug und Neue Session (Launcher) ------------
         "alle": "all",
+        "beide": "both",
+        "in Claude": "in Claude",
         "Nach Werkzeug filtern": "Filter by tool",
         "Neue Session": "New session",
         "Session-Name": "Session name",
