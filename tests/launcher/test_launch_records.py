@@ -109,6 +109,23 @@ def test_launch_args_column_added_to_an_older_file(fake_env):
     assert idx._db.execute("SELECT wrapper FROM sessions WHERE sid = 'old'").fetchone()[0] == "claude6"  # kept
 
 
+def test_alias_label_learned_and_applied_to_older_sessions_of_that_alias(fake_env):
+    cwd = fake_env.root / "home" / "ai"
+    for sid in ("old", "new", "zz"):
+        write_claude_session(fake_env, cwd, sid, [_u("hi", cwd), _a("hello")])
+    live = _live_one(fake_env, "old", 81, cwd)
+    envs = {81: {"launcher": "claudek", "args": None, "label": None}}  # launched before labels existed
+    idx = _idx(fake_env, live, lambda pid: envs.get(pid))
+    idx.refresh()
+    assert index_mod.type_label(idx.row("claude", "old")) == "claudek"  # no label known yet: the alias name
+    live[:] = _live_one(fake_env, "new", 82, cwd) + _live_one(fake_env, "zz", 83, cwd)
+    envs[82] = {"launcher": "claudek", "args": "[]", "label": "kimi"}
+    envs[83] = {"launcher": "claudez", "args": "[]", "label": "bad label!"}  # not a label: ignored
+    idx.refresh()
+    labels = {r.sid: index_mod.type_label(r) for r in idx.rows()}
+    assert labels == {"old": "kimi", "new": "kimi", "zz": "claudez"}
+
+
 def test_type_label():
     lab = lambda **kw: index_mod.type_label(make_row(**kw))
     assert lab(wrapper="claudek") == "claudek"
@@ -116,6 +133,9 @@ def test_type_label():
     assert lab(wrapper="clauded") == "claude" and lab(wrapper="claude") == "claude"
     assert lab(wrapper=None, backend="glm") == "glm"
     assert lab(store="qwen", wrapper="qwen") == "qwencli"
+    assert lab(wrapper="claudek", label="kimi") == "kimi"
+    assert lab(wrapper="claudez", label="glm") == "glm"  # the same type as an old session guessed from its model
+    assert lab(wrapper="claudek", label="no good!") == "claudek"
 
 
 # ---- resume ------------------------------------------------------------------------------------------------------

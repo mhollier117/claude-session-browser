@@ -46,6 +46,11 @@ _ADDED_COLS = (("launch_args", "TEXT"),)
 # environment of the claude.exe it starts: the outermost claude* alias typed and the arguments typed to it.
 ENV_LAUNCHER = "CLAUDE_RESTORE_LAUNCHER"
 ENV_ARGS = "CLAUDE_RESTORE_ARGS"
+# the provider name an alias declares where it is defined (claudek -> kimi), shown instead of the alias name;
+# learned per alias, so it also labels that alias's older sessions
+ENV_LABEL = "CLAUDE_RESTORE_LABEL"
+LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$")
+_LABELS_SCHEMA = "CREATE TABLE IF NOT EXISTS alias_labels (name TEXT PRIMARY KEY, label TEXT NOT NULL)"
 # A wrapper name taken from a session's environment: only claude* names (argv[0] of a resume is this name).
 LAUNCHER_RE = re.compile(r"^claude[A-Za-z0-9_-]{0,40}$")
 _PLAIN = ("claude", "clauded")  # the same command: no type of their own in the lists
@@ -87,11 +92,13 @@ def backend_label(backend: str) -> str:
 
 
 def type_label(row: "Row") -> str:
-    """The type the lists show for a session: qwencli for Qwen Code; the alias that last launched a Claude session
-    when it is not plain claude (claudek, claudez, claude6, a new alias: no table to extend); else the backend
-    guessed from the model (`backend_label`)."""
+    """The type the lists show for a session: qwencli for Qwen Code; for a Claude session last launched by an
+    alias, the label that alias declares (claudez -> glm, claudek -> kimi; `Row.label`), else the alias name
+    itself (claude6, a new alias: no table to extend); else the backend guessed from the model (`backend_label`)."""
     if row.store == "qwen":
         return "qwencli"
+    if row.label and LABEL_RE.match(row.label):
+        return row.label
     if row.wrapper and row.wrapper not in _PLAIN and LAUNCHER_RE.match(row.wrapper):
         return row.wrapper
     return backend_label(row.backend)
@@ -117,7 +124,7 @@ def process_launch_env(pid: int) -> dict | None:
         env = psutil.Process(pid).environ()
     except (psutil.Error, OSError):
         return None
-    return {"launcher": env.get(ENV_LAUNCHER), "args": env.get(ENV_ARGS)}
+    return {"launcher": env.get(ENV_LAUNCHER), "args": env.get(ENV_ARGS), "label": env.get(ENV_LABEL)}
 
 
 @dataclass
@@ -143,6 +150,7 @@ class Row:
     # the arguments typed to `wrapper` at the last launch the index saw live (None: not known, e.g. launched before
     # the profile recorded them); a resume repeats them (launch.relaunch_args)
     launch_args: list[str] | None = None
+    label: str | None = None  # the provider label `wrapper` declares (learned per alias), see `type_label`
 
 
 @dataclass
@@ -271,6 +279,7 @@ class Index:
                     self._db.execute("DROP TABLE IF EXISTS sessions")  # only a cache: rebuilt by the next refresh
                     self._db.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 self._db.execute(_SCHEMA)
+                self._db.execute(_LABELS_SCHEMA)
                 have = {r[1] for r in self._db.execute("PRAGMA table_info(sessions)")}
                 for col, kind in _ADDED_COLS:
                     if col not in have:
@@ -355,7 +364,11 @@ class Index:
                 self._launch_seen.add(key)  # no marker: nothing to record for this process
                 continue
             args = parse_launch_args(info.get("args"))
+            label = info.get("label")
             with self._db:
+                if isinstance(label, str) and LABEL_RE.match(label):  # the alias's label, for all its sessions
+                    self._db.execute("INSERT INTO alias_labels (name, label) VALUES (?, ?) "
+                                     "ON CONFLICT(name) DO UPDATE SET label = excluded.label", (name, label))
                 cur = self._db.execute(
                     "UPDATE sessions SET wrapper = ?, launch_args = ? WHERE store = 'claude' AND sid = ?",
                     (name, json.dumps(args, ensure_ascii=False) if args is not None else None, sid))
@@ -456,6 +469,7 @@ class Index:
     def _to_rows(self, records, live=None, titles=None) -> list[Row]:
         live = self._live() if live is None else live
         titles = self._titles() if titles is None else titles
+        labels = dict(self._db.execute("SELECT name, label FROM alias_labels").fetchall())
         out = []
         for r in records:
             reg = live.get((r["store"], r["sid"]))
@@ -467,7 +481,8 @@ class Index:
                 last_activity=r["last_activity"], live_pid=reg.pid if reg else None, wrapper=r["wrapper"],
                 cwd_exists=bool(r["cwd"]) and Path(r["cwd"]).is_dir(), path=r["path"],
                 backend=backend_of(r["store"], r["wrapper"], r["model"]),
-                launch_args=parse_launch_args(r["launch_args"])))
+                launch_args=parse_launch_args(r["launch_args"]),
+                label=labels.get(r["wrapper"]) if r["wrapper"] else None))
         return out
 
     def rows(self, filter_text: str = "") -> list[Row]:
