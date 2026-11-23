@@ -14,6 +14,7 @@ class Env:
     claude_home: Path
     qwen_home: Path
     data_dir: Path
+    codex_home: Path | None = None  # None: no Codex store (every Codex read is skipped)
     now: Callable[[], float] = field(default=time.time)
 
 
@@ -27,4 +28,5 @@ def default_env() -> Env:
         claude_home=Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude"),
         qwen_home=Path(os.environ.get("CC_LAUNCHER_QWEN_HOME") or home / ".qwen"),
         data_dir=Path(os.environ.get("CC_LAUNCHER_DATA") or data_default),
+        codex_home=Path(os.environ.get("CODEX_HOME") or home / ".codex"),
     )

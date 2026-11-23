@@ -17,6 +17,7 @@ from .index import LAUNCHER_RE, Row
 WRAPPERS = ("claude", "clauded", "claude6", "claudeb", "claudew", "claudeq", "claudez", "qwen")
 _DEFAULT = "clauded"  # the user's alias: claude --dangerously-skip-permissions
 BYPASS_FLAG = "--dangerously-skip-permissions"
+CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"  # the Codex CLI's own bypass; ctrl-p drops it
 # clauded, claude6 and claudew pass the bypass flag inside their profile functions, so asking permissions means the
 # plain `claude`; claudeq and claudez pass every argument through to claude and never add it themselves, so bypass
 # mode appends it after their name; claude and claudeb never bypass, and qwen is another tool.
@@ -105,7 +106,8 @@ def wrapper_argv(wrapper: str, ask_permissions: bool = False) -> list[str]:
 
 
 def resume_command(row: Row, wrapper: str | None, *, root: Path, ask_permissions: bool = False) -> Launch:
-    """Resume `row`. A Qwen Code session always resumes with `qwen`. A Claude session whose last launch was seen
+    """Resume `row`. A Codex session resumes with `codex [bypass flag] resume <sid>` (ctrl-p drops the flag). A Qwen
+    Code session always resumes with `qwen`. A Claude session whose last launch was seen
     live with its arguments (`row.launch_args`, recorded from the profile's marker) resumes exactly as launched:
     `<that alias> <its arguments, relaunch_args> -r <sid>`, any claude* alias, no table; `ask_permissions` adds
     `--nb`. Otherwise the explicit `wrapper` (ctrl-w);
@@ -121,6 +123,9 @@ def resume_command(row: Row, wrapper: str | None, *, root: Path, ask_permissions
     else:
         cwd = Path(".")
         warnings.append("session has no recorded folder")
+    if row.store == "codex":  # Codex CLI: no wrappers; resume by id (an explicit wrapper does not apply)
+        argv = ["codex"] if ask_permissions else ["codex", CODEX_BYPASS_FLAG]
+        return Launch(cwd, [*argv, "resume", row.sid], warnings)
     if row.store == "qwen":
         chosen = "qwen"
     elif (wrapper is None and getattr(row, "launch_args", None) is not None and row.wrapper

@@ -17,6 +17,8 @@ from pathlib import Path
 
 from sessions_live import proc_start_filetime
 
+import codex_store
+
 from . import stores
 from .paths import Env
 
@@ -29,7 +31,7 @@ DB_TIMEOUT_S = 30.0  # how long a write waits for another process's write (anoth
 # Bump when the columns change. The cache file is named after the version (`index_file`), so a new schema starts a
 # new file beside the old one instead of dropping its table: an older build still running against the old file
 # keeps its cache, and neither rebuilds the other's. The old file is left in place.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     store TEXT NOT NULL, sid TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT, name TEXT, display_name TEXT,
@@ -58,11 +60,11 @@ _FACT_COLS = ("path", "cwd", "name", "display_name", "first_ask", "last_ask", "l
               "assistant_msgs", "size", "mtime", "last_activity", "counted_to", "custom_title", "ai_title", "model")
 
 # The backend a session runs on (`Row.backend`): Claude Code against Anthropic (claude), a self-hosted Qwen model
-# (qwen, the claudeq wrapper) or Z.ai GLM (glm, claudez); Qwen Code sessions are another tool (qwencode).
-BACKENDS = ("claude", "qwen", "glm", "qwencode")
+# (qwen, the claudeq wrapper) or Z.ai GLM (glm, claudez); Qwen Code and Codex CLI sessions are other tools (qwencode, codex).
+BACKENDS = ("claude", "qwen", "glm", "qwencode", "codex")
 _WRAPPER_BACKEND = {"claudeq": "qwen", "claudez": "glm"}
 # the type the lists show for each backend (the resume list's tool column, the browser's tool badge)
-_BACKEND_LABEL = {"claude": "claude", "qwen": "qwen", "glm": "glm", "qwencode": "qwencli"}
+_BACKEND_LABEL = {"claude": "claude", "qwen": "qwen", "glm": "glm", "qwencode": "qwencli", "codex": "codex"}
 
 
 def index_file(data_dir: Path) -> Path:
@@ -76,6 +78,8 @@ def backend_of(store: str, wrapper: str | None, model: str | None) -> str:
     -> qwen); else `claude`."""
     if store == "qwen":
         return "qwencode"
+    if store == "codex":
+        return "codex"
     if wrapper in _WRAPPER_BACKEND:
         return _WRAPPER_BACKEND[wrapper]
     m = (model or "").lower()
@@ -97,6 +101,8 @@ def type_label(row: "Row") -> str:
     itself (claude6, a new alias: no table to extend); else the backend guessed from the model (`backend_label`)."""
     if row.store == "qwen":
         return "qwencli"
+    if row.store == "codex":
+        return "codex"
     if row.label and LABEL_RE.match(row.label):
         return row.label
     if row.wrapper and row.wrapper not in _PLAIN and LAUNCHER_RE.match(row.wrapper):
@@ -254,12 +260,14 @@ class Index:
     def __init__(self, env: Env, db_path: Path | None = None,
                  claude_live: Callable[[], list[dict] | None] | None = None,
                  pid_exists: Callable[[int], bool] | None = None, check_same_thread: bool = True,
-                 timeout: float = DB_TIMEOUT_S, launch_env: Callable[[int], dict | None] | None = None):
+                 timeout: float = DB_TIMEOUT_S, launch_env: Callable[[int], dict | None] | None = None,
+                 codex_live: Callable[[], dict[str, int]] | None = None):
         """`claude_live` (a `LiveSessions.snapshot`-shaped callable: dicts with session_id, pid, named) and
         `pid_exists` (Qwen registry check) are injectable for tests; by default the Claude registry is read
         directly (`claude_registry_live`) and Qwen pids are checked with `psutil.pid_exists`.
         `check_same_thread=False` lets other threads use the connection; the caller must then serialise every use
         (the session browser holds a lock, since pywebview calls each js_api method on a thread of its own).
+        `codex_live` (no arguments; Codex thread id -> pid) defaults to `codex_store.live_threads`.
         The file is shared by every `cc` and the browser: WAL lets readers go on while one of them refreshes, and a
         writer waits up to `timeout` seconds for another's write before sqlite raises `OperationalError`."""
         self.env = env
@@ -268,6 +276,7 @@ class Index:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_live = claude_live or (lambda: claude_registry_live(env.claude_home))
         self._pid_exists = pid_exists or _default_pid_exists
+        self._codex_live = codex_live or (lambda: codex_store.live_threads(env.codex_home))
         self._launch_env = launch_env or process_launch_env  # `launch_env(pid)`: injectable for tests
         self._launch_seen: set[tuple[int, str]] = set()  # live (pid, sid) whose launch is recorded
         self._db = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=check_same_thread)
@@ -313,7 +322,21 @@ class Index:
                     key = (store, path.stem)
                     if key not in found or st.st_mtime > found[key][1].st_mtime:
                         found[key] = (path, st)
+        for sid, path in self._codex_rollouts().items():
+            try:
+                found[("codex", sid)] = (path, path.stat())
+            except OSError:
+                continue  # vanished mid-listing
         return found
+
+    def _codex_rollouts(self) -> dict[str, Path]:
+        """id -> rollout of every terminal Codex session; none without a Codex home or when it is unreadable."""
+        if self.env.codex_home is None:
+            return {}
+        try:
+            return codex_store.terminal_rollouts(self.env.codex_home)
+        except OSError:
+            return {}
 
     def refresh(self, progress: Callable[[int, int], None] | None = None) -> int:
         """Bring the index in line with the transcripts on disk; returns rows inserted, updated or deleted."""
@@ -441,11 +464,19 @@ class Index:
     # ---- names and liveness ------------------------------------------------------------------------------------
 
     def _titles(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        if self.env.codex_home is not None:
+            try:
+                out.update(codex_store.titles(self.env.codex_home))  # thread ids are UUIDs: no clash with the rest
+            except OSError:
+                pass
         try:
             data = json.loads((self.env.claude_home / "session_titles.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {}
-        return {k: v for k, v in data.items() if isinstance(v, str) and v} if isinstance(data, dict) else {}
+            return out
+        if isinstance(data, dict):
+            out.update({k: v for k, v in data.items() if isinstance(v, str) and v})
+        return out
 
     def _live(self) -> dict[tuple[str, str], _Live]:
         """Live sessions with their raw registry `name`. The snapshot's own `name` is not used: it falls back to
@@ -462,6 +493,12 @@ class Index:
             if isinstance(pid, int) and not isinstance(pid, bool) and isinstance(sid, str) and sid \
                     and self._pid_exists(pid):
                 out[("qwen", sid)] = _Live(pid, _str(rec.get("name")), False)
+        if self.env.codex_home is not None:
+            try:
+                for sid, pid in (self._codex_live() or {}).items():
+                    out[("codex", sid)] = _Live(pid, "", False)
+            except Exception:  # noqa: BLE001 - psutil or the lock files failing must not fail a refresh
+                pass
         return out
 
     @staticmethod

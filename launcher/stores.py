@@ -20,7 +20,11 @@ _HEAD_START = 65_536
 TAIL_MAX_BYTES = 16 * 1024 * 1024  # the backwards read for the last ask/reply never grows past this
 _TAGS = ("local-command-caveat", "local-command-stdout", "system-reminder",
          "command-name", "command-message", "command-args", "command-contents")
-_TYPE_RE = re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"')
+_TYPE_RES = {  # byte prefilter per store: only lines naming one of its relevant record types are parsed
+    "claude": re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"'),
+    "qwen": re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"'),
+    "codex": re.compile(rb'"type"\s*:\s*"(user_message|agent_message)"'),
+}
 
 
 @dataclass
@@ -92,7 +96,20 @@ def _qwen_record(rec: dict) -> tuple[str, str] | None:
     return (t, text) if text.strip() else None
 
 
-_PARSERS: dict[str, Callable[[dict], tuple[str, str] | None]] = {"claude": _claude_record, "qwen": _qwen_record}
+def _codex_record(rec: dict) -> tuple[str, str] | None:
+    """Codex rollout line `{"timestamp", "type", "payload"}`: a human prompt is `event_msg` / `user_message`, a reply
+    `event_msg` / `agent_message` (both with `payload.message`). `response_item` user records carry injected context
+    (environment, AGENTS.md) and never count."""
+    payload = rec.get("payload")
+    if rec.get("type") != "event_msg" or not isinstance(payload, dict):
+        return None
+    kind = {"user_message": "user", "agent_message": "assistant"}.get(payload.get("type"))
+    text = payload.get("message")
+    return (kind, text) if kind and isinstance(text, str) and text.strip() else None
+
+
+_PARSERS: dict[str, Callable[[dict], tuple[str, str] | None]] = {"claude": _claude_record, "qwen": _qwen_record,
+                                                                           "codex": _codex_record}
 
 
 def _parse(line: bytes, parser) -> tuple[dict, tuple[str, str] | None] | None:
@@ -219,7 +236,7 @@ def _last_ts(path: Path, size: int, tail_bytes: int) -> float | None:
         n = min(n * 2, cap)
 
 
-def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, int, int, str | None, str | None]:
+def _scan(path: Path, parser, start: int, whole_lines_only: bool, type_re=_TYPE_RES["claude"]) -> tuple[int, int, int, str | None, str | None]:
     """(user asks, assistant replies, end offset, last custom-title, last ai-title) from byte `start` on.
     Only lines naming a relevant type are parsed. With `whole_lines_only`, a last line without its newline (still
     being written) is left out and `end` stops before it, so the next incremental scan picks it up whole."""
@@ -232,7 +249,7 @@ def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, 
             if whole_lines_only and not line.endswith(b"\n"):
                 break
             end += len(line)
-            if not _TYPE_RE.search(line):
+            if not type_re.search(line):
                 continue
             got = _parse(line, parser)
             if got is None or got[1] is None:
@@ -249,16 +266,16 @@ def _scan(path: Path, parser, start: int, whole_lines_only: bool) -> tuple[int, 
     return users, assistants, end, custom, ai
 
 
-def _count(path: Path, parser) -> tuple[int, int, str | None]:
+def _count(path: Path, parser, type_re) -> tuple[int, int, str | None]:
     """(user asks, assistant replies, name) over the whole file."""
-    users, assistants, _, custom, ai = _scan(path, parser, 0, whole_lines_only=False)
+    users, assistants, _, custom, ai = _scan(path, parser, 0, whole_lines_only=False, type_re=type_re)
     return users, assistants, custom or ai
 
 
 def count_messages(path: Path, store: str, start: int = 0) -> tuple[int, int, int, str | None, str | None]:
     """(user asks, assistant replies, end offset, last custom-title, last ai-title) in the complete lines from byte
     `start` on. Pass the previous `end` back as `start` to count only what was appended since."""
-    return _scan(Path(path), _PARSERS[store], start, whole_lines_only=True)
+    return _scan(Path(path), _PARSERS[store], start, whole_lines_only=True, type_re=_TYPE_RES[store])
 
 
 def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> SessionFacts:
@@ -269,7 +286,7 @@ def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> Sessi
     cwd, first = _head(path, st.st_size, parser)
     last_ask, last_reply, last_model = _tail(path, st.st_size, parser, tail_bytes)
     last_ts = _last_ts(path, st.st_size, tail_bytes)
-    users, assistants, name = _count(path, parser) if count else (0, 0, None)
+    users, assistants, name = _count(path, parser, _TYPE_RES[store]) if count else (0, 0, None)
     return SessionFacts(store, path.stem, path, cwd, name, first, last_ask, last_reply,
                         users, assistants, st.st_size, st.st_mtime, last_ts, last_model)
 
@@ -286,6 +303,19 @@ def read_qwen(path: Path, tail_bytes: int = 262_144, count: bool = True) -> Sess
         work_dir = None
     if isinstance(work_dir, str) and work_dir:
         facts.cwd = work_dir
+    return facts
+
+
+def read_codex(path: Path, tail_bytes: int = 262_144, count: bool = True) -> SessionFacts:
+    """A Codex rollout. It has no top-level `cwd` and its file stem is `rollout-<iso>-<id>`, so `sid` and `cwd`
+    come from the first line's `session_meta` (a rollout without one keeps the stem and no cwd)."""
+    from codex_store import read_meta  # not at the top: codex_store imports this module
+    facts = _facts("codex", path, tail_bytes, count)
+    meta = read_meta(Path(path)) or {}
+    if isinstance(meta.get("id"), str) and meta["id"]:
+        facts.sid = meta["id"]
+    cwd = meta.get("cwd")
+    facts.cwd = cwd if isinstance(cwd, str) and cwd else None
     return facts
 
 

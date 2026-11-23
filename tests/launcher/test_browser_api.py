@@ -54,6 +54,7 @@ def api(fake_env, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(fake_env.claude_home))
     monkeypatch.setenv("CC_LAUNCHER_QWEN_HOME", str(fake_env.qwen_home))
     monkeypatch.setenv("CC_LAUNCHER_DATA", str(fake_env.data_dir))
+    monkeypatch.setenv("CODEX_HOME", str(fake_env.data_dir.parent / "codex-none"))  # never the real ~/.codex
     popens = []
     monkeypatch.setattr(cs.subprocess, "Popen", lambda argv, **kw: popens.append((list(argv), kw)))
     monkeypatch.setattr(bridge, "pick_shell", lambda which=None: "pwsh")

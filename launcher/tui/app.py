@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # imported where used, so the resume list does not pay for th
 STYLE = Style.from_dict({
     "header": "#a3abb8", "rule": "#343a46", "dim": "#a3abb8", "name": "#e3e7ec",
     "sel": "bg:#2b3240", "cur": "bg:#e3e7ec #1b1e24",
-    "claude": "#8ab4f8", "qwen": "#c3a6ff", "glm": "#7fd8c8", "qwencli": "#ffd27a", "live": "#8fd19e",
+    "claude": "#8ab4f8", "qwen": "#c3a6ff", "glm": "#7fd8c8", "qwencli": "#ffd27a", "codex": "#f2a2c8", "live": "#8fd19e",
     "footer": "#a3abb8", "status": "#ffd27a",
     "title": "#ffd27a", "section": "#8ab4f8",
 })

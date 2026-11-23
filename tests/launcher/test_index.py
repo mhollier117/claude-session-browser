@@ -69,7 +69,7 @@ def test_refresh_indexes_both_stores_and_sorts_by_activity(fake_env):
     assert isinstance(r, Row) and r.cwd == str(net) and r.first_ask == "set up PXE" and r.last_reply == "Add the VLAN."
     assert (r.user_msgs, r.assistant_msgs, r.last_activity, r.live_pid, r.wrapper) == (1, 1, T0 - 3600, None, None)
     assert rows[0].cwd == str(ai) and rows[0].cwd_exists
-    assert (fake_env.data_dir / "index-v3.sqlite").is_file()
+    assert (fake_env.data_dir / "index-v4.sqlite").is_file()
 
 
 def test_refresh_rereads_only_changed_files(fake_env, monkeypatch):
@@ -432,7 +432,7 @@ def test_older_schema_cache_is_dropped_and_rebuilt(fake_env):
     db.commit()
     db.close()
     idx = Index(fake_env, claude_live=lambda: [], pid_exists=lambda pid: False)
-    assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 3
+    assert idx.rows() == [] and idx._db.execute("PRAGMA user_version").fetchone()[0] == index_mod._SCHEMA_VERSION == 4
 
 def test_incremental_refresh_follows_the_new_last_record_and_counts_each_message_once(fake_env):
     """A transcript that only grew is counted from its stored offset: its last_activity follows the new last
@@ -459,7 +459,7 @@ def test_incremental_refresh_follows_the_new_last_record_and_counts_each_message
 # ---- versioned cache file ----------------------------------------------------------------------------------------
 
 def test_index_uses_a_versioned_file_and_leaves_the_old_one_alone(fake_env):
-    """An older build keeps using `index.sqlite`: this one opens `index-v3.sqlite` beside it and never touches the
+    """An older build keeps using `index.sqlite`: this one opens `index-v4.sqlite` beside it and never touches the
     old file (no drop, no rebuild), so neither rebuilds the other's cache."""
     import sqlite3
     old = fake_env.data_dir / "index.sqlite"
@@ -475,7 +475,7 @@ def test_index_uses_a_versioned_file_and_leaves_the_old_one_alone(fake_env):
     write_claude_session(fake_env, cwd, "s1", [_u("ask", cwd)])
     idx = _index(fake_env)
     idx.refresh()
-    assert idx.db_path == fake_env.data_dir / "index-v3.sqlite" == index_mod.index_file(fake_env.data_dir)
+    assert idx.db_path == fake_env.data_dir / "index-v4.sqlite" == index_mod.index_file(fake_env.data_dir)
     assert idx.db_path.is_file() and [r.sid for r in idx.rows()] == ["s1"]
     idx.close()
     assert old.read_bytes() == before
@@ -576,4 +576,4 @@ def test_backend_model_survives_an_incremental_refresh_without_a_new_reply(fake_
 
 
 def test_backend_labels():
-    assert [index_mod.backend_label(b) for b in index_mod.BACKENDS] == ["claude", "qwen", "glm", "qwencli"]
+    assert [index_mod.backend_label(b) for b in index_mod.BACKENDS] == ["claude", "qwen", "glm", "qwencli", "codex"]

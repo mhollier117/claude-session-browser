@@ -34,6 +34,17 @@ def write_qwen_session(env: Env, work_dir: Path, sid: str, records: list[dict]) 
     return path
 
 
+def write_codex_session(env: Env, sid: str, records: list[dict], cwd: str | Path = "C:/proj", source="cli",
+                        day: str = "2026/11/18") -> Path:
+    """A Codex rollout `sessions/<day>/rollout-<iso>-<sid>.jsonl`: line 1 is `session_meta` (id, cwd, source), then
+    `records` (each already `{"timestamp", "type", "payload"}`)."""
+    meta = {"timestamp": "2026-11-18T09:29:34.000Z", "type": "session_meta",
+            "payload": {"id": sid, "cwd": str(cwd), "source": source}}
+    path = env.codex_home / "sessions" / day / f"rollout-2026-11-18T09-29-34-{sid}.jsonl"
+    _write_jsonl(path, [meta, *records])
+    return path
+
+
 def make_row(cwd, name: str, last_activity: float, sid: str = "s"):
     """A synthetic index Row (no transcript behind it) for tests that only need cwd, name and activity."""
     from launcher.index import Row

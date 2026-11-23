@@ -216,7 +216,10 @@ is a complete example.
 ## cc launcher
 
 `cc` resumes or starts a Claude Code or Qwen session in the terminal tab you are
-already in: one list of every Claude and Qwen session, and a short walk for a new one.
+already in: one list of every Claude, Qwen and Codex session, and a short walk for a new one.
+Codex CLI sessions (terminal ones from `~\.codex`; sub-agent, VS Code and imported ones are
+left out) show as `codex` and resume with `codex --dangerously-bypass-approvals-and-sandbox
+resume <id>` (ctrl-p drops the flag). Wrappers do not apply to them.
 The installer puts `cc.ps1` next to `ClaudeSessionBrowser.exe` and the launcher itself in
 the `cc` folder beside it (`cc\cc.exe`). Add one line to your PowerShell profile
 (`notepad $PROFILE`):
@@ -254,10 +257,10 @@ moves the picker. Every attempt, and the folder you finally chose, is appended t
 `%LOCALAPPDATA%\cc-launcher\suggest.log` (stage, name, latency, outcome and prompt size;
 never the API key); each step of the walk goes to `flow.log` beside it.
 
-The first run after this update rebuilds the index, which takes a few minutes; a second
+The first run after this update (it adds the Codex rows, schema v4) rebuilds the index, which takes a few minutes; a second
 `cc` or the app may report "index busy" meanwhile.
 
-**Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index-v3.sqlite` (the
+**Where things live, and overrides.** The index is `%LOCALAPPDATA%\cc-launcher\index-v4.sqlite` (the
 file name carries the schema version, so an older build keeps its own `index.sqlite`).
 Each location can be overridden with an environment variable:
 
@@ -267,6 +270,7 @@ Each location can be overridden with an environment variable:
 | `CC_LAUNCHER_DATA` | `%LOCALAPPDATA%\cc-launcher` | index, `suggest.log`, `flow.log`, `defaults.json`, remembered wrappers |
 | `CC_LAUNCHER_QWEN_HOME` | `~\.qwen` | Qwen's session store |
 | `CLAUDE_CONFIG_DIR` | `~\.claude` | Claude's session store |
+| `CODEX_HOME` | `~\.codex` | Codex's session store (read only) |
 
 The session browser's **New session** dialog uses the same launcher.
 
