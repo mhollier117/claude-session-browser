@@ -4860,7 +4860,44 @@ class Api:
             elif a.get("relogin_soon") and a.get("relogin_by"):
                 item["x"] = max(0, int((a["relogin_by"] - now) // 86400))
             accounts.append(item)
+        # Codex steht neben den Claude-Konten, nie an deren Stelle. Das Geraet
+        # nimmt hoechstens 6 Konten (MAX_ACCOUNTS) und beschriftet den
+        # Hauptbildschirm mit dem ERSTEN Konto mit l == 1: die Codex-Zeile
+        # kommt deshalb immer zuletzt und ist nur "live", wenn schon eine
+        # Claude-Zeile es ist. "l": 1 blendet am Geraet auch "Tap to use" aus;
+        # einen Wechsel-Wunsch fuer diese Zeile ignoriert _clawd_switch_request.
+        self._clawd_codex_index = None
+        cx = self._codex_usage_cached()
+        if cx is not None:
+            accounts = accounts[:5]
+            self._clawd_codex_index = len(accounts)
+            s5 = cx.get("s")
+            accounts.append({"n": "Codex",
+                             "l": 1 if any(a["l"] == 1 for a in accounts) else 0,
+                             "r": 0 if cx.get("limited") else 1,
+                             "s": s5 if s5 is not None else -1,
+                             "sr": mins(cx.get("s_reset_at")),
+                             "w": cx.get("w") if cx.get("w") is not None else -1,
+                             "wr": mins(cx.get("w_reset_at")),
+                             "f": -1, "fr": 0})
         return {"se": sessions, "ac": accounts, "vk": self._clawd_voice_mode()}
+
+    _CODEX_USAGE_TTL_S = 30
+
+    def _codex_usage_cached(self):
+        """Codex-Nutzung (codex_store.usage), 30 s zwischengespeichert; None
+        ohne Messung oder bei einem Fehler."""
+        now = time.time()
+        at = getattr(self, "_codex_usage_cache_at", 0.0)
+        if at and 0 <= now - at < self._CODEX_USAGE_TTL_S:
+            return getattr(self, "_codex_usage_cache", None)
+        try:
+            import codex_store
+            val = codex_store.usage(codex_store.codex_home(), now)
+        except Exception:
+            val = None
+        self._codex_usage_cache, self._codex_usage_cache_at = val, now
+        return val
 
     def _clawd_voice_mode(self):
         """Fuer die Voice-Taste des Clawdmeters (voicemode.pick): "c" = Claude-
@@ -4884,7 +4921,12 @@ class Api:
         Sessions."""
         from clawdmeter import SE_MAX, SE_NAME_MAX, _ascii
         from sessions_live import gadget_view
-        return gadget_view(self._live_sessions() or [], time.time(),
+        live = []
+        for s in self._live_sessions() or []:
+            if s.get("tool") == "codex":
+                s = dict(s, name="cx " + str(s.get("name") or ""))
+            live.append(s)
+        return gadget_view(live, time.time(),
                            form=lambda n: _ascii(n, SE_NAME_MAX),
                            name_max=SE_NAME_MAX, limit=SE_MAX)
 
@@ -4997,6 +5039,10 @@ class Api:
         Anmeldung vorher sichern, atomar schreiben, nachlesen, Tray-Menue).
         Die Konten-Seite zeichnet sich alle 5 s selbst neu und sieht den
         Wechsel dann; ins Fenster wird nichts geschoben."""
+        if index is not None and index == getattr(self, "_clawd_codex_index", None):
+            self._clawd_log(f"Account switch from the gadget ({index}, {nick!r}) "
+                            "ignored: Codex has no account switch")
+            return
         try:
             acct, grund = self._clawd_resolve_account(index, nick)
         except Exception as e:
@@ -5342,6 +5388,25 @@ class Api:
                          name="usage-kick").start()
 
     def limit_state(self):
+        """Limit-Stand fuer die Einstellungs-Seite: der von Claude
+        (_limit_state_claude) plus, daneben, der von Codex unter "codex"
+        (None ohne Messung). Codex ersetzt nichts."""
+        out = self._limit_state_claude()
+        cx = self._codex_usage_cached()
+        if cx is None:
+            out["codex"] = None
+        else:
+            now = time.time()
+            sr, wr = float(cx.get("s_reset_at") or 0), float(cx.get("w_reset_at") or 0)
+            out["codex"] = {"spct": cx.get("s") if cx.get("s") is None else int(cx["s"]),
+                            "sreset_at": sr if sr > now else 0,
+                            "wpct": int(cx.get("w") or 0),
+                            "wreset_at": wr if wr > now else 0,
+                            "hit": bool(cx.get("limited")),
+                            "plan": cx.get("plan") or ""}
+        return out
+
+    def _limit_state_claude(self):
         """Aktueller Stand des 5-Stunden-Limits fuer die Einstellungs-Seite.
 
         Zwei Quellen, und die Header gewinnen: sie wissen alles, was das
@@ -8672,14 +8737,24 @@ function paintLimit(){
   if(d.no_five || (d.fpct !== null && d.fpct !== undefined)){
     // Tarif ohne 5-Stunden-Limit (Ultra) und/oder mit eigenem Fable-Wochenlimit.
     box.innerHTML = limitKacheln(d.no_five ? null : (d.hit ? 100 : d.pct), d.reset_at,
-                                 d.wpct, d.wreset_at, d.fpct, d.freset_at, d.plan);
+                                 d.wpct, d.wreset_at, d.fpct, d.freset_at, d.plan)
+                    + codexKacheln(d.codex);
     return;
   }
   let html = limitCard(d.hit ? 100 : d.pct, d.reset_at, t('5 Stunden'), d.hit);
   // Wochenwert nur wenn er wirklich vorliegt - ohne Clawdmeter-Abfrage
   // steht er auf 0 und eine leere Kachel waere irrefuehrend.
   if(d.wpct > 0 || d.wreset_at) html += limitCard(d.wpct, d.wreset_at, t('Woche'), false);
-  box.innerHTML = html;
+  box.innerHTML = html + codexKacheln(d.codex);
+}
+// Codex neben Claude: eigene Kacheln, ersetzt nie die von Claude.
+function codexKacheln(c){
+  if(!c) return '';
+  let html = '';
+  const hasS = !(c.spct === null || c.spct === undefined);
+  if(hasS) html += limitCard(c.spct, c.sreset_at, t('Codex – 5 Stunden'), c.hit);
+  html += limitCard(c.wpct, c.wreset_at, t('Codex – Woche'), c.hit && !hasS);
+  return html;
 }
 async function refreshLimit(){
   if(!document.getElementById('limitbox')) return;

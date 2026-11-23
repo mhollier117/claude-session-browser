@@ -837,6 +837,8 @@ TRANSLATIONS = {
         # ---- Konten (mehrere Claude-Accounts) ------------------------------
         "Konten": "Accounts",
         "Fable · Woche": "Fable · week",
+        "Codex – Woche": "Codex – week",
+        "Codex – 5 Stunden": "Codex – 5 hours",
         "Fable-Limit melden": "Report the Fable limit",
         "Eine kurze, rein informative Meldung, wenn das Fable-Wochenlimit eines "
         "Kontos voll ist – die anderen Modelle gehen weiter. Einmal pro Zeitraum.":

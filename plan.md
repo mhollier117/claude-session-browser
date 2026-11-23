@@ -1,5 +1,22 @@
 # Claude Session Browser (mhollier117 fork) — state
 
+## Codex support (2026-11-23, branch `codex`, not pushed, NOT released yet)
+- Built (Tasks 1-5, commits `5d6143b`..Task 5): `codex_store.py` reads `~/.codex` (sessions, titles, liveness, usage);
+  Codex sessions in the index (`index-v4.sqlite`) and the browser list with badge, filter and `codex resume`;
+  Codex live sessions join the buddy and the gadget session list (`tool: "codex"`); Codex usage beside Claude's.
+- Usage (Task 5): `Api._codex_usage_cached()` (30 s). Clawdmeter `ac` list = at most 5 Claude accounts, then one
+  `Codex` row (`l: 1` only when a Claude row is live, so the device's main-screen nickname stays Claude's; that also
+  hides "Tap to use"). `_clawd_switch_request` ignores the Codex row (`_clawd_codex_index`). Gadget sessions of Codex
+  are named `cx <name>`. `_clawd_usage` (main payload) unchanged. `limit_state()` = `_limit_state_claude()` + `codex`
+  block; the limit page shows "Codex - 5 hours" / "Codex - week" cards after Claude's. Tests: `tests/test_codex_gadget.py`.
+- Pending manual checks (need a human and the devices):
+  - Task 3: browser badge, type filter, double-click resume of a Codex session.
+  - Task 4: buddy reacts to a Codex turn; gadget long-press focuses the Codex tab.
+  - Task 5: Codex row on the C6 (2.16) and the 7" (account swipe, rotation view) with weekly % and "active", no
+    "Tap to use" on it, `cx ` sessions in the session swipe, Claude main usage screen unchanged.
+- Release not cut: after review, fast-forward `main`, `.elease.ps1 -Version 1.7.1.0 -Notes "Codex sessions, live state and usage" -Publish`;
+  first run after the update rebuilds the index (few minutes).
+
 Repo: `mhollier117/claude-session-browser` (public; keep it public). Upstream: `juppeee/claude-session-browser`.
 No GitHub Actions workflows in this repo: pushes cost no CI minutes.
 
