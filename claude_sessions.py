@@ -476,6 +476,20 @@ _CLAWD_STATE = {
 }
 
 
+def _clawd_tool_code(sess, kinds=None):
+    """The "b" field of a session's {"k":"se"} message: which tool or backend the
+    session runs on, for firmware that colours sessions by it. "x" = Codex,
+    "g" = Claude Code on Z.ai GLM (claudez), "q" = Claude Code on Qwen (claudeq),
+    None = Claude Code on Anthropic (no field). The session's model decides; while
+    it has none yet, the launcher index's backend for that session id (`kinds`)."""
+    if sess.get("tool") == "codex":
+        return "x"
+    model = str(sess.get("model") or "").lower()
+    kind = ("glm" if "glm" in model else "qwen" if "qwen" in model
+            else (kinds or {}).get(sess.get("session_id")))
+    return {"glm": "g", "qwen": "q"}.get(kind)
+
+
 def _clawd_context(sess, pct_key, window_key):
     """Kontextbelegung einer Session fuer das Clawdmeter, z.B. {"cx": 33,
     "cw": "1M"}; leer, solange sie noch keine Antwort mit Nutzung hat."""
@@ -4365,6 +4379,7 @@ class Api:
                 self._launcher_qwen = None
                 self._launcher_codex = None
                 self._launcher_backends = None
+                self._launcher_backend_kind = None
                 self._launcher_thread = None
                 self._launcher_suggestions = PendingSuggestions()
                 self._launcher_lock = threading.RLock()
@@ -4416,6 +4431,8 @@ class Api:
                 self._launcher_qwen = [r for r in rows if r.store == "qwen"]
                 self._launcher_codex = [r for r in rows if r.store == "codex"]
                 self._launcher_backends = {r.sid: type_label(r) for r in rows if r.store == "claude"}
+                # backend per Claude session (claude | qwen | glm), for the Clawdmeter's "b" field
+                self._launcher_backend_kind = {r.sid: r.backend for r in rows if r.store == "claude"}
         except Exception as e:
             _launcher_log(f"Qwen sessions not refreshed: {type(e).__name__}: {e}")
         finally:
@@ -4842,8 +4859,9 @@ class Api:
                 ws = sess["wait_since"]
                 item["ws"] = int(ws) + time.localtime(ws).tm_gmtoff
             item.update(_clawd_context(sess, "c", "w"))
-            if sess.get("tool") == "codex":
-                item["b"] = "x"      # firmware that colours rows by tool; older firmware ignores it
+            code = _clawd_tool_code(sess, getattr(self, "_launcher_backend_kind", None))
+            if code:
+                item["b"] = code     # firmware that colours rows by tool; older firmware ignores it
             sessions.append(item)
         accounts = []
         try:

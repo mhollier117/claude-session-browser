@@ -426,6 +426,7 @@ class LiveSessions:
             "ctx_tokens": t.ctx_tokens if t else None,
             "ctx_window": ctx_window,         # tokens, None = unknown
             "ctx_pct": ctx_pct,               # 0-100, None = unknown
+            "model": (t.model if t else "") or "",   # last reply's model ("" until the first reply)
         }
 
 

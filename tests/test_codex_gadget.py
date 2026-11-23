@@ -127,6 +127,20 @@ def test_session_messages_mark_the_tool():
     assert "b" not in by_name["api"]
 
 
+def test_session_messages_mark_glm_and_qwen_backends():
+    # Claude Code on Z.ai GLM (claudez) -> "g", on Qwen (claudeq) -> "q", from the
+    # session's model; without a model yet, the session index's backend decides.
+    a = app_with([acct("A", live=True)],
+                 [dict(sess("z"), model="glm-5.1"), dict(sess("q"), model="Qwen3-Coder-480B"),
+                  dict(sess("idx"), model=""), dict(sess("plain"), model="claude-opus-5-5")])
+    a._launcher_backend_kind = {"idx": "glm"}
+    by_name = {s["n"]: s for s in a._clawd_extras()["se"]}
+    assert by_name["z"]["b"] == "g"
+    assert by_name["q"]["b"] == "q"
+    assert by_name["idx"]["b"] == "g"
+    assert "b" not in by_name["plain"]
+
+
 def test_switch_request_to_codex_row_ignored():
     a = app_with([acct("A", live=True), acct("B")])
     a._clawd_extras()
