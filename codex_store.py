@@ -17,6 +17,7 @@ from pathlib import Path
 from launcher.stores import _iso_to_epoch
 
 TAIL_MAX_BYTES = 16 * 1024 * 1024
+_INCR_MAX_BYTES = 64 * 1024 * 1024  # CodexLive re-seeds instead of reading a larger appended gap
 _META_MAX_BYTES = 16 * 1024 * 1024
 _SIX_HOURS_MIN = 360
 _ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -128,15 +129,27 @@ class CodexTail:
     model: str | None
 
 
-def _whole_lines(path: Path, size: int, n: int) -> list[bytes]:
-    """The complete lines of the last `n` bytes: a mid-file read drops its partial first line, and a last line
-    without its newline (still being written) is dropped."""
+def _whole_lines(path: Path, size: int, n: int) -> tuple[list[bytes], int]:
+    """(the complete lines of the last `n` bytes, the offset just past the last of them): a mid-file read drops its
+    partial first line, and a last line without its newline (still being written) is dropped and lies past the
+    offset, so an incremental read from there picks it up whole."""
     start = max(0, size - n)
     with open(path, "rb") as fh:
         fh.seek(start)
-        lines = fh.read().split(b"\n")
+        data = fh.read()
+    lines = data.split(b"\n")
+    end = start + len(data) - len(lines[-1])
     lines = lines[:-1]  # after the final newline (empty) or a partial last line
-    return lines[1:] if start > 0 else lines
+    return (lines[1:] if start > 0 else lines), end
+
+
+def _lines_from(path: Path, offset: int) -> tuple[list[bytes], int]:
+    """(the complete lines from byte `offset` on, the offset just past the last of them)."""
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        data = fh.read()
+    cut = data.rfind(b"\n")
+    return ([], offset) if cut < 0 else (data[:cut].split(b"\n"), offset + cut + 1)
 
 
 def _limit_hit(rl: dict) -> bool:
@@ -150,64 +163,81 @@ def _limit_hit(rl: dict) -> bool:
     return False
 
 
-def _scan_tail(lines: list[bytes]) -> tuple[CodexTail, bool, bool]:
-    """(tail facts of these lines, turn state seen, rate limits seen)."""
-    last_ts = rate_ts = ctx_tokens = ctx_window = model = turn_model = rate_limits = None
-    turn: bool | None = None
-    for line in lines:
+class _TailState:
+    """The running facts of a rollout, fed its lines in file order. `read_tail` feeds a fresh one the bounded tail;
+    `CodexLive` keeps one per live rollout and feeds it only the lines appended since."""
+
+    def __init__(self) -> None:
+        self.last_ts = self.rate_ts = self.ctx_tokens = self.ctx_window = None
+        self.model = self.turn_model = self.rate_limits = None
+        self.turn: bool | None = None  # None until a turn event is seen
+
+    def feed(self, line: bytes) -> None:
         rec = _json_obj(line)
         if rec is None:
-            continue
+            return
         ts = _iso_to_epoch(rec.get("timestamp"))
         if ts is not None:
-            last_ts = ts
+            self.last_ts = ts
         payload = rec.get("payload")
         if rec.get("type") == "turn_context" and isinstance(payload, dict):
             m = payload.get("model")
             if isinstance(m, str) and m.strip():
-                turn_model = m.strip()
-            continue
+                self.turn_model = m.strip()
+            return
         if rec.get("type") != "event_msg" or not isinstance(payload, dict):
-            continue
+            return
         kind = payload.get("type")
         if kind == "task_started":
-            turn = True
+            self.turn = True
         elif kind in ("task_complete", "turn_aborted"):
-            turn = False
+            self.turn = False
         elif kind == "token_count":
             rl = payload.get("rate_limits")
             if isinstance(rl, dict):
-                rate_limits, rate_ts = rl, ts
+                self.rate_limits, self.rate_ts = rl, ts
             info = payload.get("info")
             if isinstance(info, dict):
                 last = info.get("last_token_usage")
                 tokens = last.get("input_tokens") if isinstance(last, dict) else None
                 window = info.get("model_context_window")
                 if isinstance(tokens, int):
-                    ctx_tokens = tokens
+                    self.ctx_tokens = tokens
                 if isinstance(window, int):
-                    ctx_window = window
+                    self.ctx_window = window
         elif kind == "thread_settings_applied":
             settings = payload.get("thread_settings")
             m = settings.get("model") if isinstance(settings, dict) else None
             if isinstance(m, str) and m.strip():
-                model = m.strip()
-    tail = CodexTail(last_ts, bool(turn), _limit_hit(rate_limits) if rate_limits else False, rate_limits, rate_ts,
-                     ctx_tokens, ctx_window, turn_model or model)  # turn_context is the real source
-    return tail, turn is not None, rate_limits is not None
+                self.model = m.strip()
+
+    def tail(self) -> CodexTail:
+        rl = self.rate_limits
+        return CodexTail(self.last_ts, bool(self.turn), _limit_hit(rl) if rl else False, rl, self.rate_ts,
+                         self.ctx_tokens, self.ctx_window,
+                         self.turn_model or self.model)  # turn_context is the real source
+
+
+def _seed(path: Path, tail_bytes: int = 262_144) -> tuple[_TailState, int]:
+    """(state of the end of a rollout, offset just past the last complete line read), reading backwards in doubling
+    steps (capped at `TAIL_MAX_BYTES`) until both a turn event and rate limits are found, or the start of the file.
+    Raises OSError."""
+    size = path.stat().st_size
+    n = min(max(tail_bytes, 1), TAIL_MAX_BYTES)
+    while True:
+        lines, end = _whole_lines(path, size, n)
+        state = _TailState()
+        for line in lines:
+            state.feed(line)
+        if (state.turn is not None and state.rate_limits is not None) or n >= size or n >= TAIL_MAX_BYTES:
+            return state, end
+        n = min(n * 2, TAIL_MAX_BYTES)
 
 
 def read_tail(path: Path, tail_bytes: int = 262_144) -> CodexTail:
-    """Facts from the end of a rollout, reading backwards in doubling steps (capped at 16 MB) until both a turn
-    event and rate limits are found, or the start of the file."""
+    """Facts from the end of a rollout (see `_seed`)."""
     try:
-        size = path.stat().st_size
-        n = min(max(tail_bytes, 1), TAIL_MAX_BYTES)
-        while True:
-            tail, has_turn, has_rate = _scan_tail(_whole_lines(path, size, n))
-            if (has_turn and has_rate) or n >= size or n >= TAIL_MAX_BYTES:
-                return tail
-            n = min(n * 2, TAIL_MAX_BYTES)
+        return _seed(path, tail_bytes)[0].tail()
     except OSError:
         return CodexTail(None, False, False, None, None, None, None, None)
 
@@ -331,8 +361,10 @@ def live_threads(home: Path, procs: list[dict] | None = None) -> dict[str, int]:
 class CodexLive:
     """Open terminal Codex sessions as the dicts `sessions_live.LiveSessions._describe` makes, plus "tool": "codex".
     Polled about once a second, so it is cheap: the process scan, rollout listing and titles are refreshed at most
-    every `enum_every` seconds (the injected clock decides), and a rollout's tail is re-read only when its
-    (size, mtime) changed."""
+    every `enum_every` seconds (the injected clock decides). A live rollout's state is seeded once with the bounded
+    tail read (`_seed`) and then fed only the complete lines appended since, so a long turn stays open however far
+    back its task_started lies. The file shrinking (rewritten) or a gap over `_INCR_MAX_BYTES` re-seeds; a rollout
+    that stops being live drops its state."""
 
     def __init__(self, home: Path | None = None, clock=time.time, procs=None, enum_every: float = 5.0):
         self.home = home if home is not None else codex_home()
@@ -343,7 +375,7 @@ class CodexLive:
         self._live: dict[str, int] = {}
         self._paths: dict[str, Path] = {}
         self._titles: dict[str, str] = {}
-        self._tails: dict[Path, tuple[tuple[int, float], CodexTail]] = {}
+        self._tails: dict[Path, list] = {}  # path -> [_TailState, offset just past the last line fed]
         self._metas: dict[Path, dict] = {}
 
     def _refresh(self, now: float) -> None:
@@ -355,16 +387,21 @@ class CodexLive:
         self._titles = titles(self.home)
 
     def _tail(self, path: Path) -> tuple[CodexTail, float]:
-        """(tail, mtime) of a rollout, the tail cached per (size, mtime)."""
+        """(tail, mtime) of a rollout: seeded on first sight, after a shrink or a too-large gap; otherwise only the
+        complete lines appended since the last poll are read."""
         try:
             st = path.stat()
+            entry = self._tails.get(path)
+            if entry is None or st.st_size < entry[1] or st.st_size - entry[1] > _INCR_MAX_BYTES:
+                entry = self._tails[path] = list(_seed(path))
+            elif st.st_size > entry[1]:
+                lines, entry[1] = _lines_from(path, entry[1])
+                for line in lines:
+                    entry[0].feed(line)
         except OSError:
+            self._tails.pop(path, None)
             return CodexTail(None, False, False, None, None, None, None, None), 0.0
-        key = (st.st_size, st.st_mtime)
-        hit = self._tails.get(path)
-        if hit is None or hit[0] != key:
-            hit = self._tails[path] = (key, read_tail(path))
-        return hit[1], st.st_mtime
+        return entry[0].tail(), st.st_mtime
 
     def snapshot(self) -> list[dict]:
         import sessions_live as sl
@@ -401,7 +438,9 @@ class CodexLive:
                 "ctx_tokens": tail.ctx_tokens, "ctx_window": tail.ctx_window if ctx_pct is not None else None,
                 "ctx_pct": ctx_pct, "tool": "codex",
             })
-        for path in [p for p in self._tails if p not in set(self._paths.values())]:
+        live_paths = {self._paths.get(i) for i in self._live}
+        for path in [p for p in self._tails if p not in live_paths]:
             self._tails.pop(path, None)
+        for path in [p for p in self._metas if p not in live_paths]:
             self._metas.pop(path, None)
         return out

@@ -1,12 +1,12 @@
 """CodexLive: open terminal Codex sessions as live-session dicts (fake homes, injected procs and clock)."""
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
 
 import sessions_live as sl
 from codex_store import CodexLive
-from tests.test_codex_store import T, ev, proc, sessions, token_count, write_rollout
+from tests.test_codex_store import T, ev, iso, proc, sessions, token_count, write_rollout
 
 ID1 = "019a0000-0000-7000-8000-000000000001"
 ID2 = "019a0000-0000-7000-8000-000000000002"
@@ -88,19 +88,71 @@ def test_codex_live_only_running_sessions(tmp_path):
     assert [s["session_id"] for s in c.snapshot()] == [ID1]
 
 
-def test_codex_live_rereads_tail_only_when_file_changes(tmp_path, monkeypatch):
+def append(path: Path, *recs: dict, raw: bytes = b"") -> None:
+    """Append records (as `ev` makes them, with "ts") the way Codex does, plus optional raw bytes."""
+    with open(path, "ab") as fh:
+        for r in recs:
+            fh.write(json.dumps({"timestamp": iso(r.get("ts", T)), "type": r.get("type", "event_msg"),
+                                 "payload": r["payload"]}).encode() + b"\n")
+        fh.write(raw)
+
+
+def counting_seed(monkeypatch):
     import codex_store
+    calls = []
+    real = codex_store._seed
+    monkeypatch.setattr(codex_store, "_seed", lambda p, *a: calls.append(p) or real(p, *a))
+    return calls
+
+
+def test_codex_live_reads_only_what_was_appended(tmp_path, monkeypatch):
     path = write_rollout(sessions(tmp_path), ID1, [ev("task_started", T - 5)])
     c = CodexLive(tmp_path, clock=lambda: T, procs=[proc(1, T - 500, "resume", ID1)])
-    calls = []
-    real = codex_store.read_tail
-    monkeypatch.setattr(codex_store, "read_tail", lambda p: calls.append(p) or real(p))
+    seeds = counting_seed(monkeypatch)
     assert c.snapshot()[0]["state"] == sl.WORKING
     c.snapshot()
-    assert len(calls) == 1
-    write_rollout(sessions(tmp_path), ID1, [ev("task_started", T - 5), ev("task_complete", T - 1)])
-    os.utime(path, (T + 7, T + 7))
-    assert c.snapshot()[0]["state"] == sl.DONE and len(calls) == 2
+    assert len(seeds) == 1
+    append(path, ev("task_complete", T - 1))
+    assert c.snapshot()[0]["state"] == sl.DONE and len(seeds) == 1   # growth is read incrementally
+
+
+def test_codex_live_long_turn_stays_open_past_the_tail_cap(tmp_path, monkeypatch):
+    """A turn whose task_started lies further back than the bounded tail read stays open while lines without turn
+    events append, and closes on task_complete."""
+    import codex_store
+    path = write_rollout(sessions(tmp_path), ID1, [ev("task_started", T - 50)])
+    c = CodexLive(tmp_path, clock=lambda: T, procs=[proc(1, T - 500, "resume", ID1)])
+    seeds = counting_seed(monkeypatch)
+    assert c.snapshot()[0]["state"] == sl.WORKING
+    monkeypatch.setattr(codex_store, "TAIL_MAX_BYTES", 4096)
+    for i in range(40):
+        append(path, ev("agent_message", T - 40 + i, message="x" * 400))
+    s = c.snapshot()[0]
+    assert s["state"] == sl.WORKING and s["since"] == T - 1
+    append(path, token_count(T - 1, 10.0, ctx=237500), ev("task_complete", T - 1))
+    s = c.snapshot()[0]
+    assert s["state"] == sl.DONE and s["ctx_pct"] == 50 and len(seeds) == 1
+
+
+def test_codex_live_partial_line_is_read_once_complete(tmp_path, monkeypatch):
+    path = write_rollout(sessions(tmp_path), ID1, [ev("task_started", T - 5)])
+    c = CodexLive(tmp_path, clock=lambda: T, procs=[proc(1, T - 500, "resume", ID1)])
+    line = json.dumps({"timestamp": iso(T - 1), "type": "event_msg", "payload": {"type": "task_complete"}}).encode()
+    append(path, raw=line[:30])
+    assert c.snapshot()[0]["state"] == sl.WORKING
+    append(path, raw=line[30:] + b"\n")
+    assert c.snapshot()[0]["state"] == sl.DONE
+
+
+def test_codex_live_shrunk_file_reseeds(tmp_path, monkeypatch):
+    path = write_rollout(sessions(tmp_path), ID1, [ev("task_started", T - 5)] +
+                         [ev("agent_message", T - 4, message="x" * 400) for _ in range(5)])
+    c = CodexLive(tmp_path, clock=lambda: T, procs=[proc(1, T - 500, "resume", ID1)])
+    seeds = counting_seed(monkeypatch)
+    assert c.snapshot()[0]["state"] == sl.WORKING
+    write_rollout(sessions(tmp_path), ID1, [ev("task_complete", T - 2)])   # rewritten, smaller
+    assert path.stat().st_size < 1000
+    assert c.snapshot()[0]["state"] == sl.DONE and len(seeds) == 2
 
 
 def test_codex_live_enumeration_is_throttled(tmp_path, monkeypatch):
