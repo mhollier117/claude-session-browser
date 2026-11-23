@@ -2,6 +2,7 @@
 
 ## Releasing
 - Release from the main checkout: `.\release.ps1 -Version x.y.z.n -Notes "..." -Publish`. It ships whatever `main` has: fast-forward first (`git merge --ff-only launcher`) and confirm the change is on main (1.7.0.5 shipped without its change because the merge failed and the release ran anyway).
+- Without `-Publish`, release.ps1 leaves a local "Release x" commit whose version.json announces the new version. The updater reads version.json from `main` (raw GitHub), so do not push `main` until the release is published: pushing a later commit takes that version.json along and installed copies are offered an installer that 404s (happened with 1.7.0.10, reverted).
 - release.ps1 prints "Published" even when `gh release create` failed: check with `gh release list --repo mhollier117/claude-session-browser --limit 1`.
 - Push and publish need gh's active account to be `mhollier117`; with `mhollierBPT` active the push gets 403. Never `gh auth switch`: for one command set `$env:GH_TOKEN = gh auth token --user mhollier117`.
 
