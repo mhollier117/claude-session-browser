@@ -4399,10 +4399,12 @@ class Api:
             labels = None
             if not getattr(self, "_alias_labels_read", False):
                 self._alias_labels_read = True
-                from launcher.bridge import profile_alias_labels
-                labels = profile_alias_labels()
-                if labels:
-                    _launcher_log(f"alias labels from the profile: {labels}")
+                from launcher import bridge as _bridge
+                info = _bridge.profile_info()
+                labels = info["labels"]
+                self._profile_wrappers = info["wrappers"]
+                if labels or info["wrappers"]:
+                    _launcher_log(f"from the profile: labels {labels}, wrappers {info['wrappers']}")
             with self._launcher_lock:
                 from launcher.index import type_label
                 idx = self._launcher_idx(refresh=force)
@@ -4489,6 +4491,17 @@ class Api:
         except Exception as e:  # noqa: BLE001 - the index is optional here
             _launcher_log(f"resume wrapper lookup failed: {type(e).__name__}: {e}")
         return wrapper_argv(default_wrapper(None, None))
+
+    @_launcher_api
+    def launcher_wrappers(self):
+        """The New session dialog's wrappers: the ones the PowerShell profile defines (read once per run in the
+        background, `bridge.profile_info`), so a wrapper missing on this PC isn't offered and a new alias is; the
+        launcher's own list until that read is done."""
+        try:
+            from launcher.bridge import available_wrappers
+            return {"ok": True, "wrappers": available_wrappers(getattr(self, "_profile_wrappers", None) or [])}
+        except Exception as e:  # noqa: BLE001 - the dialog keeps the list it has
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     @_launcher_api
     def launcher_rows(self):
@@ -9350,7 +9363,7 @@ async function obFinish(){
 // backend is launcher/bridge.py behind Api.launcher_*; every launcher call can
 // answer {ok:false, error}, which is shown, never left hanging.
 let TOOL_FILTER = 'all', TOOL_SUB = 'both';
-const LN_WRAPPERS = __LAUNCHER_WRAPPERS__;
+let LN_WRAPPERS = __LAUNCHER_WRAPPERS__;   // replaced by the profile's own list on open (lnLoadWrappers)
 // The list types: claude, the backends guessed from a model (qwen, glm), Qwen Code (qwencli), and any alias
 // a session was launched with (claudek, claudez, ...: whatever the sessions carry, no table to extend).
 const TOOL_STYLED = ['claude','qwen','glm','qwencli'];
@@ -9450,6 +9463,19 @@ function lnOpen(){
   lnRender();
   setTimeout(()=>inp.focus(), 50);
   lnGoto('');
+  lnLoadWrappers();
+}
+// The wrappers this PC's profile defines (no claudeb/claudew where they don't exist, any new claude* alias).
+function lnLoadWrappers(){
+  try{
+    Promise.resolve(api.launcher_wrappers()).then(r=>{
+      if(r && r.ok!==false && Array.isArray(r.wrappers) && r.wrappers.length){
+        LN_WRAPPERS=r.wrappers;
+        if(LN.wrapper && !LN_WRAPPERS.includes(LN.wrapper) && !LN.wrapperSet) LN.wrapper=LN_WRAPPERS[0];
+        if(lnIsOpen()) lnRenderWrappers();
+      }
+    }).catch(()=>{});
+  }catch(e){}
 }
 // Cancel always works, also while a request runs: its answer is then ignored
 // (only a started session is still reported).

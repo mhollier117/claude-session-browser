@@ -146,6 +146,38 @@ def test_profile_alias_labels_parses_the_hidden_shell_output():
     assert profile_alias_labels(shell="pwsh", run=boom) == {}
 
 
+def test_profile_info_reads_labels_and_the_defined_wrappers():
+    from types import SimpleNamespace
+    from launcher.bridge import profile_info
+    out = ('LABELS:{"claudek":"kimi"}\n'
+           'WRAPPERS:["claude","clauded","claude6","claudek","claudez","qwen","notmine","claude-repair x",'
+           '"claude-update","claude-monitor"]\n')  # claude-* helper functions are not launchers
+    info = profile_info(shell="pwsh", run=lambda *a, **k: SimpleNamespace(stdout=out, returncode=0))
+    assert info == {"labels": {"claudek": "kimi"},
+                    "wrappers": ["claude", "claude6", "clauded", "claudek", "claudez", "qwen"]}
+    assert profile_info(shell="pwsh", run=lambda *a, **k: SimpleNamespace(stdout="", returncode=1)) == \
+        {"labels": {}, "wrappers": []}
+
+
+def test_available_wrappers_only_what_the_profile_defines():
+    from launcher.bridge import available_wrappers
+    # claudeb/claudew are not defined on this PC; claudek and claudezs are
+    found = ["claude", "clauded", "claude6", "claudek", "claudeq", "claudez", "claudezs", "qwen"]
+    assert available_wrappers(found) == ["claude", "clauded", "claude6", "claudeq", "claudez", "claudek", "claudezs",
+                                         "qwen"]
+    assert available_wrappers([]) == list(launch.WRAPPERS)  # before the profile was read
+
+
+def test_new_session_accepts_any_claude_alias(fake_env):
+    from launcher import bridge
+    (fake_env.root / "home" / "ai").mkdir(parents=True, exist_ok=True)
+    payload = lambda w: {"name": "x", "rel": "home/ai", "wrapper": w, "github": None}
+    assert bridge.parse_new(fake_env.root, payload("claudek")).wrapper == "claudek"
+    assert bridge.parse_new(fake_env.root, payload("claudenew")).wrapper == "claudenew"
+    with pytest.raises(ValueError, match="unknown wrapper"):
+        bridge.parse_new(fake_env.root, payload("rm -rf"))
+
+
 def test_learn_labels_from_the_profile_labels_every_session_of_the_alias(fake_env):
     cwd = fake_env.root / "home" / "ai"
     write_claude_session(fake_env, cwd, "k9", [_u("hi", cwd), _a("hello")])

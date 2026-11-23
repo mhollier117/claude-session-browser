@@ -62,39 +62,73 @@ def encoded_command(cmd: str) -> str:
     return base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
 
 
-# Reads the alias registry the PowerShell profile builds ($global:ClaudeHintLaunchers: alias -> @{ Strip; Label })
-# and prints {alias: label} for the aliases that declare a label, as JSON on one line.
-_LABELS_SCRIPT = (
+# Reads what the PowerShell profile defines, printed as two JSON lines:
+#   LABELS:   {alias: label} from the alias registry ($global:ClaudeHintLaunchers: alias -> @{ Strip; Label })
+#   WRAPPERS: every claude* function the profile defines, plus `qwen` when Qwen Code is installed
+_PROFILE_SCRIPT = (
     "$o = @{}; $h = $global:ClaudeHintLaunchers; "
     "if ($h) { foreach ($k in @($h.Keys)) { $e = $h[$k]; if ($e -and $e.Label) { $o[[string]$k] = [string]$e.Label } } }; "
-    "'LABELS:' + (ConvertTo-Json -Compress -InputObject $o)")
+    "'LABELS:' + (ConvertTo-Json -Compress -InputObject $o); "
+    "$w = @(Get-Command -CommandType Function -Name 'claude*' -ErrorAction SilentlyContinue | ForEach-Object Name); "
+    "if (Get-Command qwen -ErrorAction SilentlyContinue) { $w += 'qwen' }; "
+    "'WRAPPERS:' + (ConvertTo-Json -Compress -InputObject @($w | ForEach-Object { [string]$_ }))")
 
 
-def profile_alias_labels(shell: str | None = None, run=None, timeout: float = 30.0) -> dict[str, str]:
-    """The provider label each alias declares in the PowerShell profile (claudek -> kimi, claudez -> glm), read by
-    running the profile once in a hidden shell. {} when the shell or the profile can't be read. Only claude* alias
-    names and label-shaped labels are returned."""
+_WRAPPER_NAME_RE = re.compile(r"^claude[A-Za-z0-9]{0,40}$")
+
+
+def _json_line(stdout: str, prefix: str):
+    line = next((ln for ln in (stdout or "").splitlines() if ln.startswith(prefix)), None)
+    if line is None:
+        return None
+    try:
+        return json.loads(line[len(prefix):] or "null")
+    except ValueError:
+        return None
+
+
+def profile_info(shell: str | None = None, run=None, timeout: float = 30.0) -> dict:
+    """What the PowerShell profile defines, read by running it once in a hidden shell: {"labels": the provider label
+    each alias declares (claudek -> kimi, claudez -> glm), "wrappers": the claude* functions it defines (+ qwen when
+    installed)}. Empty when the shell or the profile can't be read. Only claude* names (and qwen) and label-shaped
+    labels are returned."""
     import subprocess
     from .index import LABEL_RE, LAUNCHER_RE
     run = run or subprocess.run
     shell = shell or pick_shell()
+    out = {"labels": {}, "wrappers": []}
     try:
-        res = run([shell, "-NoLogo", "-NonInteractive", "-EncodedCommand", encoded_command(_LABELS_SCRIPT)],
+        res = run([shell, "-NoLogo", "-NonInteractive", "-EncodedCommand", encoded_command(_PROFILE_SCRIPT)],
                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
-        return {}
-    line = next((ln for ln in (res.stdout or "").splitlines() if ln.startswith("LABELS:")), None)
-    if line is None:
-        return {}
-    try:
-        data = json.loads(line[len("LABELS:"):] or "{}")
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {k: v for k, v in data.items()
-            if isinstance(k, str) and isinstance(v, str) and LAUNCHER_RE.match(k) and LABEL_RE.match(v)}
+        return out
+    labels = _json_line(res.stdout, "LABELS:")
+    if isinstance(labels, dict):
+        out["labels"] = {k: v for k, v in labels.items()
+                         if isinstance(k, str) and isinstance(v, str) and LAUNCHER_RE.match(k) and LABEL_RE.match(v)}
+    wrappers = _json_line(res.stdout, "WRAPPERS:")
+    if isinstance(wrappers, list):
+        # launchers only: claude + letters/digits (the profile's alias rule); claude-update, claude-monitor, ... are tools
+        out["wrappers"] = sorted({w for w in wrappers if isinstance(w, str) and (_WRAPPER_NAME_RE.match(w) or w == "qwen")})
+    return out
+
+
+def profile_alias_labels(shell: str | None = None, run=None, timeout: float = 30.0) -> dict[str, str]:
+    """The provider label each alias declares in the PowerShell profile (`profile_info`'s labels)."""
+    return profile_info(shell, run, timeout)["labels"]
+
+
+def available_wrappers(found: list[str]) -> list[str]:
+    """The New session dialog's wrappers: the ones the profile defines (`profile_info`'s wrappers), the launcher's
+    usual order first, then any other claude* alias, qwen last. Before the profile was read (`found` empty), the
+    launcher's own list (`launch.WRAPPERS`)."""
+    if not found:
+        return list(WRAPPERS)
+    have = set(found)
+    known = [w for w in WRAPPERS if w in have and w != "qwen"]
+    others = sorted(w for w in have if w not in WRAPPERS and w != "qwen")
+    return known + others + (["qwen"] if "qwen" in have else [])
 
 
 def pick_shell(which=shutil.which) -> str:
@@ -268,7 +302,8 @@ def parse_new(root: Path, payload) -> NewRequest:
         raise ValueError(f"unknown github account: {github!r}")
     wrapper = payload.get("wrapper")
     req = NewRequest(name, folder, new_folder, kind, wrapper, github)
-    if req.launches and wrapper not in WRAPPERS:
+    from .index import LAUNCHER_RE
+    if req.launches and wrapper not in WRAPPERS and not (isinstance(wrapper, str) and LAUNCHER_RE.match(wrapper)):
         raise ValueError(f"unknown wrapper: {wrapper!r}")
     return req
 

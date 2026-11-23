@@ -58,7 +58,7 @@ def api(fake_env, monkeypatch):
     monkeypatch.setattr(cs.subprocess, "Popen", lambda argv, **kw: popens.append((list(argv), kw)))
     monkeypatch.setattr(bridge, "pick_shell", lambda which=None: "pwsh")
     # the once-per-run profile read of the alias labels runs a real shell: none in tests (test_launch_records)
-    monkeypatch.setattr(bridge, "profile_alias_labels", lambda *a, **k: {})
+    monkeypatch.setattr(bridge, "profile_info", lambda *a, **k: {"labels": {}, "wrappers": []})
     runner = FakeRunner()
     monkeypatch.setattr(cs, "_LAUNCHER_RUNNER", runner)
     monkeypatch.setattr(cs, "_LAUNCHER_HTTP", lambda *a: (_ for _ in ()).throw(OSError("no network in tests")))
@@ -660,6 +660,20 @@ def test_page_types_badges_and_qwen_code_checks(page):
     assert "toolGroupHasBoth(TOOL_FILTER)" in render_ and "setToolSub(" in render_
     assert "TOOL_SUB='both'" in _js_fn(page, "setToolFilter")
     assert "if(!toolMatch(s)) return false;" in page
+    # the New session dialog offers the wrappers this PC's profile defines
+    assert "lnLoadWrappers();" in _js_fn(page, "lnOpen")
+    assert "api.launcher_wrappers()" in _js_fn(page, "lnLoadWrappers")
+
+
+def test_launcher_wrappers_api(api):
+    assert api.launcher_wrappers() == {"ok": True, "wrappers": list(cs_launch_wrappers())}  # profile not read yet
+    api._profile_wrappers = ["claude", "clauded", "claudek"]
+    assert api.launcher_wrappers() == {"ok": True, "wrappers": ["claude", "clauded", "claudek"]}
+
+
+def cs_launch_wrappers():
+    from launcher.launch import WRAPPERS
+    return WRAPPERS
     assert "${toolBadge(s)}" in page
     assert "toolOf(s)==='qwencli'" in _js_fn(page, "openColor") and "toolOf(s)==='qwencli'" in _js_fn(page, "openRename")
     assert "toolOf(s)==='qwen'" not in page  # "qwen" is now Claude Code on a Qwen model, not Qwen Code
