@@ -1,7 +1,7 @@
 {
-  "version": "1.7.0.10",
-  "notes": "Sessions show which provider launched them: glm for claudez, kimi for claudek, qwen for claudeq (the labels come from your PowerShell profile), or the alias name for any other claude* alias. Resume relaunches a session with the same alias and arguments it was started with. The qwen filter covers Claude Code on Qwen and Qwen Code together, with a small choice to narrow to one. Clawdmeter: the Voice key's push-to-talk follows the session in front (Claude Code voice for an Anthropic session, Handy for claudez/claudek/claudeq and other windows).",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.10",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.10/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "f505ff6255f096bc8b886024d98a9d0344bb1110cb762ece02e9aeb5b63984ec"
+  "version": "1.7.0.11",
+  "notes": "New session offers the wrappers your PowerShell profile actually defines on this PC (your claude* aliases such as claudek or claudezs appear, ones that don't exist here are hidden). The limit animation got an attitude: Clawd flips you off with both hands when a session hits its limit.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.0.11",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.0.11/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "0a4915147a0629c411cb80c9ce33ca8d87d11537f0d2aa7cbcf6e59e61a6b0e7"
 }
