@@ -43,6 +43,18 @@ def test_codex_live_expired_limit_is_not_limit(tmp_path):
     assert s["state"] == sl.DONE
 
 
+def test_codex_live_limit_clears_once_the_window_that_hit_has_reset(tmp_path):
+    tc = token_count(T - 10, 100, window=300, resets=T - 1, reached="primary",
+                     secondary={"used_percent": 40.0, "window_minutes": 10080, "resets_at": T + 500})
+    s = one(live(tmp_path, [tc, ev("task_complete", T - 9)]))
+    assert s["state"] == sl.DONE
+
+
+def test_codex_live_limit_while_reached_and_nothing_reset(tmp_path):
+    tc = token_count(T - 10, 40, window=300, resets=T + 60, reached="primary")
+    assert one(live(tmp_path, [tc, ev("task_complete", T - 9)]))["state"] == sl.LIMIT
+
+
 def test_codex_live_done_idle_sleep_by_age(tmp_path):
     for age, want in ((sl.DONE_FOR_S - 1, sl.DONE), (sl.DONE_FOR_S + 1, sl.IDLE), (sl.SLEEP_AFTER_S - 1, sl.IDLE),
                       (sl.SLEEP_AFTER_S + 1, sl.SLEEP)):

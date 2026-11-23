@@ -120,7 +120,7 @@ def titles(home: Path) -> dict[str, str]:
 class CodexTail:
     last_ts: float | None
     turn_open: bool
-    limit_hit: bool
+    limit_hit: bool  # what the latest record says, ignoring time; whether it still limits is `rate_limited`'s call
     rate_limits: dict | None
     rate_ts: float | None
     ctx_tokens: int | None
@@ -212,15 +212,33 @@ def read_tail(path: Path, tail_bytes: int = 262_144) -> CodexTail:
         return CodexTail(None, False, False, None, None, None, None, None)
 
 
-def _window(win, now: float) -> tuple[int | None, float, bool]:
-    """(used percent, reset epoch, live) of one rate-limit window; a window that has reset reads 0 / 0.0, not live."""
-    if not isinstance(win, dict) or not isinstance(win.get("used_percent"), (int, float)):
-        return None, 0.0, False
+def _has_reset(win: dict, now: float) -> bool:
+    """A rate-limit window has reset once its numeric `resets_at` is <= now; one without a `resets_at` is live."""
     resets = win.get("resets_at")
-    resets = float(resets) if isinstance(resets, (int, float)) else 0.0
-    if resets and resets < now:
-        return 0, 0.0, False
-    return int(round(win["used_percent"])), resets, True
+    return isinstance(resets, (int, float)) and 0 < resets <= now
+
+
+def rate_limited(rl: dict | None, now: float) -> bool:
+    """Whether a `rate_limits` record still limits at `now`, the one rule `usage` and `CodexLive` share:
+    a live window at >= 100 %, or `rate_limit_reached_type` set while no window in the record has reset since it
+    was written (once one has, the flag may name the window that reset and is ignored)."""
+    if not isinstance(rl, dict):
+        return False
+    wins = [w for w in (rl.get("primary"), rl.get("secondary")) if isinstance(w, dict)]
+    any_reset = any(_has_reset(w, now) for w in wins)
+    live_full = any(not _has_reset(w, now) and isinstance(w.get("used_percent"), (int, float))
+                    and w["used_percent"] >= 100 for w in wins)
+    return live_full or (rl.get("rate_limit_reached_type") is not None and not any_reset)
+
+
+def _window(win, now: float) -> tuple[int | None, float]:
+    """(used percent, reset epoch) of one rate-limit window; a window that has reset reads 0 / 0.0."""
+    if not isinstance(win, dict) or not isinstance(win.get("used_percent"), (int, float)):
+        return None, 0.0
+    if _has_reset(win, now):
+        return 0, 0.0
+    resets = win.get("resets_at")
+    return int(round(win["used_percent"])), float(resets) if isinstance(resets, (int, float)) else 0.0
 
 
 def usage(home: Path, now: float, recent: int = 8) -> dict | None:
@@ -241,22 +259,17 @@ def usage(home: Path, now: float, recent: int = 8) -> dict | None:
     if best is None:
         return None
     out: dict = {"s": None, "s_reset_at": 0.0, "w": None, "w_reset_at": 0.0}
-    live_used: list[int] = []
     for key in ("primary", "secondary"):
         win = best.rate_limits.get(key)
-        used, resets, live = _window(win, now)
+        used, resets = _window(win, now)
         if used is None:
             continue
-        if live:
-            live_used.append(used)
         minutes = win.get("window_minutes")
         slot = "s" if isinstance(minutes, (int, float)) and minutes <= _SIX_HOURS_MIN else "w"
         out[slot], out[slot + "_reset_at"] = used, resets
     plan = best.rate_limits.get("plan_type")
-    # limited only while a window that has not yet reset says so: expired windows no longer limit anything
-    limited = bool(live_used) and (best.rate_limits.get("rate_limit_reached_type") is not None
-                                   or any(u >= 100 for u in live_used))
-    out.update(limited=limited, plan=plan if isinstance(plan, str) else None, at=best.rate_ts)
+    out.update(limited=rate_limited(best.rate_limits, now), plan=plan if isinstance(plan, str) else None,
+               at=best.rate_ts)
     return out
 
 
@@ -367,10 +380,7 @@ class CodexLive:
             if meta is None:
                 meta = self._metas[path] = read_meta(path) or {}
             since = tail.last_ts or mtime
-            expired = not any(isinstance(w, dict) and isinstance(w.get("resets_at"), (int, float))
-                              and w["resets_at"] > now for w in ((tail.rate_limits or {}).get(k)
-                                                                 for k in ("primary", "secondary")))
-            if tail.limit_hit and not expired:
+            if rate_limited(tail.rate_limits, now):
                 state = sl.LIMIT
             elif tail.turn_open:
                 state = sl.WORKING

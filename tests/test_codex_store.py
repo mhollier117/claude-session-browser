@@ -270,6 +270,33 @@ def test_usage_limited_false_when_only_the_expired_window_was_full(tmp_path):
     assert (u["s"], u["w"], u["limited"]) == (0, 30, False)
 
 
+def test_usage_reached_ignored_once_the_window_that_hit_has_reset(tmp_path):
+    """The 5h window hit 100 % and has reset since; the weekly one is live at 40 %: no longer limited."""
+    home = usage_home(tmp_path, [token_count(T - 5, 100.0, window=300, resets=T - 1, reached="primary",
+                                             secondary={"used_percent": 40.0, "window_minutes": 10080,
+                                                        "resets_at": T + 500})])
+    u = usage(home, T)
+    assert (u["s"], u["w"], u["limited"]) == (0, 40, False)
+
+
+def test_rate_limited_rules():
+    def rl(p=None, s=None, reached=None):
+        return {"primary": p, "secondary": s, "rate_limit_reached_type": reached}
+
+    def win(used, resets):
+        return {"used_percent": used, "window_minutes": 300, "resets_at": resets}
+    lim = codex_store.rate_limited
+    assert lim(rl(win(100, T + 9)), T) is True                         # a live full window
+    assert lim(rl(win(100, T)), T) is False                            # resets_at <= now: reset
+    assert lim(rl(win(40, T + 9), reached="primary"), T) is True       # reached, nothing reset
+    assert lim(rl(win(100, T - 1), win(40, T + 9), "primary"), T) is False
+    assert lim(rl(win(40, T - 1), win(100, T + 9), "secondary"), T) is True   # the live one is full
+    assert lim(rl({"used_percent": 100}), T) is True                   # no resets_at: live
+    assert lim(rl(reached="primary"), T) is True                       # reached, no windows to have reset
+    assert lim(rl(win(99, T + 9)), T) is False
+    assert lim({}, T) is False
+
+
 def test_usage_none_without_token_count(tmp_path):
     assert usage(tmp_path, T) is None
     home = usage_home(tmp_path / "h2", [ev("task_started")])
