@@ -57,6 +57,8 @@ def api(fake_env, monkeypatch):
     popens = []
     monkeypatch.setattr(cs.subprocess, "Popen", lambda argv, **kw: popens.append((list(argv), kw)))
     monkeypatch.setattr(bridge, "pick_shell", lambda which=None: "pwsh")
+    # the once-per-run profile read of the alias labels runs a real shell: none in tests (test_launch_records)
+    monkeypatch.setattr(bridge, "profile_alias_labels", lambda *a, **k: {})
     runner = FakeRunner()
     monkeypatch.setattr(cs, "_LAUNCHER_RUNNER", runner)
     monkeypatch.setattr(cs, "_LAUNCHER_HTTP", lambda *a: (_ for _ in ()).throw(OSError("no network in tests")))

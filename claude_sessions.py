@@ -4392,11 +4392,23 @@ class Api:
 
     def _launcher_build(self, force):
         """Background thread: build or refresh the Index, then from its one `rows()` read cache the Qwen Code rows
-        and each Claude session's backend by sid (the list's type). On a failure the previous rows stay."""
+        and each Claude session's backend by sid (the list's type). On a failure the previous rows stay.
+        Once per run it first reads the provider label each alias declares in the PowerShell profile (claudek ->
+        kimi, claudez -> glm), so every session of an alias shows that label at once (a hidden shell, no lock held)."""
         try:
+            labels = None
+            if not getattr(self, "_alias_labels_read", False):
+                self._alias_labels_read = True
+                from launcher.bridge import profile_alias_labels
+                labels = profile_alias_labels()
+                if labels:
+                    _launcher_log(f"alias labels from the profile: {labels}")
             with self._launcher_lock:
                 from launcher.index import type_label
-                rows = self._launcher_idx(refresh=force).rows()
+                idx = self._launcher_idx(refresh=force)
+                if labels:
+                    idx.learn_labels(labels)
+                rows = idx.rows()
                 self._launcher_qwen = [r for r in rows if r.store == "qwen"]
                 self._launcher_backends = {r.sid: type_label(r) for r in rows if r.store == "claude"}
         except Exception as e:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 import re
 import shutil
 import threading
@@ -59,6 +60,41 @@ def ps_command(argv: list[str]) -> str:
 def encoded_command(cmd: str) -> str:
     """`cmd` as PowerShell's `-EncodedCommand` value: base64 of its UTF-16LE bytes (no `;`, `"`, spaces or backslashes)."""
     return base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
+
+
+# Reads the alias registry the PowerShell profile builds ($global:ClaudeHintLaunchers: alias -> @{ Strip; Label })
+# and prints {alias: label} for the aliases that declare a label, as JSON on one line.
+_LABELS_SCRIPT = (
+    "$o = @{}; $h = $global:ClaudeHintLaunchers; "
+    "if ($h) { foreach ($k in @($h.Keys)) { $e = $h[$k]; if ($e -and $e.Label) { $o[[string]$k] = [string]$e.Label } } }; "
+    "'LABELS:' + (ConvertTo-Json -Compress -InputObject $o)")
+
+
+def profile_alias_labels(shell: str | None = None, run=None, timeout: float = 30.0) -> dict[str, str]:
+    """The provider label each alias declares in the PowerShell profile (claudek -> kimi, claudez -> glm), read by
+    running the profile once in a hidden shell. {} when the shell or the profile can't be read. Only claude* alias
+    names and label-shaped labels are returned."""
+    import subprocess
+    from .index import LABEL_RE, LAUNCHER_RE
+    run = run or subprocess.run
+    shell = shell or pick_shell()
+    try:
+        res = run([shell, "-NoLogo", "-NonInteractive", "-EncodedCommand", encoded_command(_LABELS_SCRIPT)],
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    line = next((ln for ln in (res.stdout or "").splitlines() if ln.startswith("LABELS:")), None)
+    if line is None:
+        return {}
+    try:
+        data = json.loads(line[len("LABELS:"):] or "{}")
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, str) and LAUNCHER_RE.match(k) and LABEL_RE.match(v)}
 
 
 def pick_shell(which=shutil.which) -> str:

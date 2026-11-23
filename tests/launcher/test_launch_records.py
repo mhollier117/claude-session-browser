@@ -126,6 +126,38 @@ def test_alias_label_learned_and_applied_to_older_sessions_of_that_alias(fake_en
     assert labels == {"old": "kimi", "new": "kimi", "zz": "claudez"}
 
 
+def test_profile_alias_labels_parses_the_hidden_shell_output():
+    from types import SimpleNamespace
+    from launcher.bridge import profile_alias_labels
+    calls = []
+
+    def run(argv, **kw):
+        calls.append((argv, kw))
+        out = 'noise from the profile\nLABELS:{"claudek":"kimi","claudez":"glm","evil":"x","claudebad":"no good!"}\n'
+        return SimpleNamespace(stdout=out, returncode=0)
+
+    assert profile_alias_labels(shell="pwsh", run=run) == {"claudek": "kimi", "claudez": "glm"}
+    argv, kw = calls[0]
+    assert argv[:4] == ["pwsh", "-NoLogo", "-NonInteractive", "-EncodedCommand"] and kw["timeout"] > 0
+    assert profile_alias_labels(shell="pwsh", run=lambda *a, **k: SimpleNamespace(stdout="", returncode=1)) == {}
+
+    def boom(*a, **k):
+        raise OSError("no shell")
+    assert profile_alias_labels(shell="pwsh", run=boom) == {}
+
+
+def test_learn_labels_from_the_profile_labels_every_session_of_the_alias(fake_env):
+    cwd = fake_env.root / "home" / "ai"
+    write_claude_session(fake_env, cwd, "k9", [_u("hi", cwd), _a("hello")])
+    live = _live_one(fake_env, "k9", 91, cwd)
+    idx = _idx(fake_env, live, lambda pid: {"launcher": "claudek", "args": None, "label": None})
+    idx.refresh()
+    assert index_mod.type_label(idx.row("claude", "k9")) == "claudek"
+    idx.learn_labels({"claudek": "kimi", "bad": "x", "claudez": "no good!"})
+    assert index_mod.type_label(idx.row("claude", "k9")) == "kimi"
+    assert dict(idx._db.execute("SELECT name, label FROM alias_labels").fetchall()) == {"claudek": "kimi"}
+
+
 def test_type_label():
     lab = lambda **kw: index_mod.type_label(make_row(**kw))
     assert lab(wrapper="claudek") == "claudek"

@@ -375,6 +375,16 @@ class Index:
             if cur.rowcount:
                 self._launch_seen.add(key)
 
+    def learn_labels(self, labels: dict[str, str]) -> None:
+        """Store alias -> provider label pairs (from the profile, `bridge.profile_alias_labels`); pairs that are not a
+        claude* alias with a label-shaped label are skipped."""
+        good = [(k, v) for k, v in labels.items()
+                if isinstance(k, str) and isinstance(v, str) and LAUNCHER_RE.match(k) and LABEL_RE.match(v)]
+        if good:
+            with self._db:
+                self._db.executemany("INSERT INTO alias_labels (name, label) VALUES (?, ?) "
+                                     "ON CONFLICT(name) DO UPDATE SET label = excluded.label", good)
+
     def recorded_wrappers(self) -> list[str]:
         """Every claude* alias a session was launched with (as recorded), sorted."""
         names = {r[0] for r in self._db.execute("SELECT DISTINCT wrapper FROM sessions WHERE wrapper IS NOT NULL")}
