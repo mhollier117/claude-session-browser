@@ -1,7 +1,7 @@
 {
-  "version": "1.7.1.0",
-  "notes": "Codex support: Codex CLI sessions in the list and cc (badge, filter, resume), live Codex sessions for the buddy and the Clawdmeter, and Codex usage beside Claude's in the app and on the devices.",
-  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.1.0",
-  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.1.0/ClaudeSessionBrowser-Setup.exe",
-  "installer_sha256": "8f9828cbc278b14394daccadbd7397fa3de6acfafdbc574b50f67bec07878689"
+  "version": "1.7.1.1",
+  "notes": "Clawdmeter: the session list tells the device which tool or backend each session runs on (Codex, GLM, Qwen), for firmware that colours sessions by it.",
+  "url": "https://github.com/mhollier117/claude-session-browser/releases/tag/v1.7.1.1",
+  "installer_url": "https://github.com/mhollier117/claude-session-browser/releases/download/v1.7.1.1/ClaudeSessionBrowser-Setup.exe",
+  "installer_sha256": "7733d86d0073f29a43b9b1c8ccc13b931278cc391b4b511400eb1f51a3c18a4a"
 }
