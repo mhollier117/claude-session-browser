@@ -1,6 +1,7 @@
 """The `codex` store in the launcher index: rows from `~/.codex` rollouts, titles, liveness, labels."""
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -176,3 +177,75 @@ def test_read_codex_facts(cenv):
     path = write_codex_session(cenv, SID, [_user("a"), _agent("b")], cwd="D:/x")
     facts = stores.read_codex(path)
     assert (facts.store, facts.sid, facts.cwd, facts.user_msgs, facts.assistant_msgs) == ("codex", SID, "D:/x", 1, 1)
+
+
+# ---------------------------------------------------------------- codex-cli 0.170: item_completed records
+
+FIXTURE = Path(__file__).parent / "fixtures" / "codex-0.170-items.jsonl"
+
+
+def _items():
+    """Real codex-cli 0.170 records (ids and text replaced): a UserMessage, a commentary AgentMessage and a
+    final_answer AgentMessage, each an `event_msg` / `item_completed`."""
+    return [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_codex_item_completed_records_are_asks_and_replies(cenv):
+    path = write_codex_session(cenv, SID, _items())
+    facts = stores.read_codex(path)
+    assert facts.first_ask == "fix the failing build please" and facts.last_ask == "fix the failing build please"
+    assert facts.last_reply == "The build is fixed: a missing import."
+    assert (facts.user_msgs, facts.assistant_msgs) == (1, 1)   # the commentary message is not a reply
+    users, assistants, end, _, _ = stores.count_messages(path, "codex")
+    assert (users, assistants, end) == (1, 1, path.stat().st_size)
+
+
+def test_codex_commentary_never_the_last_reply(cenv):
+    final, commentary = _items()[2], _items()[1]
+    path = write_codex_session(cenv, SID, [_items()[0], final, commentary])
+    assert stores.read_codex(path).last_reply == "The build is fixed: a missing import."
+
+
+def test_codex_old_shape_commentary_phase_not_a_reply(cenv):
+    commentary = {"timestamp": "2026-11-18T09:31:30.000Z", "type": "event_msg",
+                  "payload": {"type": "agent_message", "message": "working on it", "phase": "commentary"}}
+    path = write_codex_session(cenv, SID, [_user("a"), _agent("b"), commentary])
+    facts = stores.read_codex(path)
+    assert (facts.last_reply, facts.assistant_msgs) == ("b", 1)
+
+
+def test_codex_item_completed_parser_shapes():
+    rec = {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+        "type": "UserMessage", "content": [{"type": "text", "text": "one"}, {"type": "image"},
+                                           {"type": "text", "text": "two"}]}}}
+    assert stores._codex_record(rec) == ("user", "one\ntwo")
+    rec["payload"]["item"] = {"type": "AgentMessage", "content": [{"type": "Text", "text": "x"}], "phase": None}
+    assert stores._codex_record(rec) == ("assistant", "x")
+    rec["payload"]["item"] = {"type": "AgentMessage", "content": [{"type": "Text", "text": "x"}],
+                              "phase": "commentary"}
+    assert stores._codex_record(rec) is None
+    rec["payload"]["item"] = {"type": "Reasoning", "content": [{"type": "text", "text": "x"}]}
+    assert stores._codex_record(rec) is None
+    assert stores._codex_record({"type": "response_item", "payload": rec["payload"]}) is None
+
+
+def test_codex_prefilter_lets_both_shapes_through():
+    for line in FIXTURE.read_bytes().splitlines():
+        assert stores._TYPE_RES["codex"].search(line)
+    assert stores._TYPE_RES["codex"].search(b'{"type":"event_msg","payload":{"type":"user_message"}}')
+
+
+def test_codex_head_read_is_capped(cenv, monkeypatch):
+    """A rollout without any ask never reads the whole file looking for one."""
+    filler = [{"timestamp": "2026-11-18T09:30:00.000Z", "type": "event_msg",
+               "payload": {"type": "token_count", "pad": "x" * 2000}} for _ in range(200)]
+    path = write_codex_session(cenv, SID, filler + [_user("late ask")])
+    monkeypatch.setitem(stores._HEAD_CAP, "codex", 65_536)
+    reads = []
+    real = stores._head_lines
+    monkeypatch.setattr(stores, "_head_lines", lambda p, size, n: reads.append(n) or real(p, size, n))
+    facts = stores.read_codex(path, count=False)
+    assert facts.first_ask == "" and max(reads) <= 65_536
+    # a first ask inside the cap is still found
+    path = write_codex_session(cenv, SID2, [_user("early ask")] + filler)
+    assert stores.read_codex(path, count=False).first_ask == "early ask"

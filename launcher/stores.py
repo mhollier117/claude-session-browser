@@ -6,6 +6,8 @@ Qwen record keys relied on (Qwen Code 0.21): `type` (user|assistant|tool_result|
 (`real_user` is a human prompt; user records with `provenance == "system"` are injected), `cwd`,
 `message.parts[]` with `text`; assistant parts carry `thought: true` for reasoning (not part of the reply)
 and `functionCall` for tool calls (no text). The sidecar `<sid>.runtime.json` holds `work_dir`.
+Codex record keys relied on: see `_codex_record` (two shapes: older `user_message`/`agent_message` events and
+codex-cli 0.170's `item_completed` events with `item.type` `UserMessage`/`AgentMessage`).
 """
 from __future__ import annotations
 
@@ -23,8 +25,14 @@ _TAGS = ("local-command-caveat", "local-command-stdout", "system-reminder",
 _TYPE_RES = {  # byte prefilter per store: only lines naming one of its relevant record types are parsed
     "claude": re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"'),
     "qwen": re.compile(rb'"type"\s*:\s*"(user|assistant|ai-title|custom-title)"'),
-    "codex": re.compile(rb'"type"\s*:\s*"(user_message|agent_message)"'),
+    "codex": re.compile(rb'"type"\s*:\s*"(user_message|agent_message|UserMessage|AgentMessage)"'),
 }
+# A Codex rollout's first ask sits near the top (after the session_meta line); a rollout without one is never
+# read whole looking for it (a live one is >100 MB).
+_HEAD_CAP: dict[str, int] = {"codex": 4 * 1024 * 1024}
+# Stores whose head/tail reads skip lines the type prefilter rejects before parsing them. Only Codex: its cwd comes
+# from the session_meta line and `_record_model` never matches its records, so nothing else is lost.
+_PREFILTERED = frozenset({"codex"})
 
 
 @dataclass
@@ -97,15 +105,36 @@ def _qwen_record(rec: dict) -> tuple[str, str] | None:
 
 
 def _codex_record(rec: dict) -> tuple[str, str] | None:
-    """Codex rollout line `{"timestamp", "type", "payload"}`: a human prompt is `event_msg` / `user_message`, a reply
-    `event_msg` / `agent_message` (both with `payload.message`). `response_item` user records carry injected context
-    (environment, AGENTS.md) and never count."""
+    """Codex rollout line `{"timestamp", "type", "payload"}`, in either of two shapes:
+    - older: `event_msg` / `user_message` (a prompt) or `agent_message` (a reply), text in `payload.message`;
+    - codex-cli 0.170: `event_msg` / `item_completed` with `payload.item.type` `UserMessage` (a prompt) or
+      `AgentMessage` (a reply), text in the `payload.item.content[]` items whose `type` is "text" (any case).
+    A reply is the final answer: an agent message whose `phase` is "commentary" (progress notes during a turn) does
+    not count, in either shape. `response_item` records carry injected context (environment, AGENTS.md) and
+    sub-agent traffic and never count."""
     payload = rec.get("payload")
     if rec.get("type") != "event_msg" or not isinstance(payload, dict):
         return None
-    kind = {"user_message": "user", "agent_message": "assistant"}.get(payload.get("type"))
-    text = payload.get("message")
-    return (kind, text) if kind and isinstance(text, str) and text.strip() else None
+    kind = payload.get("type")
+    if kind in ("user_message", "agent_message"):
+        role = "user" if kind == "user_message" else "assistant"
+        text, phase = payload.get("message"), payload.get("phase")
+    elif kind == "item_completed":
+        item = payload.get("item")
+        role = {"UserMessage": "user", "AgentMessage": "assistant"}.get(item.get("type")) \
+            if isinstance(item, dict) else None
+        if role is None:
+            return None
+        content = item.get("content")
+        text = "\n".join(c["text"] for c in content if isinstance(c, dict) and isinstance(c.get("type"), str)
+                         and c["type"].lower() == "text" and isinstance(c.get("text"), str)) \
+            if isinstance(content, list) else ""
+        phase = item.get("phase")
+    else:
+        return None
+    if role == "assistant" and phase == "commentary":
+        return None
+    return (role, text) if isinstance(text, str) and text.strip() else None
 
 
 _PARSERS: dict[str, Callable[[dict], tuple[str, str] | None]] = {"claude": _claude_record, "qwen": _qwen_record,
@@ -140,12 +169,15 @@ def _tail_lines(path: Path, size: int, n: int) -> list[bytes]:
     return lines[1:] if start > 0 else lines  # the first line of a mid-file read is partial
 
 
-def _head(path: Path, size: int, parser) -> tuple[str | None, str]:
-    """(first cwd seen, cleaned first ask), growing the read by doubling until an ask is found or EOF."""
-    n = _HEAD_START
+def _head(path: Path, size: int, parser, cap: int | None = None, type_re=None) -> tuple[str | None, str]:
+    """(first cwd seen, cleaned first ask), growing the read by doubling until an ask is found, EOF, or `cap` bytes
+    have been read (then "" for the ask). With `type_re`, lines it rejects are skipped unparsed."""
+    n = _HEAD_START if cap is None else min(_HEAD_START, cap)
     while True:
         cwd, ask = None, ""
         for line in _head_lines(path, size, n):
+            if type_re is not None and not type_re.search(line):
+                continue
             got = _parse(line, parser)
             if got is None:
                 continue
@@ -156,9 +188,9 @@ def _head(path: Path, size: int, parser) -> tuple[str | None, str]:
                 ask = clean_user_text(parsed[1])
                 if ask:
                     break
-        if ask or n >= size:
+        if ask or n >= size or (cap is not None and n >= cap):
             return cwd, ask
-        n *= 2
+        n = n * 2 if cap is None else min(n * 2, cap)
 
 
 def _record_model(rec: dict) -> str | None:
@@ -175,18 +207,21 @@ def _record_model(rec: dict) -> str | None:
     return model.strip()
 
 
-def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True) -> tuple[str, str, str | None]:
+def _tail(path: Path, size: int, parser, tail_bytes: int, want_ask: bool = True,
+          type_re=None) -> tuple[str, str, str | None]:
     """(last cleaned ask, last whole reply, model of the last assistant record), growing backwards by doubling until
     the ask and reply are found, BOF, or the last `TAIL_MAX_BYTES` have been read: then whatever was found is
     returned ("" for the other), so a transcript whose last typed ask lies far back (long tool output since) is never
     read whole. The model comes from the same lines (an assistant record holding only tool calls counts too), so it
-    is found whenever the reply is."""
+    is found whenever the reply is. With `type_re`, lines it rejects are skipped unparsed."""
     cap = max(TAIL_MAX_BYTES, 1)
     n = min(max(tail_bytes, 1), cap)
     while True:
         ask = reply = ""
         model = None
         for line in reversed(_tail_lines(path, size, n)):
+            if type_re is not None and not type_re.search(line):
+                continue
             got = _parse(line, parser)
             if got is None:
                 continue
@@ -283,8 +318,9 @@ def _facts(store: str, path: Path, tail_bytes: int, count: bool = True) -> Sessi
     path = Path(path)
     st = path.stat()
     parser = _PARSERS[store]
-    cwd, first = _head(path, st.st_size, parser)
-    last_ask, last_reply, last_model = _tail(path, st.st_size, parser, tail_bytes)
+    pre = _TYPE_RES[store] if store in _PREFILTERED else None
+    cwd, first = _head(path, st.st_size, parser, _HEAD_CAP.get(store), pre)
+    last_ask, last_reply, last_model = _tail(path, st.st_size, parser, tail_bytes, type_re=pre)
     last_ts = _last_ts(path, st.st_size, tail_bytes)
     users, assistants, name = _count(path, parser, _TYPE_RES[store]) if count else (0, 0, None)
     return SessionFacts(store, path.stem, path, cwd, name, first, last_ask, last_reply,
@@ -322,4 +358,5 @@ def read_codex(path: Path, tail_bytes: int = 262_144, count: bool = True) -> Ses
 def full_last_reply(path: Path, store: str) -> str:
     """The whole last assistant message (for the preview), read from the end on demand."""
     path = Path(path)
-    return _tail(path, path.stat().st_size, _PARSERS[store], 65_536, want_ask=False)[1]
+    pre = _TYPE_RES[store] if store in _PREFILTERED else None
+    return _tail(path, path.stat().st_size, _PARSERS[store], 65_536, want_ask=False, type_re=pre)[1]
