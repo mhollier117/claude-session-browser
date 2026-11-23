@@ -8,7 +8,7 @@
   Codex live sessions join the buddy and the gadget session list (`tool: "codex"`); Codex usage beside Claude's.
 - Usage (Task 5): `Api._codex_usage_cached()` (30 s). Clawdmeter `ac` list = at most 5 Claude accounts, then one
   `Codex` row (`l: 1` only when a Claude row is live, so the device's main-screen nickname stays Claude's; that also
-  hides "Tap to use"). `_clawd_switch_request` ignores a request whose nick names the Codex row (by name, not index).
+  hides "Tap to use"). `_clawd_switch_request` ignores a request whose nick names the Codex row (see the switch-guard rule below).
   Gadget sessions of Codex are named `cx <name>`. `_clawd_usage` (main payload) unchanged. `limit_state()` =
   `_limit_state_claude()` + `codex` block; the limit page shows "Codex - 5 hours" / "Codex - week" cards after
   Claude's (also when Claude usage is unknown). Tests: `tests/test_codex_gadget.py`.
