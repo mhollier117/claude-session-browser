@@ -3918,7 +3918,7 @@ class PluginHost:
         """Die Sessionliste, wie sie die Tabelle zeigt. Braucht "sessions"."""
         self._darf("sessions")
         # Claude sessions only (any backend), as before the launcher added Qwen Code rows to the list.
-        return [dict(s) for s in self._api._sessions() if s.get("tool") != "qwencli"]
+        return [dict(s) for s in self._api._sessions() if s.get("tool") not in ("qwencli", "codex")]
 
 
 class PluginManager:
@@ -4339,6 +4339,7 @@ class Api:
         if self._cache is None or force:
             self._cache = collect_sessions(self._projects_dir())
         qwen = self._qwen_sessions(force)  # also starts the background index read that fills the backends
+        qwen = qwen + self._codex_sessions()  # Codex rows come from the same index read (the cache it filled)
         backends = getattr(self, "_launcher_backends", None) or {}
         colors = self.settings.get("session_colors", {})
         for s in self._cache:
@@ -4362,6 +4363,7 @@ class Api:
                 self._launcher_index = None
                 self._launcher_failed_at = None
                 self._launcher_qwen = None
+                self._launcher_codex = None
                 self._launcher_backends = None
                 self._launcher_thread = None
                 self._launcher_suggestions = PendingSuggestions()
@@ -4412,6 +4414,7 @@ class Api:
                     idx.learn_labels(labels)
                 rows = idx.rows()
                 self._launcher_qwen = [r for r in rows if r.store == "qwen"]
+                self._launcher_codex = [r for r in rows if r.store == "codex"]
                 self._launcher_backends = {r.sid: type_label(r) for r in rows if r.store == "claude"}
         except Exception as e:
             _launcher_log(f"Qwen sessions not refreshed: {type(e).__name__}: {e}")
@@ -4437,6 +4440,15 @@ class Api:
             return bridge.qwen_session_dicts(self._launcher_qwen or [], fmt_time)
         except Exception as e:
             _launcher_log(f"no Qwen sessions: {type(e).__name__}: {e}")
+            return []
+
+    def _codex_sessions(self):
+        """Codex rows in the session-list shape from the cache `_launcher_build` filled ([] until it has run)."""
+        try:
+            from launcher import bridge
+            return bridge.codex_session_dicts(getattr(self, "_launcher_codex", None) or [], fmt_time)
+        except Exception as e:
+            _launcher_log(f"no Codex sessions: {type(e).__name__}: {e}")
             return []
 
     def _state(self, force=False):
@@ -4473,8 +4485,24 @@ class Api:
             return {"ok": False, "error": t("Ungültige Session-ID.")}
         if tool == "qwencli":
             return launch_in_terminal(_safe_workdir(cwd), ["qwen", "-r", sid])
+        if tool == "codex":
+            return self._resume_codex(sid, cwd)
         workdir = _safe_workdir(cwd, project)
         return launch_in_terminal(workdir, [*self._resume_wrapper(sid), "-r", sid])
+
+    def _resume_codex(self, sid, cwd):
+        """Resume a Codex session: the launcher's resume_command for its index row (bypass flag, the row's folder);
+        if the index cannot be read, `codex <bypass flag> resume <sid>` in `cwd`."""
+        from launcher.launch import CODEX_BYPASS_FLAG, resume_command
+        try:
+            with self._launcher_state():
+                env = self._launcher_env
+                row = self._launcher_idx().row("codex", sid)
+            if row is not None:
+                return launch_in_terminal(_safe_workdir(row.cwd or cwd), resume_command(row, None, root=env.root).argv)
+        except Exception as e:  # noqa: BLE001 - the index is optional here
+            _launcher_log(f"codex resume lookup failed: {type(e).__name__}: {e}")
+        return launch_in_terminal(_safe_workdir(cwd), ["codex", CODEX_BYPASS_FLAG, "resume", sid])
 
     def _resume_wrapper(self, sid):
         """The wrapper part of the resume argv, as the launcher's resume list builds it (launch.resume_command, in
@@ -6788,6 +6816,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     margin-right:8px; border-radius:6px; vertical-align:1px; letter-spacing:.2px;
     background:rgba(255,255,255,.06); color:var(--muted); border:1px solid var(--border)}
   .tool-badge.qwencli{background:rgba(124,140,255,.16); color:#b3bcff; border-color:rgba(124,140,255,.38)}
+  .tool-badge.codex{background:rgba(120,200,120,.16); color:#a6e0a6; border-color:rgba(120,200,120,.38)}
   .tool-badge.qwen{background:rgba(196,140,255,.16); color:#d9b8ff; border-color:rgba(196,140,255,.38)}
   .tool-badge.glm{background:rgba(80,200,180,.16); color:#9be3d6; border-color:rgba(80,200,180,.38)}
   .tool-badge.alias{background:hsla(var(--th),70%,60%,.16); color:hsl(var(--th),80%,80%); border-color:hsla(var(--th),70%,60%,.38)}
@@ -7711,8 +7740,8 @@ function updateDetail(){
   // rechtes Panel nur zeigen, wenn etwas ausgewaehlt ist
   document.querySelector('.main').classList.toggle('show-side', en);
   ['btn-resume','btn-copy'].forEach(b=>document.getElementById(b).disabled=!en);
-  // Qwen Code sessions have no title override or colour (the backend ignores both)
-  const qwen = en && toolOf(s)==='qwencli';
+  // Qwen Code and Codex sessions have no title override or colour (the backend ignores both)
+  const qwen = en && (toolOf(s)==='qwencli' || toolOf(s)==='codex');
   ['btn-rename','btn-color'].forEach(b=>document.getElementById(b).disabled=!en || qwen);
   const d=document.getElementById('detail');
   if(!s){
@@ -8054,7 +8083,7 @@ function buildSwatches(){
   const html=COLORS.map(c=>`<div class="sw" style="background:${c}" onclick="setColor('${c}')"></div>`).join('');
   document.getElementById('color-swatches').innerHTML=html;
 }
-function openColor(){const s=getSel(); if(!s || toolOf(s)==='qwencli')return;
+function openColor(){const s=getSel(); if(!s || toolOf(s)==='qwencli' || toolOf(s)==='codex')return;
   const start=s.color||STATE.settings.accent||'#6c6cff';
   const v=hex2hsv(start); CP.h=v.h; CP.s=v.s||1; CP.v=(v.v===undefined?1:v.v); cpRender();
   document.getElementById('overlay-color').classList.add('show');}
@@ -8091,7 +8120,7 @@ function cpDown(e){CPdrag=true; try{e.target.setPointerCapture(e.pointerId);}cat
 function cpHexIn(v){const x=hex2hsv(v); CP.h=x.h; CP.s=x.s; CP.v=x.v; cpRender();}
 
 /* ---- Umbenennen ---- */
-function openRename(){const s=getSel(); if(!s || toolOf(s)==='qwencli')return;
+function openRename(){const s=getSel(); if(!s || toolOf(s)==='qwencli' || toolOf(s)==='codex')return;
   const i=document.getElementById('rename-input'); i.value=s.display_title;
   document.getElementById('overlay-rename').classList.add('show'); setTimeout(()=>{i.focus();i.select();},50);}
 async function saveRename(){const s=getSel(); if(!s)return;
@@ -9359,14 +9388,14 @@ async function obFinish(){
 // launcher -------------------------------------------------------------------
 // Tool badge and filter of the session list, and the New session dialog. The
 // type (s.tool): claude, qwen (Claude Code on a Qwen model, claudeq), glm
-// (Claude Code on Z.ai GLM, claudez) or qwencli (the Qwen Code tool). The
+// (Claude Code on Z.ai GLM, claudez), qwencli (the Qwen Code tool) or codex (OpenAI Codex CLI). The
 // backend is launcher/bridge.py behind Api.launcher_*; every launcher call can
 // answer {ok:false, error}, which is shown, never left hanging.
 let TOOL_FILTER = 'all', TOOL_SUB = 'both';
 let LN_WRAPPERS = __LAUNCHER_WRAPPERS__;   // replaced by the profile's own list on open (lnLoadWrappers)
 // The list types: claude, the backends guessed from a model (qwen, glm), Qwen Code (qwencli), and any alias
 // a session was launched with (claudek, claudez, ...: whatever the sessions carry, no table to extend).
-const TOOL_STYLED = ['claude','qwen','glm','qwencli'];
+const TOOL_STYLED = ['claude','qwen','glm','qwencli','codex'];
 function toolOf(s){ return s && typeof s.tool==='string' && /^[A-Za-z0-9_-]{1,48}$/.test(s.tool) ? s.tool : 'claude'; }
 // A type and its "...cli" twin share one filter button (qwen = Claude Code on Qwen + Qwen Code, qwencli): the
 // button shows both, and a small choice next to it narrows to one of them when both are in the list.

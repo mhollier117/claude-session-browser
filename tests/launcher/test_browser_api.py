@@ -219,6 +219,82 @@ def test_resume_qwen_rejects_a_bad_session_id(api):
     assert api.popens == []
 
 
+CODEX_SID = "019a9a9a-1111-7222-8333-444455556666"
+
+
+def _codex_home(fake_env, monkeypatch, tmp_path):
+    """A tmp CODEX_HOME holding one synthetic rollout (never the real ~/.codex)."""
+    import dataclasses
+    from launcher_helpers import write_codex_session
+    home = tmp_path / "codex"
+    (home / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    cenv = dataclasses.replace(fake_env, codex_home=home)
+    ev = {"timestamp": "2026-11-18T09:30:00.000Z", "type": "event_msg",
+          "payload": {"type": "user_message", "message": "fix the build"}}
+    write_codex_session(cenv, CODEX_SID, [ev], cwd=fake_env.root / "cc")
+    return home
+
+
+def test_codex_session_dicts_shape(fake_env, tmp_path):
+    import dataclasses
+    from launcher_helpers import write_codex_session
+    cenv = dataclasses.replace(fake_env, codex_home=tmp_path / "codex")
+    (cenv.codex_home / "sessions").mkdir(parents=True)
+    write_codex_session(cenv, CODEX_SID, [], cwd=fake_env.root / "cc")
+    idx = Index(cenv, claude_live=lambda: [], pid_exists=lambda pid: False, codex_live=lambda: {})
+    idx.refresh()
+    rows = idx.rows()
+    d = bridge.codex_session_dicts(rows, str)[0]
+    assert d["tool"] == "codex" and d["id"] == CODEX_SID and d["cwd"] == str(fake_env.root / "cc")
+    assert d["project"] == "cc" and d["color"] == "" and d["when"] == str(d["mtime"])
+    assert bridge.codex_session_dicts([], str) == []
+    assert bridge.qwen_session_dicts(rows, str) == []  # Qwen rows only
+
+
+def test_sessions_include_codex_rows_with_tool(fake_env, api, monkeypatch, tmp_path):
+    _codex_home(fake_env, monkeypatch, tmp_path)
+    assert [r["id"] for r in api._sessions()] == ["c1"]
+    rows = _settled(api)
+    assert [(r["id"], r["tool"]) for r in rows] == [("c1", "claude"), (CODEX_SID, "codex")]
+    assert rows[1]["display_title"] == "fix the build"
+    json.dumps(rows)
+    host = cs.PluginHost(api, {"id": "p", "version": "1", "permissions": ["sessions"]})
+    assert [s["id"] for s in host.sessions()] == ["c1"]  # plugins stay Claude-only
+
+
+def test_resume_codex_launches_codex_resume(fake_env, api, monkeypatch, tmp_path):
+    _codex_home(fake_env, monkeypatch, tmp_path)
+    cwd = fake_env.root / "cc"
+    assert api.resume(CODEX_SID, str(cwd), "", "codex") == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv == ["wt", "-w", "0", "nt", "-d", str(cwd), "pwsh", "-NoExit", "-EncodedCommand",
+                    _enc(["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", CODEX_SID])]
+
+
+def test_resume_codex_without_an_index_row_still_resumes(fake_env, api, monkeypatch):
+    cwd = fake_env.root / "cc"
+    assert api.resume(CODEX_SID, str(cwd), "", "codex") == {"ok": True}  # CODEX_HOME holds nothing
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc(["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", CODEX_SID])
+
+
+def test_resume_codex_index_failure_falls_back(fake_env, api, monkeypatch):
+    def broken(self, *a, **k):
+        raise RuntimeError("index exploded")
+    monkeypatch.setattr(cs.Api, "_launcher_idx", broken)
+    monkeypatch.setattr(cs, "_launcher_log", lambda m: None)
+    cwd = fake_env.root / "cc"
+    assert api.resume(CODEX_SID, str(cwd), "", "codex") == {"ok": True}
+    [(argv, _kw)] = api.popens
+    assert argv[-1] == _enc(["codex", "--dangerously-bypass-approvals-and-sandbox", "resume", CODEX_SID])
+
+
+def test_resume_codex_rejects_bad_id(api):
+    assert api.resume("x; rm", "C:\\", "", "codex")["ok"] is False
+    assert api.popens == []
+
+
 def test_resume_claude_row_uses_the_clauded_alias_through_powershell(fake_env, api):
     """The resume button runs `clauded -r <sid>` in a PowerShell tab with the profile (where the alias lives),
     with the child-session marker cleared, in every area (cc included)."""
@@ -643,7 +719,8 @@ def test_resume_glm_row_from_a_real_index(fake_env, api):
 
 
 def test_page_types_badges_and_qwen_code_checks(page):
-    assert "const TOOL_STYLED = ['claude','qwen','glm','qwencli'];" in page
+    assert "const TOOL_STYLED = ['claude','qwen','glm','qwencli','codex'];" in page
+    assert ".tool-badge.codex{" in page
     # any alias name is a type (claudek, a new one): only its shape is checked, no list of known types
     assert "/^[A-Za-z0-9_-]{1,48}$/.test(s.tool) ? s.tool : 'claude'" in _js_fn(page, "toolOf")
     assert "TOOL_STYLED" not in _js_fn(page, "toolOf")
@@ -664,6 +741,12 @@ def test_page_types_badges_and_qwen_code_checks(page):
     # the New session dialog offers the wrappers this PC's profile defines
     assert "lnLoadWrappers();" in _js_fn(page, "lnOpen")
     assert "api.launcher_wrappers()" in _js_fn(page, "lnLoadWrappers")
+
+
+def test_page_codex_rows_skip_rename_and_colour(page):
+    assert "toolOf(s)==='codex'" in _js_fn(page, "openColor") and "toolOf(s)==='codex'" in _js_fn(page, "openRename")
+    assert "toolOf(s)==='codex'" in _js_fn(page, "updateDetail")
+    assert "codex" in _js_fn(page, "updateDetail") and ".tool-badge.codex{" in page
 
 
 def test_launcher_wrappers_api(api):

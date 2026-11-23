@@ -237,6 +237,16 @@ def qwen_session_dicts(rows: list[Row], when) -> list[dict]:
             for r in rows if r.store == "qwen"]
 
 
+def codex_session_dicts(rows: list[Row], when) -> list[dict]:
+    """The Codex rows among `rows` in the browser's session-list shape, with `tool` codex (the badge text is the
+    type name); `when(mtime)` formats the time column as for the Claude rows."""
+    return [{"id": r.sid, "auto_title": r.display_name, "display_title": r.display_name, "first_user": r.first_ask,
+             "cwd": r.cwd or "", "mtime": r.mtime, "when": when(r.mtime), "user_msgs": r.user_msgs,
+             "assistant_msgs": r.assistant_msgs, "total_msgs": r.user_msgs + r.assistant_msgs,
+             "project": Path(r.cwd).name if r.cwd else "", "color": "", "tool": "codex"}
+            for r in rows if r.store == "codex"]
+
+
 def children_listing(env: Env, index: Index, folder: Path) -> dict:
     """One column of the New session dialog: `folder`'s sub-folders with session stats, whether a session can start
     here (not at the root), the kinds a new folder here can take (default first) and the default wrapper here."""
