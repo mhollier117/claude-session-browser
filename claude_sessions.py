@@ -5039,7 +5039,10 @@ class Api:
         Anmeldung vorher sichern, atomar schreiben, nachlesen, Tray-Menue).
         Die Konten-Seite zeichnet sich alle 5 s selbst neu und sieht den
         Wechsel dann; ins Fenster wird nichts geschoben."""
-        if index is not None and index == getattr(self, "_clawd_codex_index", None):
+        # Der Name entscheidet, nicht der Index: der wandert mit der Konten-
+        # Liste. Das Geraet kann ihn kuerzen (bei knapper MTU bis auf 4).
+        want = str(nick or "").strip()
+        if want.startswith("Codex") or (len(want) >= 4 and "Codex".startswith(want)):
             self._clawd_log(f"Account switch from the gadget ({index}, {nick!r}) "
                             "ignored: Codex has no account switch")
             return
@@ -8728,9 +8731,12 @@ function paintLimit(){
   if(!box) return;
   const d = LIMIT;
   if(!d || !d.known){
-    box.innerHTML = '<div class="lempty">'
+    // Codex steht unabhaengig von Claude da: ohne Claude-Messung trotzdem die
+    // Codex-Kacheln; der Leertext nur, wenn es auch die nicht gibt.
+    const cx = d ? codexKacheln(d.codex) : '';
+    box.innerHTML = cx || ('<div class="lempty">'
       + t('Noch keine Auslastungsdaten – kommt mit der nächsten Abfrage.')
-      + '</div>';
+      + '</div>');
     return;
   }
   if(d.reset_at && d.reset_at*1000 <= Date.now()){ refreshLimit(); return; }

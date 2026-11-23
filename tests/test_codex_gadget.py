@@ -183,3 +183,52 @@ def test_codex_usage_cached_survives_errors(monkeypatch):
     monkeypatch.setattr(codex_store, "codex_home", lambda: Path("nowhere"))
     monkeypatch.setattr(codex_store, "usage", lambda h, n: (_ for _ in ()).throw(OSError("x")))
     assert cs.Api.__new__(cs.Api)._codex_usage_cached() is None
+
+
+def test_switch_request_ignored_for_truncated_codex_name():
+    a = app_with([acct("A", live=True)])
+    a._clawd_extras()
+    called = []
+    a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True}
+    for nick in ("Code", "Codex"):
+        a._clawd_switch_request(1, nick)
+    assert called == []
+    assert sum("Codex has no account switch" in m for m in a._logs) == 2
+
+
+def test_switch_goes_through_when_codex_index_now_belongs_to_a_claude_account():
+    a = app_with([acct("A", live=True), acct("B")])
+    a._clawd_extras()
+    assert a._clawd_codex_index == 2
+    a._accounts = FakeAccounts([acct("A", live=True), acct("B"), acct("C")])  # list grew
+    called = []
+    a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True, "changed": True}
+    a._clawd_switch_request(2, "C")
+    assert called == ["u-C"]
+
+
+def test_stale_codex_request_ignored_without_codex_index():
+    a = app_with([acct("A", live=True)], codex=None)
+    a._clawd_extras()
+    assert a._clawd_codex_index is None
+    called = []
+    a.accounts_switch = lambda uuid: called.append(uuid) or {"ok": True}
+    a._clawd_switch_request(1, "Codex")
+    assert called == []
+    assert any("ignored: Codex has no account switch" in m for m in a._logs)
+
+
+def _paint_limit_src():
+    html = cs.HTML_TEMPLATE
+    i = html.index("function paintLimit(){")
+    return html[i:html.index("async function refreshLimit", i)]
+
+
+def test_page_paints_codex_cards_when_claude_usage_unknown():
+    src = _paint_limit_src()
+    unknown = src[src.index("if(!d || !d.known){"):src.index("if(d.reset_at &&")]
+    assert "codexKacheln(d.codex)" in unknown
+    assert "lempty" in unknown and unknown.index("codexKacheln") < unknown.index("lempty")
+    # the other two branches still append them
+    assert src.count("codexKacheln(d.codex)") == 3
+    assert "function codexKacheln(c)" in cs.HTML_TEMPLATE
