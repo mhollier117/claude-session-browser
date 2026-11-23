@@ -1,5 +1,5 @@
 """The "limit" buddy animation, with Clawd flipping you off: it raises its right arm into a fist with the middle
-finger up and pumps it while it rages (its right hand: your left, since it faces you). Patches the limit frames inside clawd_sprites.BLOB (idempotent: the gesture
+fingers up with both hands and pumps them in turn while it rages. Patches the limit frames inside clawd_sprites.BLOB (idempotent: the gesture
 area is cleared and redrawn on every run).
 
     .venv/Scripts/python.exe tools/limit_flipoff.py [--preview out.png] [--write]
@@ -24,55 +24,69 @@ def load():
     return src, blob, json.loads(zlib.decompress(base64.b64decode(blob)).decode("utf-8"))
 
 
-def body_left(f):
-    """Left edge of the body (row 12 has no arms); the frames shake, so it moves."""
+def body_span(f):
+    """(left, right) of the body in row 12 (no arms there): the longest solid run ("!" marks are single cells)."""
     row = f[12 * 20:13 * 20]
-    best, start = (0, 0), None   # the longest solid run is the body ("!" marks are single cells)
+    best, start = (0, 0, 0), None
     for x in range(21):
         solid = x < 20 and row[x] in (CALM, BODY)
         if solid and start is None:
             start = x
         elif not solid and start is not None:
-            best = max(best, (x - start, -start))
+            best = max(best, (x - start, -start, x - 1))
             start = None
-    return -best[1]
+    return -best[1], best[2]
 
 
-def gesture(f, stage, dy=0):
-    """Clawd's right hand (your left: it faces you). stage 1: arm half up with a fist; stage 2: arm up, middle
-    finger up. dy shifts it down (the pump)."""
-    f = list(f)
-    lb = body_left(f)
-    col = BODY
-    # clear that side above the hips (arm stub, hand, the "!" marks there); the other side keeps its marks
-    for y in range(0, 11):
-        for x in range(0, lb):
+def shift(f, dx):
+    """The frame moved dx columns (the original frames shake left and right; both raised arms need it centred)."""
+    out = [BG] * 400
+    for y in range(20):
+        for x in range(20):
+            nx = x + dx
+            if 0 <= nx < 20:
+                out[y * 20 + nx] = f[y * 20 + x]
+    return out
+
+
+def gesture(f, stage, dys=(0, 0), left=5):
+    """Both hands up. The body is moved so its left edge is at `left` (5 or 4: a 1-pixel wobble instead of the
+    original shake), which leaves room for an arm, a 1-pixel gap and a 3-wide fist on each side. stage 1: both arms
+    half up with fists; stage 2: arms up, middle fingers up. dys = (its right hand, its left hand) pump offsets."""
+    lb, rb = body_span(f)
+    f = shift(f, left - lb)
+    lb, rb = body_span(f)
+    for y in range(0, 11):                       # clear above the hips on both sides (arm stubs, "!" marks)
+        for x in list(range(0, lb)) + list(range(rb + 1, 20)):
             f[y * 20 + x] = BG
 
-    def put(x, y, v=col):
+    def put(x, y, v=BODY):
         if 0 <= x < 20 and 0 <= y < 20:
             f[y * 20 + x] = v
-    # a 1-pixel gap between the raised arm and the body, so the fist reads as a hand, not a horn
-    put(lb - 1, 8); put(lb - 2, 8)                         # shoulder + elbow
-    if stage == 1:
-        for y in (6, 7): put(lb - 3, y)                    # forearm, half up
-        for y in (4, 5):
-            for x in range(lb - 4, lb - 1): put(x, y)      # fist
-        put(lb - 4, 4, DARK); put(lb - 2, 4, DARK)
-        return f
-    for y in range(6 + dy, 9): put(lb - 3, y)                           # forearm
-    for y in range(3 + dy, 6 + dy):
-        for x in range(lb - 4, lb - 1): put(x, y)                       # fist, 3 wide
-    put(lb - 4, 3 + dy, DARK); put(lb - 2, 3 + dy, DARK)                # folded fingers either side
-    for y in range(0 + dy, 3 + dy): put(lb - 3, y)                      # the middle finger
+
+    for side, dy in ((-1, dys[0]), (1, dys[1])):          # -1: your left (its right hand), +1: your right
+        edge = lb if side < 0 else rb
+        o = lambda n: edge + side * n                     # n columns out from the body
+        put(o(1), 8); put(o(2), 8)                        # shoulder + elbow (1-pixel gap above to the fist)
+        if stage == 1:
+            for y in (6, 7): put(o(3), y)
+            for y in (4, 5):
+                for n in (2, 3, 4): put(o(n), y)
+            put(o(2), 4, DARK); put(o(4), 4, DARK)
+            continue
+        for y in range(6 + dy, 9): put(o(3), y)                         # forearm
+        for y in range(3 + dy, 6 + dy):
+            for n in (2, 3, 4): put(o(n), y)                            # fist, 3 wide
+        put(o(2), 3 + dy, DARK); put(o(4), 3 + dy, DARK)                # folded fingers either side
+        for y in range(0 + dy, 3 + dy): put(o(3), y)                    # the middle finger
     return f
 
 
 def build(orig):
-    """8 frames: calm, angry, arm coming up, then the finger pumping (up, down, up, down, up)."""
+    """8 frames: calm, angry, both arms coming up, then both middle fingers pumping in turn."""
     out = [orig[0], orig[1], gesture(orig[2], 1)]
     for i, k in enumerate(range(3, 8)):
-        out.append(gesture(orig[k], 2, dy=i % 2))
+        out.append(gesture(orig[k], 2, dys=(i % 2, 1 - i % 2), left=5 - i % 2))
     return out
 
 
